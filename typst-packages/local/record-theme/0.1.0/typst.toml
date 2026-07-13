@@ -1,0 +1,6 @@
+[package]
+name = "record-theme"
+version = "0.1.0"
+entrypoint = "lib.typ"
+authors = ["CDR Team"]
+description = "Company-level record template theme for 广电计量"

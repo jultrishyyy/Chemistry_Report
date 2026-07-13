@@ -1,0 +1,92 @@
+import express from 'express';
+import cors from 'cors';
+import { resolve, dirname } from 'path';
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { printConfig } from '../../config/index.js';
+import { pool } from './db.js';
+import { log } from './logger.js';
+import { requestLogger, apiNotFound, errorHandler } from './middleware.js';
+import typstRouter from './routes/typst.js';
+import recordTemplatesRouter from './routes/record-templates.js';
+import recordDataRouter from './routes/record-data.js';
+import reportTemplatesRouter from './routes/report-templates.js';
+import mappingsRouter from './routes/mappings.js';
+import reportsRouter from './routes/reports.js';
+import proposalsRouter from './routes/proposals.js';
+import excelImportRouter from './routes/excel-import.js';
+import equipmentRouter from './routes/equipment.js';
+import imagesRouter from './routes/images.js';
+import workOrdersRouter from './routes/work-orders.js';
+import auditLogRouter from './routes/audit-log.js';
+import reworkRouter from './routes/rework.js';
+import externalRouter from './routes/external.js';
+import authRouter from './routes/auth.js';
+import { seedBaseTemplates } from './services/seed-base-templates.js';
+import { seedReportTemplates } from './services/seed-report-templates.js';
+import { seedWorkOrders } from './services/seed-work-orders.js';
+import { seedMockBySample } from './services/seed-mock-by-sample.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+const PORT = Number(process.env.PORT || 3001);
+const HOST = process.env.HOST || '0.0.0.0';
+
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+app.use(requestLogger);  // 请求日志（结构化，健康检查除外）
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.use('/api/auth', authRouter);  // 登录(5.1 接缝) + 本地 RBAC(用户/角色/权限)
+app.use('/api/typst', typstRouter);
+app.use('/api/record-templates', recordTemplatesRouter);
+app.use('/api/record-data', recordDataRouter);
+app.use('/api/report-templates', reportTemplatesRouter);
+app.use('/api/mappings', mappingsRouter);
+app.use('/api/reports', reportsRouter);
+app.use('/api/proposals', proposalsRouter);
+app.use('/api/excel-import', excelImportRouter);
+app.use('/api/equipment', equipmentRouter);
+app.use('/api/images', imagesRouter);
+app.use('/api/work-orders', workOrdersRouter);
+app.use('/api/audit-log', auditLogRouter);
+app.use('/api', reworkRouter);  // /api/rework* + /api/orders/:order_no/timeline
+app.use('/api/external', externalRouter);  // 接收外部推送：1.1 委托单 / 1.2·1.3 报告（P2）
+
+// 未匹配的 /api/* → 统一 JSON 404（放在所有 /api 路由之后、静态托管之前）
+app.use(apiNotFound);
+
+// Serve frontend build (production mode)
+const clientDist = resolve(__dirname, '../../client/dist');
+if (existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get(/^\/(?!api).*/, (_req, res) => {
+    res.sendFile(resolve(clientDist, 'index.html'));
+  });
+  log.info('[static] serving frontend', { dir: clientDist });
+} else {
+  log.warn('[static] frontend not built yet (run: cd client && pnpm build); skipping static serve');
+}
+
+// 兜底错误处理：必须注册在最后
+app.use(errorHandler);
+
+printConfig();
+
+// 启动 seed 复用共享连接池（不再单建临时池）；共享池是长生命周期单例，跑完不 end()
+Promise.all([
+  // 报告模板 seed 必须紧跟原始记录之后（project 按原始记录 name 反查关联 id），故串在同一条链上
+  seedBaseTemplates(pool)
+    .then(() => seedReportTemplates(pool))
+    .catch(err => console.error('[seed] templates failed:', err)),
+  seedWorkOrders(pool).catch(err => console.error('[seed] work orders failed:', err)),
+])
+  // 演示用「按样品出」订单：需模板已 seed（匹配项目模板）+ 源单存在，故放在最后跑
+  .then(() => seedMockBySample(pool).catch(err => console.error('[seed] mock by-sample failed:', err)));
+
+app.listen(PORT, HOST, () => {
+  log.info('server running', { url: `http://${HOST}:${PORT}` });
+});

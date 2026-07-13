@@ -1,0 +1,5 @@
+{
+  "binary": "typst",
+  "font_paths": ["./samples/fonts", "~/Library/Fonts"],
+  "local_packages_root": "./typst-packages/local"
+}

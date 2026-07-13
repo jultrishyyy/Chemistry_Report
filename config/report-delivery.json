@@ -1,0 +1,11 @@
+{
+  "soap_endpoint": "http://172.18.0.97:8003/lab/chemistry",
+  "target_namespace": "http://tempuri.org/",
+  "method": "PushReportFile",
+  "param_id_name": "sysNumber",
+  "param_file_name": "file",
+  "param_jobno_name": "jobNo",
+  "soap_action": "http://tempuri.org/IChemistryService/PushReportFile",
+  "soap_version": "1.1",
+  "timeout_ms": 30000
+}

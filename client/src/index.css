@@ -1,0 +1,91 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ===== FieldEditor(模板编辑器)— 统一中性视觉 + hover 降噪 ===== */
+
+/* 字段行:白底细边卡,整行可点选;选中高亮,操作按钮 hover 才浮现 */
+.fe-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  background: #fff;
+  border: 1px solid #eef0f4;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.fe-row:hover { background: #f8fafd; border-color: #d8e3f3; }
+.fe-row.fe-selected { background: #eef5ff; border-color: #9cc2f0; }
+.fe-row .fe-row-actions { display: flex; gap: 0; opacity: 0; transition: opacity 0.12s; }
+.fe-row:hover .fe-row-actions,
+.fe-row.fe-selected .fe-row-actions { opacity: 1; }
+
+/* 拖拽把手 */
+.fe-drag { cursor: grab; color: #c2c9d6; }
+.fe-drag:hover { color: #1366d9; }
+
+/* 字段类别小图标芯片 + 灰色 meta 文本 */
+.fe-cat-chip {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: #f0f3f8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+.fe-meta { font-size: 12px; color: #98a1b3; }
+
+/* 分组卡:白底统一描边;上移/下移/删除等 hover 才浮现 */
+.fe-group-card .fe-hover-actions { opacity: 0; transition: opacity 0.12s; }
+.fe-group-card:hover .fe-hover-actions { opacity: 1; }
+
+/* 空分组提示 */
+.fe-empty-hint {
+  padding: 14px 12px;
+  border: 1px dashed #d8dee9;
+  border-radius: 6px;
+  color: #98a1b3;
+  font-size: 12px;
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+/* 大纲导航栏 */
+.fe-outline {
+  flex: none;
+  overflow-y: auto;
+  border-right: 1px solid #eef0f4;
+  background: #fbfcfe;
+  padding-bottom: 12px;
+}
+.fe-outline-item {
+  padding: 3px 10px;
+  margin: 0 4px;
+  font-size: 12px;
+  color: #5a6478;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fe-outline-item:hover { background: #eef3fb; color: #1366d9; }
+.fe-outline-item.fe-sel { background: #e3eefc; color: #1366d9; }
+.fe-outline-group { font-weight: 600; color: #2a3550; margin-top: 6px; }
+/* 嵌套分区：大纲子分区条目（弱化一档）+ 主列子分区缩进区（左侧引导线） */
+.fe-outline-group-nested { font-weight: 500; color: #5a6478; margin-top: 2px; }
+.fe-subgroup-area { border-left: 2px solid #eef0f4; padding-left: 10px; }
+
+.inst-outline-item:hover { background: #eef4ff; color: #1366d9 !important; }

@@ -1,0 +1,32 @@
+node_modules/
+dist/
+*.local.json
+.env
+.DS_Store
+
+# 归档 / 补丁 / 备份包（之前散落根目录的 demo_v1-*.tar.gz 即此类，勿入库、防再堆积）
+*.tar.gz
+*.tgz
+*.zip
+*.patch
+*.orig
+*.rej
+
+# 运行时产物：nohup 日志 / pid / 编辑器临时文件
+*.log
+nohup.out
+*.pid
+*.swp
+*~
+
+samples/converted/
+samples/poc-screenshots/
+*.pdf
+server/uploads/
+# 加装的字体文件（可能为专有字体，如微软仿宋/楷体）——本地用，不入库；保留 fonts/README.md
+fonts/*.ttf
+fonts/*.ttc
+fonts/*.otf
+fonts/*.TTF
+fonts/*.TTC
+fonts/*.OTF

@@ -1,0 +1,4 @@
+{
+  "_说明": "复制本文件为 storage.local.json(本文件名带 .example 不生效)。留空或不配本文件=默认用【项目目录的上一级】/data(已在代码目录之外)。仅当你想换到别处(如数据盘 /data 或 /mnt/data/cdr)时才填。storage.local.json 已被 .gitignore 忽略,整包覆盖代码时也应排除。改完需重启服务生效。目录结构: <根>/<订单号>/<样品名_测试项目名>/<字段名|附件名>。",
+  "uploads_dir": "/data"
+}

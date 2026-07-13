@@ -1,0 +1,6 @@
+[package]
+name = "report-theme"
+version = "0.1.0"
+entrypoint = "lib.typ"
+authors = ["CDR Team"]
+description = "Company-level report template theme for 广电计量"

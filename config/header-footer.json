@@ -1,0 +1,39 @@
+{
+  "_说明": "报告页眉页脚【默认配置·单一事实来源】。① 真实报告：服务端 buildHeaderFooterConfig 读 settings（运行时，重启生效）。② 编辑器预览：client/src/pages/ReportTemplate/preview-hf.ts 直接 import 本文件派生 STANDARD_HF_LAYOUT/PREVIEW_HF_VALUES（构建时，改完需 pnpm build）。改这里 = 同时改预览与最终报告，二者天然同步。随代码部署到服务器（不像数据库数据会丢）。",
+  "_字段说明": {
+    "apply_to": "这套默认应用到哪些报告模板。页眉页脚是整份文档级的，首页(cover)与项目(project)页共用同一套；cover=false 则不套用本文件默认、回退模板/主题。",
+    "settings": "页眉页脚的版式/样式（不含任何业务数据值）。报告模板自己若配了同名键会覆盖这里。length 值用 typst 单位 pt/cm/em。",
+    "sample_meta": "【取号前】文员编辑首页/预览时用的示例数据。取号后由接口1.2(ReportNumber=报告编号 / CheckCode=校验码)真实回填，不读本文件。报告编号/校验码示例由订单号自动派生，便于肉眼核对联动。"
+  },
+  "apply_to": { "cover": true, "project": true },
+  "settings": {
+    "_键说明": "header_rule/footer_rule=是否画页眉/页脚那条分割线（false=隐藏，对齐参考样张；传服务器若不配会回退主题默认 true 而冒出分割线）。title_*=页眉大标题。*_margin/page_height=页面与页眉页脚区几何。*_gap/*_leading=各处间距/行距（与正文的距离）。",
+    "enabled": true,
+    "font": "FangSong_GB2312",
+    "title": "检测报告",
+    "title_size": "24pt",
+    "title_size_first": "24pt",
+    "title_tracking": "0.4em",
+    "title_dx": "-0.52cm",
+    "title_gap": "2pt",
+    "title_align": "center",
+    "header_rule": false,
+    "footer_rule": false,
+    "show_page_number": true,
+    "page_height": "29cm",
+    "top_margin": "5.7cm",
+    "bottom_margin": "3.7cm",
+    "header_gap": "10pt",
+    "footer_leading": "0.43em"
+  },
+  "sample_meta": {
+    "company_name": "广电计量检测（集团）股份有限公司 化学检测中心",
+    "company_address": "广州市黄埔区开创大道无线电大厦",
+    "phone": "020-12345678",
+    "fax": "020-00000000",
+    "website": "www.grgtest.com",
+    "qualification_note": "CMA  CNAS  资质认定证书编号 0000000000000",
+    "report_note": "本报告仅对来样负责。",
+    "issue_date": "2026-06-08"
+  }
+}

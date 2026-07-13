@@ -1,0 +1,26 @@
+{
+  "name": "cdr-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:server": "cd server && pnpm dev",
+    "dev:client": "cd client && pnpm dev",
+    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
+    "build": "cd client && pnpm build",
+    "serve": "cd server && PORT=${PORT:-5173} pnpm start",
+    "migrate": "tsx db/migrate.ts",
+    "convert-xls": "bash scripts/convert-xls.sh"
+  },
+  "packageManager": "pnpm@10.25.0",
+  "dependencies": {
+    "concurrently": "^9.2.1",
+    "exceljs": "^4.4.0",
+    "pg": "^8.20.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0"
+  }
+}
