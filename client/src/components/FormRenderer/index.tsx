@@ -165,6 +165,19 @@ export default function FormRenderer({ template, data, onChange, recordId, excel
         for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) { if (dr || dc) covered.add(`${ri + dr},${ci + dc}`); }
       }
       const setCell = (k: string, v: string) => handleChange(field.code, { ...gridVal, [k]: v });
+      // 录入键盘导航：Enter 下移，↑↓←→ 跳格（按字段 code + 行列定位输入框）
+      const gridFocus = (tr: number, tc: number) => {
+        const r = Math.max(0, Math.min(rows.length - 1, tr)), c = Math.max(0, Math.min(cols.length - 1, tc));
+        const el = document.querySelector(`input[data-gp="${field.code}|${r}-${c}"]`) as HTMLInputElement | null;
+        if (el) { el.focus(); el.select?.(); }
+      };
+      const gridKey = (e: React.KeyboardEvent<HTMLInputElement>, ri: number, ci: number) => {
+        const kk = e.key;
+        if (kk === 'Enter' || kk === 'ArrowDown') { e.preventDefault(); gridFocus(ri + 1, ci); }
+        else if (kk === 'ArrowUp') { e.preventDefault(); gridFocus(ri - 1, ci); }
+        else if (kk === 'ArrowLeft') { e.preventDefault(); gridFocus(ri, ci - 1); }
+        else if (kk === 'ArrowRight') { e.preventDefault(); gridFocus(ri, ci + 1); }
+      };
       return (
         <div key={field.id} style={{ margin: '6px 0' }}>
           {!field.hide_label && <label style={labelStyle}>{field.label}：</label>}
@@ -189,7 +202,7 @@ export default function FormRenderer({ template, data, onChange, recordId, excel
                               onChange={(v) => setCell(k, (v as string) || '')} />
                           ) : isInput ? (
                             <span style={{ display: 'inline-flex', alignItems: 'center', width: '100%' }}>
-                              <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
+                              <Input size="small" variant="borderless" data-gp={`${field.code}|${ri}-${ci}`} onKeyDown={(e) => gridKey(e, ri, ci)} value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
                               {ft.cell_unit_options?.[k]?.length
                                 ? <Select size="small" variant="borderless" style={{ minWidth: 50 }} value={gridVal[`${k}::__unit__`] || undefined} placeholder="单位"
                                     options={ft.cell_unit_options[k].map((u: string) => ({ value: u, label: u }))} onChange={(v) => setCell(`${k}::__unit__`, (v as string) || '')} />

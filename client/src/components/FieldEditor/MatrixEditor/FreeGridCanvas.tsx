@@ -61,8 +61,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
     if (e.shiftKey && sel) setSel({ ...sel, r1: ri, c1: ci });
     else { setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); setDragging(true); }
   };
-  const onCellEnter = (ri: number, ci: number) => {
-    if (dragging) setSel(s => (s ? { ...s, r1: ri, c1: ci } : { r0: ri, c0: ci, r1: ri, c1: ci }));
+  const onCellEnter = (ri: number, ci: number, e: React.MouseEvent) => {
+    // 只有【按住左键】拖动(e.buttons===1)才扩选；纯滑过不选（修「滑动自动选中很多格」）
+    if (e.buttons === 1) setSel(s => (s ? { ...s, r1: ri, c1: ci } : { r0: ri, c0: ci, r1: ri, c1: ci }));
   };
 
   // 被合并主格 span 覆盖的格（行列序号），与 renderFreeGridTypst 同口径
@@ -201,18 +202,41 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   const tableRef = useRef<HTMLTableElement>(null);
   const focusCell = (tr: number, tc: number) => {
     const r = Math.max(0, Math.min(rows.length - 1, tr)), c = Math.max(0, Math.min(cols.length - 1, tc));
+    setSel({ r0: r, c0: c, r1: r, c1: c });   // 选中框跟随移动
     const el = tableRef.current?.querySelector(`input[data-gp="${r}-${c}"]`) as HTMLInputElement | null;
     if (el) { el.focus(); el.select?.(); }
   };
   const onCellKey = (e: React.KeyboardEvent<HTMLInputElement>, ri: number, ci: number) => {
-    const inp = e.currentTarget;
-    const atStart = (inp.selectionStart ?? 0) === 0;
-    const atEnd = (inp.selectionStart ?? 0) === (inp.value?.length ?? 0);
-    if (e.key === 'Enter') { e.preventDefault(); focusCell(ri + 1, ci); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); focusCell(ri - 1, ci); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); focusCell(ri + 1, ci); }
-    else if (e.key === 'ArrowLeft' && atStart) { e.preventDefault(); focusCell(ri, ci - 1); }
-    else if (e.key === 'ArrowRight' && atEnd) { e.preventDefault(); focusCell(ri, ci + 1); }
+    const k = e.key;
+    // Enter 确认并下移；上下左右四向均可跳格（编辑短值场景下不保留光标左右移动）
+    if (k === 'Enter' || k === 'ArrowDown') { e.preventDefault(); focusCell(ri + 1, ci); }
+    else if (k === 'ArrowUp') { e.preventDefault(); focusCell(ri - 1, ci); }
+    else if (k === 'ArrowLeft') { e.preventDefault(); focusCell(ri, ci - 1); }
+    else if (k === 'ArrowRight') { e.preventDefault(); focusCell(ri, ci + 1); }
+  };
+
+  // 画布拖拽调列宽/行高（首行右缘拖=列宽，首列下缘拖=行高；存 `${pt}pt`）
+  const resizeRef = useRef<null | { type: 'col' | 'row'; id: string; start: number; startSize: number }>(null);
+  const gridRef = useRef({ cols, rows, update });
+  gridRef.current = { cols, rows, update };
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const rz = resizeRef.current; if (!rz) return;
+      const { cols, rows, update } = gridRef.current;
+      const delta = (rz.type === 'col' ? e.clientX : e.clientY) - rz.start;
+      const pt = Math.max(16, Math.round((rz.startSize + delta) * 0.75));
+      if (rz.type === 'col') update({ columns: cols.map(c => c.id === rz.id ? { ...c, width: `${pt}pt` } : c) });
+      else update({ rows: rows.map(r => r.id === rz.id ? { ...r, height: `${pt}pt` } : r) });
+    };
+    const up = () => { resizeRef.current = null; };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+  }, []);
+  const startResize = (type: 'col' | 'row', id: string, e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    const td = (e.currentTarget as HTMLElement).parentElement as HTMLElement;
+    resizeRef.current = { type, id, start: type === 'col' ? e.clientX : e.clientY, startSize: type === 'col' ? td.offsetWidth : td.offsetHeight };
   };
 
   // ─── F1 报告侧：每格绑定原始记录 ────────────────────────────────
@@ -343,6 +367,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           <div style={{ flex: 1 }}><div style={lab}>行高</div>
             <InputNumber size="small" style={{ width: '100%' }} min={0} step={2} placeholder="自动" value={curH} addonAfter="pt" onChange={(v) => setRowHeightFor(keys, v ? `${v}pt` : '')} /></div>
         </div>
+        <div style={{ textAlign: 'right', marginTop: 2 }}>
+          <Button size="small" type="primary" onClick={() => setCardOpen(false)}>完成</Button>
+        </div>
       </div>
     );
   };
@@ -441,7 +468,7 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
                       style={{ ...td, background: bg, boxShadow: inSel ? 'inset 0 0 0 2px #1677ff' : isSrc ? 'inset 0 0 0 2px #eb2f96' : undefined, cursor: 'cell', ...(inBand ? { borderLeft: '3px solid #13c2c2' } : {}) }}
                       onMouseDown={(e) => onCellDown(ri, ci, e)}
-                      onMouseEnter={() => onCellEnter(ri, ci)}
+                      onMouseEnter={(e) => onCellEnter(ri, ci, e)}
                       onDoubleClick={() => { setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); initUnitMode(keyAt(ri, ci)); setCardOpen(true); }}>
                       {hasFx ? (
                         <div style={{ fontSize: 11, padding: '4px 6px', color: '#722ed1', fontWeight: isHeader ? 700 : 400 }} title="公式格">ƒ {FX_LABELS[(hasFx as any).type] || '公式'}</div>
@@ -462,6 +489,8 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                           style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#9cc2ff' : undefined }} />
                       )}
                       {hasCellSettings(k) && <span style={{ position: 'absolute', top: 0, right: 2, fontSize: 9, color: '#722ed1', lineHeight: 1 }} title="有单元格设置（单位/选项/数字格式）">⚙</span>}
+                      {ri === 0 && <div onMouseDown={(e) => startResize('col', c.id, e)} title="拖动调列宽" style={{ position: 'absolute', top: 0, right: -3, width: 6, height: '100%', cursor: 'col-resize', zIndex: 3 }} />}
+                      {ci === 0 && <div onMouseDown={(e) => startResize('row', r.id, e)} title="拖动调行高" style={{ position: 'absolute', left: 0, bottom: -3, height: 6, width: '100%', cursor: 'row-resize', zIndex: 3 }} />}
                     </td>
                   );
                 })}
