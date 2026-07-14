@@ -518,6 +518,8 @@ export interface FieldDefinition {
     header_cells?: Record<string, true>;
     /** F0 free_grid：标记为「录入格」的格（数据录入时可填）。值不写模板，存进 record_data.raw_data[字段code] 的 `${rowId}::${colId}` 键。未标记的格＝固定文字（模板 cells）。 */
     input_cells?: Record<string, true>;
+    /** F1 free_grid（报告侧）：每格绑定原始记录/接口取值。键 = `${rowId}::${colId}`。渲染时 `resolveBinding(ctx)` 优先于录入值/固定文字。 */
+    cell_bindings?: Record<string, CellBinding>;
   };
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {

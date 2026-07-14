@@ -35,7 +35,7 @@ export const FIELD_CATEGORIES: FieldCategoryEntry[] = [
   { key: 'choice', label: '选择',       icon: '●',  hint: '单选 / 多选 / 可自定义；每个选项还能挂子字段' },
   { key: 'image',  label: '图片',       icon: '📷', editors: ['record', 'report-cover'], hint: '上传图片（原始记录样品照片 / 首页录入的样品照片）' },
   { key: 'matrix', label: '数据表格',   icon: '▦',  editors: ['record'], hint: '样品×参数 的试验数据表，可配平均/最大等汇总行' },
-  { key: 'free_grid', label: '自由表格', icon: '⊞',  editors: ['record'], hint: '像 Excel 一样的自由网格：自定义行列、任意合并单元格（含表头）；每格可标为「表头」或「录入格」，录入时在录入格填值' },
+  { key: 'free_grid', label: '自由表格', icon: '⊞',  editors: ['record', 'report-project'], hint: '像 Excel 一样的自由网格：自定义行列、任意合并单元格（含表头）。记录用：标「录入格」录入时填值；报告用：每格可「绑定原始记录」自动取值' },
   { key: 'device', label: '测试设备',   icon: '🔧', editors: ['record'], hint: '从设备库按管理编号查询；生成报告时自动展开为设备表' },
   { key: 'spacer', label: '间隔（空白）', icon: '↕',  hint: '纯版式的空白块，在字段/分区之间留白（封面排版常用）；可调高度，不产生数据' },
   { key: 'report_conclusion', label: '报告·结论汇总表', icon: '📋', editors: ['report-cover'],   hint: '【报告首页用】检测结论汇总表，行 = 项目，自动展开' },

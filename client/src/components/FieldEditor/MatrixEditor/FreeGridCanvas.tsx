@@ -9,7 +9,8 @@
 import { useState, useEffect } from 'react';
 import { Button, Input, InputNumber, Tooltip, message } from 'antd';
 import { PlusOutlined, MergeCellsOutlined, SplitCellsOutlined } from '@ant-design/icons';
-import type { FieldDefinition } from '../../../../../shared/types';
+import type { FieldDefinition, RecordTemplate, CellBinding } from '../../../../../shared/types';
+import BindingPickerModal, { BindingSummary } from '../../ReportEditor/BindingPickerModal';
 
 type FT = NonNullable<FieldDefinition['free_table']>;
 
@@ -19,9 +20,11 @@ const DEFAULT_FT: FT = {
   cells: {}, header_cells: {}, input_cells: {},
 };
 
-export default function FreeGridCanvas({ field, onChange }: {
+export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   field: FieldDefinition;
   onChange: (patch: Partial<FieldDefinition>) => void;
+  /** 报告侧编辑时传入关联的原始记录模板 → 每格可「绑定原始记录」自动取值。记录侧不传＝无绑定入口。 */
+  linkedRecord?: RecordTemplate | null;
 }) {
   const ft: FT = field.free_table || DEFAULT_FT;
   const cols = ft.columns || [];
@@ -30,6 +33,7 @@ export default function FreeGridCanvas({ field, onChange }: {
   const spans = ft.spans || {};
   const headerCells = ft.header_cells || {};
   const inputCells = ft.input_cells || {};
+  const cellBindings = ft.cell_bindings || {};
   const update = (patch: Partial<FT>) => onChange({ free_table: { ...ft, ...patch } });
 
   const keyAt = (ri: number, ci: number) => `${rows[ri].id}::${cols[ci].id}`;
@@ -166,6 +170,13 @@ export default function FreeGridCanvas({ field, onChange }: {
   const setCellText = (ri: number, ci: number, text: string) =>
     update({ cells: { ...cells, [keyAt(ri, ci)]: text } });
 
+  // ─── F1 报告侧：每格绑定原始记录 ────────────────────────────────
+  const [bindOpen, setBindOpen] = useState(false);
+  const [bindKey, setBindKey] = useState<string | null>(null);
+  const setCellBinding = (k: string, b: CellBinding) => update({ cell_bindings: { ...cellBindings, [k]: b } });
+  const clearCellBinding = (k: string) => { const n = { ...cellBindings }; delete n[k]; update({ cell_bindings: n }); };
+  const selCellKey = (range && selCount === 1) ? keyAt(range.minR, range.minC) : null;
+
   // ─── 渲染 ────────────────────────────────────────────────────────
   const td: React.CSSProperties = { border: '1px solid #d9d9d9', padding: 0, minWidth: 64, height: 34, verticalAlign: 'middle' };
   return (
@@ -188,6 +199,13 @@ export default function FreeGridCanvas({ field, onChange }: {
         <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
         <Tooltip title="把所选格标为/取消表头（出片加粗，跨页重复）"><Button size="small" disabled={!range} onClick={() => toggleMark('header_cells')}>表头</Button></Tooltip>
         <Tooltip title="把所选格标为/取消录入格（录入时可填值）"><Button size="small" disabled={!range} onClick={() => toggleMark('input_cells')}>录入格</Button></Tooltip>
+        {linkedRecord && <>
+          <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
+          <Tooltip title="给所选单元格绑定原始记录的字段/单元格（报告生成时自动取值）">
+            <Button size="small" type="primary" ghost disabled={!selCellKey} onClick={() => { if (selCellKey) { setBindKey(selCellKey); setBindOpen(true); } }}>绑定原始记录</Button>
+          </Tooltip>
+          <Button size="small" disabled={!selCellKey || !cellBindings[selCellKey]} onClick={() => { if (selCellKey) clearCellBinding(selCellKey); }}>清除绑定</Button>
+        </>}
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', userSelect: dragging ? 'none' : undefined }}>
@@ -202,22 +220,29 @@ export default function FreeGridCanvas({ field, onChange }: {
                   const rspan = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
                   const isHeader = !!headerCells[k];
                   const isInput = !!inputCells[k];
+                  const binding = cellBindings[k];
                   const inSel = !!range && ri >= range.minR && ri <= range.maxR && ci >= range.minC && ci <= range.maxC;
-                  const bg = isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
+                  const bg = binding ? '#fffbe6' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
                   return (
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
                       style={{ ...td, background: bg, outline: inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
                       onMouseDown={(e) => onCellDown(ri, ci, e)}
                       onMouseEnter={() => onCellEnter(ri, ci)}>
-                      <Input
-                        size="small" bordered={false} variant="borderless"
-                        value={cells[k] ?? ''}
-                        placeholder={isInput ? '录入格' : ''}
-                        onChange={(e) => setCellText(ri, ci, e.target.value)}
-                        style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#69b1ff' : undefined }} />
-                      {(isHeader || isInput) && (
-                        <div style={{ fontSize: 8, lineHeight: 1, color: isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
-                          {isHeader ? '表头' : ''}{isHeader && isInput ? '·' : ''}{isInput ? '录入' : ''}
+                      {binding ? (
+                        <div style={{ fontSize: 11, padding: '2px 4px', minHeight: 20, fontWeight: isHeader ? 700 : 400 }}>
+                          <BindingSummary value={binding} linkedRecord={linkedRecord || null} />
+                        </div>
+                      ) : (
+                        <Input
+                          size="small" bordered={false} variant="borderless"
+                          value={cells[k] ?? ''}
+                          placeholder={isInput ? '录入格' : ''}
+                          onChange={(e) => setCellText(ri, ci, e.target.value)}
+                          style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#69b1ff' : undefined }} />
+                      )}
+                      {(isHeader || isInput || binding) && (
+                        <div style={{ fontSize: 8, lineHeight: 1, color: binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
+                          {isHeader ? '表头' : ''}{isHeader && (isInput || binding) ? '·' : ''}{binding ? '绑定' : isInput ? '录入' : ''}
                         </div>
                       )}
                     </td>
@@ -229,8 +254,19 @@ export default function FreeGridCanvas({ field, onChange }: {
         </table>
       </div>
       <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 6 }}>
-        点格子选中并直接输入固定文字；<b>在格上按住鼠标拖动</b>即可框选多个格（松开结束；也可按住 Shift 点另一格扩展）→ 合并 / 标记表头 / 标记录入格。<b>录入格</b>（蓝底）在数据录入时由工程师填值。
+        点格子选中并直接输入固定文字；<b>在格上按住鼠标拖动</b>即可框选多个格（松开结束；也可按住 Shift 点另一格扩展）→ 合并 / 标记表头 / 标记录入格。<b>录入格</b>（蓝底）在数据录入时由工程师填值。{linkedRecord && <>选中<b>单个格</b>可「<b>绑定原始记录</b>」（黄底）报告生成时自动取值。</>}
       </div>
+      {linkedRecord && bindKey && (
+        <BindingPickerModal
+          open={bindOpen}
+          value={cellBindings[bindKey] || { source: 'literal', text: cells[bindKey] || '' }}
+          linkedRecord={linkedRecord}
+          allowedSources={['literal', 'record_field', 'record_cell', 'record_summary', 'record_header']}
+          title="为单元格绑定原始记录数据源"
+          onChange={(b) => setCellBinding(bindKey, b)}
+          onClose={() => setBindOpen(false)}
+        />
+      )}
     </div>
   );
 }

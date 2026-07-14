@@ -1969,6 +1969,7 @@ export function renderFreeGridTypst(
   field: FieldDefinition,
   ft: NonNullable<FieldDefinition['free_table']>,
   dataOverride?: Record<string, any>,
+  ctx?: ReportRenderCtx,
 ): string {
   const cols = ft.columns || [];
   const rows = ft.rows || [];
@@ -1996,8 +1997,12 @@ export function renderFreeGridTypst(
     cols.forEach((c, ci) => {
       if (covered.has(`${ri},${ci}`)) return;   // 被合并主格盖住：不出格
       const key = `${r.id}::${c.id}`;
+      // 取值优先级：报告侧绑定(resolveBinding) > 录入值(dataOverride) > 模板固定文字(cells)
+      const bindVal = (ctx && ft.cell_bindings?.[key]) ? resolveBinding(ft.cell_bindings[key], ctx) : undefined;
       const ov = dataOverride ? dataOverride[key] : undefined;
-      const raw = (ov != null && ov !== '') ? ov : (ft.cells?.[key] ?? '');
+      const raw = (bindVal != null && bindVal !== '') ? bindVal
+        : (ov != null && ov !== '') ? ov
+        : (ft.cells?.[key] ?? '');
       const isHeader = !!ft.header_cells?.[key];
       const sp = ft.spans?.[key];
       const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
@@ -2939,6 +2944,9 @@ export function injectReportFieldsIntoTypst(source: string, template: RecordTemp
         out = out.replace(re('REPORT_PHOTO_TABLE'), renderPhotoTableTypst(f, ctx));
       } else if (f.type === 'report_sample_table') {
         out = out.replace(re('REPORT_SAMPLE_TABLE'), renderSampleTableTypst(f, ctx));
+      } else if (f.type === 'free_grid') {
+        // 统一网格（报告侧）：按 ctx 解析每格绑定（cell_bindings）→ 从原始记录取值
+        out = out.replace(re('FREE_GRID'), renderFreeGridTypst(f, f.free_table || { columns: [], rows: [], cells: {} }, undefined, ctx));
       } else if (f.rich) {
         // 富文本字段：把锚点替换成转换后的内容块（值来自 binding，多为 literal 手填）
         const richRe = new RegExp(`// __RICH__:${escapeReg(f.code)}__[\\s\\S]*?// __RICH_END__:${escapeReg(f.code)}__`, 'g');
