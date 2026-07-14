@@ -182,10 +182,16 @@ export default function FormRenderer({ template, data, onChange, recordId, excel
                       const isHeader = !!headerCells[k], isInput = !!inputCells[k];
                       return (
                         <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
-                          style={{ border: '1px solid #d9d9d9', padding: isInput ? 0 : '4px 8px', minWidth: 60, textAlign: 'center', background: isHeader ? '#fafafa' : '#fff', fontWeight: isHeader ? 700 : 400 }}>
-                          {isInput
-                            ? <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
-                            : <span>{cells[k] ?? ''}</span>}
+                          style={{ border: '1px solid #d9d9d9', padding: (isInput || ft.cell_options?.[k]?.length) ? 0 : '4px 8px', minWidth: 60, textAlign: 'center', background: isHeader ? '#fafafa' : '#fff', fontWeight: isHeader ? 700 : 400 }}>
+                          {ft.cell_options?.[k]?.length ? (
+                            <Select size="small" variant="borderless" style={{ minWidth: 76, width: '100%' }} value={gridVal[k] || undefined}
+                              placeholder="选择" allowClear options={ft.cell_options[k].map((o: string) => ({ value: o, label: o }))}
+                              onChange={(v) => setCell(k, (v as string) || '')} />
+                          ) : isInput ? (
+                            <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
+                          ) : (
+                            <span>{cells[k] ?? ''}{ft.cell_units?.[k] ? `（${ft.cell_units[k]}）` : ''}</span>
+                          )}
                         </td>
                       );
                     })}

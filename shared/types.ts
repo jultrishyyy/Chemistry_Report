@@ -524,6 +524,12 @@ export interface FieldDefinition {
     sample_band?: { axis: 'row' | 'col'; matrix_code: string; ref: string };
     /** F3 free_grid：每格公式（替代统计/汇总）。键 = `${rowId}::${colId}`；`Formula.sources` 用其它格的 `${rowId}::${colId}` 键引用（渲染时 execute）。样品带展开时：带内公式的 sources 逐样品落地、带外聚合公式的 sources 展开到全部样品。 */
     cell_formulas?: Record<string, Formula>;
+    /** 每格单位（表头/数值格显示为 `值（单位）`）。键 = `${rowId}::${colId}`。 */
+    cell_units?: Record<string, string>;
+    /** 每格「选择框」：录入时该格从这些选项里选（含表头做成可选项）。键 = `${rowId}::${colId}`。 */
+    cell_options?: Record<string, string[]>;
+    /** 每格数字格式：`decimals`=保留 N 位小数；`scientific`=科学计数法（尾数 N 位小数，渲染 9.4×10¹）；`significant`=有效数字 N 位。键 = `${rowId}::${colId}`。 */
+    cell_number_fmt?: Record<string, { mode: 'decimals' | 'scientific' | 'significant'; digits: number }>;
   };
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {

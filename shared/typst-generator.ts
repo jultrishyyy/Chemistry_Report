@@ -2038,7 +2038,30 @@ function expandFreeGridBand(
     input_cells: remap(ft.input_cells),
     cell_bindings: remap(ft.cell_bindings, (b, sid, i) => concretize(b, sid, i)),
     cell_formulas: remapFormulas(ft.cell_formulas),
+    cell_units: remap(ft.cell_units),
+    cell_options: remap(ft.cell_options),
+    cell_number_fmt: remap(ft.cell_number_fmt),
   };
+}
+
+/** free_grid 单格显示：按数字格式(小数/科学计数/有效数字)格式化 + 追加单位，返回 typst content markup。 */
+function fmtFreeGridCell(raw: string, fmt: { mode: string; digits: number } | undefined, unit: string | undefined): string {
+  let inner: string;
+  const n = Number(raw);
+  if (fmt && raw !== '' && Number.isFinite(n)) {
+    if (fmt.mode === 'scientific') {
+      const [mant, exp] = n.toExponential(Math.min(20, Math.max(0, fmt.digits ?? 2))).split('e');
+      inner = `$${mant} times 10^(${parseInt(exp, 10)})$`;   // 数学模式：9.4 × 10¹
+    } else if (fmt.mode === 'significant') {
+      inner = escapeTypstMarkup(n.toPrecision(Math.min(21, Math.max(1, fmt.digits ?? 2))));
+    } else {
+      inner = escapeTypstMarkup(n.toFixed(Math.min(20, Math.max(0, fmt.digits ?? 2))));
+    }
+  } else {
+    inner = escapeTypstMarkup(String(raw));
+  }
+  if (unit && String(unit).trim()) inner += escapeTypstMarkup(`（${String(unit).trim()}）`);
+  return inner;
 }
 
 /**
@@ -2102,7 +2125,7 @@ export function renderFreeGridTypst(
       const sp = ft.spans?.[key];
       const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
       const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
-      const body = `${pendingMinH}${tableCellBold(escapeTypstMarkup(String(raw)), isHeader, tFont)}`;
+      const body = `${pendingMinH}${tableCellBold(fmtFreeGridCell(String(raw), ft.cell_number_fmt?.[key], ft.cell_units?.[key]), isHeader, tFont)}`;
       pendingMinH = '';
       cells.push((cs > 1 || rs > 1) ? `table.cell(colspan: ${cs}, rowspan: ${rs})[${body}]` : `[${body}]`);
     });
