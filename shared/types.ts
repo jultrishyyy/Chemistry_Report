@@ -520,8 +520,10 @@ export interface FieldDefinition {
     input_cells?: Record<string, true>;
     /** F1 free_grid（报告侧）：每格绑定原始记录/接口取值。键 = `${rowId}::${colId}`。渲染时 `resolveBinding(ctx)` 优先于录入值/固定文字。 */
     cell_bindings?: Record<string, CellBinding>;
-    /** F2 free_grid（报告侧）：样品带——把某一行/列按录入样品数自动展开成 N 份。`matrix_code`＝驱动样品数的原始记录矩阵；`ref`＝作模板的行/列 id。带内格子用 `record_cell_sample`/`record_sample_label`/`record_sample_index` 相对绑定，展开时按各样品落地（同 result_table 的 band）。 */
-    sample_band?: { axis: 'row' | 'col'; matrix_code: string; ref: string };
+    /** free_grid 样品带——把某一行/列按样品数自动展开成 N 份。`ref`＝作模板的行/列 id。
+     *  - 报告侧：`matrix_code`＝驱动样品数的原始记录矩阵，带内 `record_cell_sample`/`record_sample_label`/`record_sample_index` 绑定逐样品落地；
+     *  - 记录侧（`matrix_code` 缺省 = 自引用）：录入时工程师增减样品，带内格逐样品录入，值存 raw_data[code] 的 `${rowId}::${colId}::s${i}`、样品数存 `__sample_count__`。 */
+    sample_band?: { axis: 'row' | 'col'; matrix_code?: string; ref: string };
     /** F3 free_grid：每格公式（替代统计/汇总）。键 = `${rowId}::${colId}`；`Formula.sources` 用其它格的 `${rowId}::${colId}` 键引用（渲染时 execute）。样品带展开时：带内公式的 sources 逐样品落地、带外聚合公式的 sources 展开到全部样品。 */
     cell_formulas?: Record<string, Formula>;
     /** 每格单位（表头/数值格显示为 `值（单位）`）。键 = `${rowId}::${colId}`。 */

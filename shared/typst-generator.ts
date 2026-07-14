@@ -2046,6 +2046,48 @@ function expandFreeGridBand(
   };
 }
 
+/** 记录侧样品带展开：按录入样品数 N（dataOverride.__sample_count__）把带内行/列复制成 N 份，
+ *  各样品格值取自 dataOverride 的 `${rowId}::${colId}::s${i}`（落成固定文字），返回无 band 的普通网格。 */
+function expandFreeGridSelfBand(
+  ft: NonNullable<FieldDefinition['free_table']>,
+  dataOverride: Record<string, any>,
+): NonNullable<FieldDefinition['free_table']> {
+  const band = ft.sample_band;
+  if (!band || !band.ref) return ft;
+  const N = Math.max(1, Math.round(Number(dataOverride['__sample_count__']) || 1));
+  const isRow = band.axis !== 'col';
+  const cols = ft.columns || [], rows = ft.rows || [];
+  const axisArr: Array<{ id: string }> = isRow ? rows : cols;
+  const idx = axisArr.findIndex(x => x.id === band.ref);
+  if (idx < 0) return ft;
+  const bandId = axisArr[idx].id;
+  const touches = (rid: string, cid: string) => isRow ? rid === bandId : cid === bandId;
+  const newKey = (rid: string, cid: string, i: number) => isRow ? `${bandId}#s${i}::${cid}` : `${rid}::${bandId}#s${i}`;
+  function remapMarks<T>(m: Record<string, T> | undefined): Record<string, T> {
+    const out: Record<string, T> = {};
+    for (const [k, v] of Object.entries(m || {})) {
+      const [rid, cid] = k.split('::');
+      if (!touches(rid, cid)) { out[k] = v; continue; }
+      for (let i = 0; i < N; i++) out[newKey(rid, cid, i)] = v;
+    }
+    return out;
+  }
+  const cellsOut: Record<string, string> = {};
+  for (const [k, v] of Object.entries(ft.cells || {})) { const [rid, cid] = k.split('::'); if (!touches(rid, cid)) cellsOut[k] = v; }
+  for (let i = 0; i < N; i++) {
+    if (isRow) for (const c of cols) { const val = dataOverride[`${bandId}::${c.id}::s${i}`]; if (val != null && val !== '') cellsOut[newKey(bandId, c.id, i)] = String(val); }
+    else for (const r of rows) { const val = dataOverride[`${r.id}::${bandId}::s${i}`]; if (val != null && val !== '') cellsOut[newKey(r.id, bandId, i)] = String(val); }
+  }
+  const newRows = isRow ? [...rows.slice(0, idx), ...Array.from({ length: N }, (_, i) => ({ ...rows[idx], id: `${bandId}#s${i}` })), ...rows.slice(idx + 1)] : rows;
+  const newCols = !isRow ? [...cols.slice(0, idx), ...Array.from({ length: N }, (_, i) => ({ ...cols[idx], id: `${bandId}#s${i}`, label: cols[idx].label ?? '' })), ...cols.slice(idx + 1)] : cols;
+  return {
+    ...ft, sample_band: undefined, rows: newRows, columns: newCols, cells: cellsOut,
+    spans: remapMarks(ft.spans), header_cells: remapMarks(ft.header_cells), input_cells: remapMarks(ft.input_cells),
+    cell_options: remapMarks(ft.cell_options), cell_units: remapMarks(ft.cell_units), cell_number_fmt: remapMarks(ft.cell_number_fmt),
+    cell_types: remapMarks(ft.cell_types), cell_unit_options: remapMarks(ft.cell_unit_options),
+  };
+}
+
 /** free_grid 单格显示：按数字格式(小数/科学计数/有效数字)格式化 + 追加单位，返回 typst content markup。 */
 function fmtFreeGridCell(raw: string, fmt: { mode: string; digits: number } | undefined, unit: string | undefined): string {
   let inner: string;
@@ -2078,8 +2120,9 @@ export function renderFreeGridTypst(
   dataOverride?: Record<string, any>,
   ctx?: ReportRenderCtx,
 ): string {
-  // F2：报告侧样品带按录入样品数预展开（无 band / 无 ctx ⇒ 原样）
-  if (ctx && ft.sample_band) ft = expandFreeGridBand(ft, ctx);
+  // 样品带展开：报告侧(有 matrix_code)按 ctx 的记录矩阵样品数；记录侧(无 matrix_code)按录入样品数
+  if (ft.sample_band?.matrix_code) { if (ctx) ft = expandFreeGridBand(ft, ctx); }
+  else if (ft.sample_band && dataOverride) { ft = expandFreeGridSelfBand(ft, dataOverride); }
   const cols = ft.columns || [];
   const rows = ft.rows || [];
   if (!cols.length || !rows.length) return wrapFigure(field, '#text(fill: gray)[（空网格）]');

@@ -259,6 +259,12 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
     if (!ref || !bandMatrix) { message.info('先选中带内一个格，并选择「样品来源矩阵」'); return; }
     update({ sample_band: { axis, matrix_code: bandMatrix, ref } });
   };
+  // 记录侧自引用样品带（无 matrix_code）：录入时增减样品、该行按样品数展开
+  const setSelfBand = (axis: 'row' | 'col') => {
+    const ref = axis === 'row' ? selRowId : selColId;
+    if (!ref) { message.info('先选中带内一个格'); return; }
+    update({ sample_band: { axis, ref } });
+  };
   const cellInBand = (k: string | null): boolean => {
     if (!k || !sampleBand) return false;
     const [rid, cid] = k.split('::');
@@ -425,6 +431,14 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
             <Tooltip title="所选格所在【行】设为样品带（报告按该矩阵样品数自动展开成多行）"><Button size="small" disabled={!selRowId} onClick={() => setBand('row')}>行</Button></Tooltip>
             <Tooltip title="所选格所在【列】设为样品带（每列一个样品）"><Button size="small" disabled={!selColId} onClick={() => setBand('col')}>列</Button></Tooltip>
             {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消</Button>}
+          </>}
+          {!linkedRecord && <>
+            <span style={sep} />
+            <span style={gLabel}>样品带（可变试样）</span>
+            <Tooltip title="把所选格所在【行】设为样品带：录入时可增减样品、该行按样品数自动展开成多行">
+              <Button size="small" disabled={!selRowId} onClick={() => setSelfBand('row')}>行</Button>
+            </Tooltip>
+            {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消样品带</Button>}
           </>}
         </div>
       )}
