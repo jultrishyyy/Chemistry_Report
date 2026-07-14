@@ -209,15 +209,14 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
     case 'report_sample_table':
       return { ...base, type: 'report_sample_table', label: '样品信息表', hide_label: true,
         sample_table: { columns: ['index', 'name', 'model'] } };
-    case 'free_grid':
+    case 'free_grid': {
+      // 默认：首行 + 首列＝表头，其余＝数字录入格（number 为录入格默认类型，无需显式存）
+      const gc = ['c1', 'c2', 'c3', 'c4'], gr = ['r1', 'r2', 'r3', 'r4'];
+      const header_cells: Record<string, true> = {}, input_cells: Record<string, true> = {};
+      gr.forEach((r, ri) => gc.forEach((c, ci) => { if (ri === 0 || ci === 0) header_cells[`${r}::${c}`] = true; else input_cells[`${r}::${c}`] = true; }));
       return { ...base, type: 'free_grid', label: '自由表格',
-        free_table: {
-          columns: [{ id: 'c1', label: '' }, { id: 'c2', label: '' }, { id: 'c3', label: '' }],
-          rows: [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
-          cells: {},
-          header_cells: { 'r1::c1': true, 'r1::c2': true, 'r1::c3': true },  // 默认首行为表头
-          input_cells: {},
-        } };
+        free_table: { columns: gc.map(id => ({ id, label: '' })), rows: gr.map(id => ({ id })), cells: {}, header_cells, input_cells } };
+    }
     case 'matrix':
       return {
         ...base,
@@ -357,14 +356,14 @@ function rebuildFieldForCategoryInner(
             },
       };
     }
-    case 'free_grid':
-      return { ...common, type: 'free_grid',
-        label: label === '新字段' ? '自由表格' : label,
-        free_table: field.free_table || {
-          columns: [{ id: 'c1', label: '' }, { id: 'c2', label: '' }, { id: 'c3', label: '' }],
-          rows: [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
-          cells: {}, header_cells: { 'r1::c1': true, 'r1::c2': true, 'r1::c3': true }, input_cells: {},
-        } };
+    case 'free_grid': {
+      if (field.free_table) return { ...common, type: 'free_grid', label: label === '新字段' ? '自由表格' : label, free_table: field.free_table };
+      const gc = ['c1', 'c2', 'c3', 'c4'], gr = ['r1', 'r2', 'r3', 'r4'];
+      const header_cells: Record<string, true> = {}, input_cells: Record<string, true> = {};
+      gr.forEach((r, ri) => gc.forEach((c, ci) => { if (ri === 0 || ci === 0) header_cells[`${r}::${c}`] = true; else input_cells[`${r}::${c}`] = true; }));
+      return { ...common, type: 'free_grid', label: label === '新字段' ? '自由表格' : label,
+        free_table: { columns: gc.map(id => ({ id, label: '' })), rows: gr.map(id => ({ id })), cells: {}, header_cells, input_cells } };
+    }
   }
 }
 

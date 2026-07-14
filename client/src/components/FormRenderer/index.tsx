@@ -188,7 +188,13 @@ export default function FormRenderer({ template, data, onChange, recordId, excel
                               placeholder="选择" allowClear options={ft.cell_options[k].map((o: string) => ({ value: o, label: o }))}
                               onChange={(v) => setCell(k, (v as string) || '')} />
                           ) : isInput ? (
-                            <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
+                            <span style={{ display: 'inline-flex', alignItems: 'center', width: '100%' }}>
+                              <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
+                              {ft.cell_unit_options?.[k]?.length
+                                ? <Select size="small" variant="borderless" style={{ minWidth: 50 }} value={gridVal[`${k}::__unit__`] || undefined} placeholder="单位"
+                                    options={ft.cell_unit_options[k].map((u: string) => ({ value: u, label: u }))} onChange={(v) => setCell(`${k}::__unit__`, (v as string) || '')} />
+                                : ft.cell_units?.[k] ? <span style={{ color: '#999', fontSize: 11, paddingRight: 4 }}>{ft.cell_units[k]}</span> : null}
+                            </span>
                           ) : (
                             <span>{cells[k] ?? ''}{ft.cell_units?.[k] ? `（${ft.cell_units[k]}）` : ''}</span>
                           )}

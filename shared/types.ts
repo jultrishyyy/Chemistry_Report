@@ -526,8 +526,12 @@ export interface FieldDefinition {
     cell_formulas?: Record<string, Formula>;
     /** 每格单位（表头/数值格显示为 `值（单位）`）。键 = `${rowId}::${colId}`。 */
     cell_units?: Record<string, string>;
+    /** 每格类型：`text`=文字录入 / `number`=数字录入 / `choice`=选择框。缺省：录入格＝number、表头＝text。键 = `${rowId}::${colId}`。 */
+    cell_types?: Record<string, 'text' | 'number' | 'choice'>;
     /** 每格「选择框」：录入时该格从这些选项里选（含表头做成可选项）。键 = `${rowId}::${colId}`。 */
     cell_options?: Record<string, string[]>;
+    /** 每格单位「录入时可选」：录入时从这些选项里选单位（chosen 存 raw_data[code] 的 `${key}::__unit__`）。与固定 cell_units 二选一。 */
+    cell_unit_options?: Record<string, string[]>;
     /** 每格数字格式：`decimals`=保留 N 位小数；`scientific`=科学计数法（尾数 N 位小数，渲染 9.4×10¹）；`significant`=有效数字 N 位。键 = `${rowId}::${colId}`。 */
     cell_number_fmt?: Record<string, { mode: 'decimals' | 'scientific' | 'significant'; digits: number }>;
   };

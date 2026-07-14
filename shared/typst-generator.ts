@@ -2041,6 +2041,8 @@ function expandFreeGridBand(
     cell_units: remap(ft.cell_units),
     cell_options: remap(ft.cell_options),
     cell_number_fmt: remap(ft.cell_number_fmt),
+    cell_types: remap(ft.cell_types),
+    cell_unit_options: remap(ft.cell_unit_options),
   };
 }
 
@@ -2125,7 +2127,9 @@ export function renderFreeGridTypst(
       const sp = ft.spans?.[key];
       const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
       const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
-      const body = `${pendingMinH}${tableCellBold(fmtFreeGridCell(String(raw), ft.cell_number_fmt?.[key], ft.cell_units?.[key]), isHeader, tFont)}`;
+      // 单位：录入时可选(cell_unit_options)则取录入选的(dataOverride 里 `${key}::__unit__`)，否则固定单位
+      const cellUnit = ft.cell_unit_options?.[key]?.length ? (dataOverride?.[`${key}::__unit__`] || '') : ft.cell_units?.[key];
+      const body = `${pendingMinH}${tableCellBold(fmtFreeGridCell(String(raw), ft.cell_number_fmt?.[key], cellUnit), isHeader, tFont)}`;
       pendingMinH = '';
       cells.push((cs > 1 || rs > 1) ? `table.cell(colspan: ${cs}, rowspan: ${rs})[${body}]` : `[${body}]`);
     });

@@ -23,6 +23,10 @@ export const TEMP_LOGIN_WHITELIST: Record<string, string> = {
   GDJL06567: '朱炜烨',
   GDJL31129: '陈成成',
   GDJL12331: '梁志炫',
+  GDJL19985: '陈健伟',
+  GDJL08999: '刘丽莎',
+  GDJL11844: '罗琪',
+  GDJL29758: '吴英信',
 };
 
 /** 拒绝登录时给前端的提示文案。 */

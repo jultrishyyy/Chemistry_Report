@@ -7,7 +7,7 @@
  *  - 「表头」写 header_cells（出片加粗）；「录入格」写 input_cells（录入时可填，值存 raw_data[code]，不写模板）。
  */
 import { useState, useEffect } from 'react';
-import { Button, Input, InputNumber, Select, Tooltip, Popover, message } from 'antd';
+import { Button, Input, InputNumber, Select, Radio, Tooltip, Popover, message } from 'antd';
 import { PlusOutlined, MergeCellsOutlined, SplitCellsOutlined } from '@ant-design/icons';
 import type { FieldDefinition, RecordTemplate, CellBinding } from '../../../../../shared/types';
 import BindingPickerModal, { BindingSummary } from '../../ReportEditor/BindingPickerModal';
@@ -82,8 +82,11 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   })();
 
   // ─── 行列增删 ───────────────────────────────────────────────────
-  const addRow = () => update({ rows: [...rows, { id: `r_${Date.now()}` }] });
-  const addCol = () => update({ columns: [...cols, { id: `c_${Date.now()}`, label: '' }] });
+  // 新增行/列时默认标记：首列的格＝表头，其余＝录入格（与初始「边缘表头」一致）
+  const marksNewRow = (id: string) => { const hc: Record<string, true> = {}, ic: Record<string, true> = {}; cols.forEach((c, ci) => { if (ci === 0) hc[`${id}::${c.id}`] = true; else ic[`${id}::${c.id}`] = true; }); return { hc, ic }; };
+  const marksNewCol = (id: string) => { const hc: Record<string, true> = {}, ic: Record<string, true> = {}; rows.forEach((r, ri) => { if (ri === 0) hc[`${r.id}::${id}`] = true; else ic[`${r.id}::${id}`] = true; }); return { hc, ic }; };
+  const addRow = () => { const id = `r_${Date.now()}`; const m = marksNewRow(id); update({ rows: [...rows, { id }], header_cells: { ...headerCells, ...m.hc }, input_cells: { ...inputCells, ...m.ic } }); };
+  const addCol = () => { const id = `c_${Date.now()}`; const m = marksNewCol(id); update({ columns: [...cols, { id, label: '' }], header_cells: { ...headerCells, ...m.hc }, input_cells: { ...inputCells, ...m.ic } }); };
   // 删除选区所在的行/列，并清掉引用被删行/列的 cells/spans/标记
   const cleanMaps = (removedKeysPredicate: (rowId: string, colId: string) => boolean) => {
     const filterMap = <T,>(m: Record<string, T>): Record<string, T> => {
@@ -114,14 +117,22 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   const setRowCount = (n: number | null) => {
     const t = Math.max(1, Math.min(50, Math.round(n || 1)));
     if (t === rows.length) return;
-    if (t > rows.length) update({ rows: [...rows, ...Array.from({ length: t - rows.length }, (_, i) => ({ id: `r_${Date.now()}_${i}` }))] });
-    else { const rm = new Set(rows.slice(t).map(r => r.id)); update({ rows: rows.slice(0, t), ...cleanMaps((rid) => rm.has(rid)) }); setSel(null); }
+    if (t > rows.length) {
+      const add = Array.from({ length: t - rows.length }, (_, i) => ({ id: `r_${Date.now()}_${i}` }));
+      const hc = { ...headerCells }, ic = { ...inputCells };
+      add.forEach(r => { const m = marksNewRow(r.id); Object.assign(hc, m.hc); Object.assign(ic, m.ic); });
+      update({ rows: [...rows, ...add], header_cells: hc, input_cells: ic });
+    } else { const rm = new Set(rows.slice(t).map(r => r.id)); update({ rows: rows.slice(0, t), ...cleanMaps((rid) => rm.has(rid)) }); setSel(null); }
   };
   const setColCount = (n: number | null) => {
     const t = Math.max(1, Math.min(30, Math.round(n || 1)));
     if (t === cols.length) return;
-    if (t > cols.length) update({ columns: [...cols, ...Array.from({ length: t - cols.length }, (_, i) => ({ id: `c_${Date.now()}_${i}`, label: '' }))] });
-    else { const rm = new Set(cols.slice(t).map(c => c.id)); update({ columns: cols.slice(0, t), ...cleanMaps((_rid, cid) => rm.has(cid)) }); setSel(null); }
+    if (t > cols.length) {
+      const add = Array.from({ length: t - cols.length }, (_, i) => ({ id: `c_${Date.now()}_${i}`, label: '' }));
+      const hc = { ...headerCells }, ic = { ...inputCells };
+      add.forEach(c => { const m = marksNewCol(c.id); Object.assign(hc, m.hc); Object.assign(ic, m.ic); });
+      update({ columns: [...cols, ...add], header_cells: hc, input_cells: ic });
+    } else { const rm = new Set(cols.slice(t).map(c => c.id)); update({ columns: cols.slice(0, t), ...cleanMaps((_rid, cid) => rm.has(cid)) }); setSel(null); }
   };
 
   // ─── 合并 / 拆分 ─────────────────────────────────────────────────
@@ -236,36 +247,69 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   };
   const removeFx = (k: string) => { const n = { ...cellFx }; delete n[k]; update({ cell_formulas: n }); };
 
-  // ─── 单元格设置：单位 / 选择框(可选项) / 数字格式 ─────────────────
+  // ─── 单元格编辑卡：类型 / 选项 / 单位(固定或录入选) / 数字格式（应用到所选全部格）──
   const cellUnits = ft.cell_units || {};
   const cellOptions = ft.cell_options || {};
   const cellNumFmt = ft.cell_number_fmt || {};
-  const setUnit = (k: string, u: string) => { const n = { ...cellUnits }; if (u) n[k] = u; else delete n[k]; update({ cell_units: n }); };
-  const setOptions = (k: string, opts: string[]) => { const n = { ...cellOptions }; if (opts?.length) n[k] = opts; else delete n[k]; update({ cell_options: n }); };
-  const setNumFmt = (k: string, fmt: { mode: 'decimals' | 'scientific' | 'significant'; digits: number } | undefined) => { const n: Record<string, any> = { ...cellNumFmt }; if (fmt) n[k] = fmt; else delete n[k]; update({ cell_number_fmt: n }); };
-  const hasCellSettings = (k: string) => !!(cellUnits[k] || cellOptions[k]?.length || cellNumFmt[k]);
-  const cellSettingsPanel = (k: string) => (
-    <div style={{ width: 250, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div>
-        <div style={{ fontSize: 12, color: '#555', marginBottom: 3 }}>单位（表头/数值显示为「值（单位）」）</div>
-        <Input size="small" placeholder="如 MPa（留空=无）" value={cellUnits[k]} onChange={(e) => setUnit(k, e.target.value)} />
-      </div>
-      <div>
-        <div style={{ fontSize: 12, color: '#555', marginBottom: 3 }}>选择框：录入时从选项里选（可把表头做成可选项）</div>
-        <Select size="small" mode="tags" style={{ width: '100%' }} placeholder="输入选项回车添加" value={cellOptions[k] || []} onChange={(v) => setOptions(k, v as string[])} open={false} suffixIcon={null} />
-      </div>
-      <div>
-        <div style={{ fontSize: 12, color: '#555', marginBottom: 3 }}>数字格式</div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <Select size="small" style={{ flex: 1 }} value={cellNumFmt[k]?.mode || ''} placeholder="不格式化"
-            onChange={(m) => setNumFmt(k, m ? { mode: m as any, digits: cellNumFmt[k]?.digits ?? 2 } : undefined)}
-            options={[{ value: '', label: '不格式化' }, { value: 'decimals', label: '小数位' }, { value: 'scientific', label: '科学计数法' }, { value: 'significant', label: '有效数字' }]} />
-          {cellNumFmt[k]?.mode && <InputNumber size="small" style={{ width: 68 }} min={0} max={10} value={cellNumFmt[k]?.digits ?? 2}
-            onChange={(v) => setNumFmt(k, { mode: cellNumFmt[k]!.mode, digits: (v as number) ?? 2 })} addonAfter="位" />}
+  const cellTypes = ft.cell_types || {};
+  const cellUnitOptions = ft.cell_unit_options || {};
+  const [cardOpen, setCardOpen] = useState(false);
+  const editSelKeys: string[] = (() => {
+    if (!range) return [];
+    const ks: string[] = [];
+    for (let ri = range.minR; ri <= range.maxR; ri++) for (let ci = range.minC; ci <= range.maxC; ci++) if (!covered.has(`${ri},${ci}`)) ks.push(keyAt(ri, ci));
+    return ks;
+  })();
+  const setMapFor = (mapName: keyof FT, keys: string[], val: any) => {
+    const src = ((ft as any)[mapName] || {}) as Record<string, any>;
+    const n = { ...src };
+    for (const k of keys) { if (val == null || val === '' || (Array.isArray(val) && !val.length)) delete n[k]; else n[k] = val; }
+    update({ [mapName]: n } as Partial<FT>);
+  };
+  const hasCellSettings = (k: string) => !!(cellUnits[k] || cellOptions[k]?.length || cellNumFmt[k] || cellTypes[k] || cellUnitOptions[k]?.length);
+  const lab: React.CSSProperties = { fontSize: 12, color: '#555', marginBottom: 3 };
+  const editCard = () => {
+    const keys = editSelKeys;
+    const first = keys[0];
+    if (!first) return <div style={{ padding: 4, color: '#999' }}>先在网格里选中格子</div>;
+    const curType = cellTypes[first] || (headerCells[first] ? 'text' : 'number');
+    const unitMode = cellUnitOptions[first]?.length ? 'options' : 'fixed';
+    return (
+      <div style={{ width: 262, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ fontSize: 11, color: '#8c8c8c' }}>已选 {keys.length} 格 · 设置应用到全部所选</div>
+        <div>
+          <div style={lab}>类型</div>
+          <Select size="small" style={{ width: '100%' }} value={curType} onChange={(t) => setMapFor('cell_types', keys, t)}
+            options={[{ value: 'text', label: '文字' }, { value: 'number', label: '数字' }, { value: 'choice', label: '选择框（录入时选）' }]} />
+        </div>
+        {curType === 'choice' && (
+          <div><div style={lab}>选项（录入时下拉选，可把表头做成可选项）</div>
+            <Select size="small" mode="tags" style={{ width: '100%' }} placeholder="输入选项回车添加" value={cellOptions[first] || []} onChange={(v) => setMapFor('cell_options', keys, v as string[])} open={false} suffixIcon={null} /></div>
+        )}
+        {curType === 'number' && (
+          <div><div style={lab}>数字格式</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Select size="small" style={{ flex: 1 }} value={cellNumFmt[first]?.mode || ''} placeholder="不格式化"
+                onChange={(m) => setMapFor('cell_number_fmt', keys, m ? { mode: m as any, digits: cellNumFmt[first]?.digits ?? 2 } : undefined)}
+                options={[{ value: '', label: '不格式化' }, { value: 'decimals', label: '小数位' }, { value: 'scientific', label: '科学计数法' }, { value: 'significant', label: '有效数字' }]} />
+              {cellNumFmt[first]?.mode && <InputNumber size="small" style={{ width: 66 }} min={0} max={10} value={cellNumFmt[first]?.digits ?? 2}
+                onChange={(v) => setMapFor('cell_number_fmt', keys, { mode: cellNumFmt[first]!.mode, digits: (v as number) ?? 2 })} addonAfter="位" />}
+            </div></div>
+        )}
+        <div>
+          <div style={lab}>单位</div>
+          <Radio.Group size="small" optionType="button" value={unitMode}
+            onChange={(e) => { if (e.target.value === 'fixed') setMapFor('cell_unit_options', keys, undefined); else setMapFor('cell_units', keys, undefined); }}
+            options={[{ value: 'fixed', label: '固定' }, { value: 'options', label: '录入时选' }]} />
+          <div style={{ marginTop: 6 }}>
+            {unitMode === 'fixed'
+              ? <Input size="small" placeholder="如 MPa（留空=无）" value={cellUnits[first]} onChange={(e) => setMapFor('cell_units', keys, e.target.value)} />
+              : <Select size="small" mode="tags" style={{ width: '100%' }} placeholder="单位选项，回车添加（如 mm / cm）" value={cellUnitOptions[first] || []} onChange={(v) => setMapFor('cell_unit_options', keys, v as string[])} open={false} suffixIcon={null} />}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ─── 渲染 ────────────────────────────────────────────────────────
   const td: React.CSSProperties = { border: '1px solid #eaecef', padding: 0, minWidth: 70, height: 36, verticalAlign: 'middle', position: 'relative' };
@@ -300,9 +344,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           <Tooltip title="标为/取消 录入格（数据录入时由工程师填值）"><Button size="small" onClick={() => toggleMark('input_cells')}>录入格</Button></Tooltip>
           <Tooltip title="给所选单格设公式（平均/求和/最值/阈值判定；来源引用其它格）"><Button size="small" disabled={!selCellKey} onClick={openFx}>公式</Button></Tooltip>
           {selCellKey && cellFx[selCellKey] && <Button size="small" onClick={() => removeFx(selCellKey)}>移除公式</Button>}
-          {selCellKey
-            ? <Popover trigger="click" placement="bottom" title="单元格设置" content={cellSettingsPanel(selCellKey)}><Button size="small">单位/选项/格式</Button></Popover>
-            : <Tooltip title="选中单个格后可设 单位 / 选择框 / 数字格式"><Button size="small" disabled>单位/选项/格式</Button></Tooltip>}
+          <Popover trigger="click" placement="bottomLeft" title="单元格编辑（类型 / 选项 / 单位 / 数字格式）" open={cardOpen} onOpenChange={setCardOpen} content={editCard()}>
+            <Tooltip title="设所选格的 类型(文字/数字/选择框) / 单位 / 数字格式（也可双击格子打开）"><Button size="small" type="primary" ghost disabled={!range}>编辑格</Button></Tooltip>
+          </Popover>
           {linkedRecord && <>
             <span style={sep} />
             <Tooltip title="给所选单格绑定原始记录（报告生成时自动取值）">
@@ -361,7 +405,8 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
                       style={{ ...td, background: bg, boxShadow: inSel ? 'inset 0 0 0 2px #1677ff' : isSrc ? 'inset 0 0 0 2px #eb2f96' : undefined, cursor: 'cell', ...(inBand ? { borderLeft: '3px solid #13c2c2' } : {}) }}
                       onMouseDown={(e) => onCellDown(ri, ci, e)}
-                      onMouseEnter={() => onCellEnter(ri, ci)}>
+                      onMouseEnter={() => onCellEnter(ri, ci)}
+                      onDoubleClick={() => { setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); setCardOpen(true); }}>
                       {hasFx ? (
                         <div style={{ fontSize: 11, padding: '4px 6px', color: '#722ed1', fontWeight: isHeader ? 700 : 400 }} title="公式格">ƒ {FX_LABELS[(hasFx as any).type] || '公式'}</div>
                       ) : binding ? (
