@@ -132,6 +132,12 @@ export function generateMockRawData(template: RecordTemplate): Record<string, an
         continue; // 版式间隔无数据
       } else if (f.type === 'data_matrix' && f.matrix) {
         data[f.code] = mockMatrixValue(f.matrix);
+      } else if (f.type === 'free_grid') {
+        // 统一网格：仅录入格填示例值（键 rowId::colId），固定文字/表头由模板 cells 出
+        const inputs = f.free_table?.input_cells || {};
+        const gv: Record<string, string> = {};
+        for (const key of Object.keys(inputs)) gv[key] = '示例';
+        data[f.code] = gv;
       } else if (f.type !== 'computed') {
         data[f.code] = mockFieldValue(f);
       }

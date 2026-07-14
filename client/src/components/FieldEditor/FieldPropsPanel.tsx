@@ -18,6 +18,7 @@ import MatrixEditor from './MatrixEditor';
 import FormatPanel from './FormatPanel';
 import ImageLayoutControls from './ImageLayoutControls';
 import ReportResultTableCanvas from './MatrixEditor/ReportResultTableCanvas';
+import FreeGridCanvas from './MatrixEditor/FreeGridCanvas';
 import BindingPickerModal, { BindingSummary } from '../ReportEditor/BindingPickerModal';
 
 interface Props {
@@ -530,6 +531,8 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     );
   } else if (field.type === 'report_result_table') {
     configTab = <ReportResultTableCanvas field={field} onChange={onChange} linkedRecord={linkedRecord} />;
+  } else if (field.type === 'free_grid') {
+    configTab = <FreeGridCanvas field={field} onChange={onChange} />;
   } else if (field.type === 'report_equipment_table') {
     configTab = (
       <Form layout="vertical" size="small">

@@ -377,6 +377,10 @@ function generateFieldBlockInner(f: FieldDefinition, template: RecordTemplate, f
     const empty: DataMatrixValue = createEmptyMatrixValue(f.matrix);
     return embedDataMatrixTypst(f, empty, true, template);
   }
+  if (f.type === 'free_grid') {
+    // F0：统一自由网格。模板期渲染固定文字 + 表头 + 合并（录入格暂空）；录入值注入见带数据渲染。
+    return renderFreeGridTypst(f, f.free_table || { columns: [], rows: [], cells: {} });
+  }
   // 报告专属自动表：用锚点占位，generateTypstWithData / renderReportTypst 阶段替换
   if (f.type === 'report_conclusion_table') {
     return `// __REPORT_CONCLUSION__:${f.code}__
@@ -1931,6 +1935,59 @@ export function renderFreeTableTypst(field: FieldDefinition, ft: NonNullable<Fie
       out.push('  ' + cells.join(', ') + ',');
     });
   }
+  out.push(')');
+  return wrapFigure(field, tableStyleWrap(out.join('\n'), ts));
+}
+
+/**
+ * F0 统一自由网格（free_grid 字段）渲染。与 renderFreeTableTypst 的区别：
+ *  - 不强制"列标签表头行"——所有内容都来自 rows×cells（列只提供 id/宽度）；
+ *  - `header_cells` 里的格子加粗（表头也是普通格、可自由合并）；
+ *  - `dataOverride`（录入值，键 `rowId::colId`）优先于模板 `cells`（供录入/带数据渲染，见 F0 录入切片）。
+ */
+export function renderFreeGridTypst(
+  field: FieldDefinition,
+  ft: NonNullable<FieldDefinition['free_table']>,
+  dataOverride?: Record<string, any>,
+): string {
+  const cols = ft.columns || [];
+  const rows = ft.rows || [];
+  if (!cols.length || !rows.length) return wrapFigure(field, '#text(fill: gray)[（空网格）]');
+  const ts = field.table_style;
+  const tFont = ts?.font;
+  const colSpec = cols.map(c => colWidthSpec(c.width)).join(', ');
+  const out: string[] = [`#table(columns: (${colSpec}), stroke: 0.5pt, inset: (x: 8pt, y: ${STD_TABLE_INSET_Y}pt), align: center + horizon,`];
+  // 合并：算被主格 span 覆盖的格（行列序号），渲染时跳过
+  const colIdxOf = new Map(cols.map((c, i) => [c.id, i]));
+  const rowIdxOf = new Map(rows.map((r, i) => [r.id, i]));
+  const covered = new Set<string>();
+  for (const [key, sp] of Object.entries(ft.spans || {})) {
+    const [rid, cid] = key.split('::');
+    const ri = rowIdxOf.get(rid), ci = colIdxOf.get(cid);
+    if (ri == null || ci == null) continue;
+    const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
+    const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
+    for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) { if (dr || dc) covered.add(`${ri + dr},${ci + dc}`); }
+  }
+  rows.forEach((r, ri) => {
+    const h = r.height && /^\d+(\.\d+)?(cm|mm|pt|em|in)$/i.test(String(r.height).trim()) ? String(r.height).trim() : '';
+    let pendingMinH = h ? `#box(width: 0pt, height: ${h})` : '';
+    const cells: string[] = [];
+    cols.forEach((c, ci) => {
+      if (covered.has(`${ri},${ci}`)) return;   // 被合并主格盖住：不出格
+      const key = `${r.id}::${c.id}`;
+      const ov = dataOverride ? dataOverride[key] : undefined;
+      const raw = (ov != null && ov !== '') ? ov : (ft.cells?.[key] ?? '');
+      const isHeader = !!ft.header_cells?.[key];
+      const sp = ft.spans?.[key];
+      const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
+      const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
+      const body = `${pendingMinH}${tableCellBold(escapeTypstMarkup(String(raw)), isHeader, tFont)}`;
+      pendingMinH = '';
+      cells.push((cs > 1 || rs > 1) ? `table.cell(colspan: ${cs}, rowspan: ${rs})[${body}]` : `[${body}]`);
+    });
+    out.push('  ' + cells.join(', ') + ',');
+  });
   out.push(')');
   return wrapFigure(field, tableStyleWrap(out.join('\n'), ts));
 }

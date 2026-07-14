@@ -9,7 +9,7 @@ import type { FieldDefinition, MatrixSummaryRowDef, MatrixSummaryColDef } from '
  *       * 单选 ↔ select
  *       * 选项挂子字段 ↔ variant_list
  */
-export type FieldCategory = 'text' | 'number' | 'date' | 'daterange' | 'choice' | 'image' | 'matrix' | 'device' | 'spacer' | 'report_conclusion' | 'report_result' | 'report_equipment' | 'report_images' | 'report_photo_table' | 'report_sample_table';
+export type FieldCategory = 'text' | 'number' | 'date' | 'daterange' | 'choice' | 'image' | 'matrix' | 'free_grid' | 'device' | 'spacer' | 'report_conclusion' | 'report_result' | 'report_equipment' | 'report_images' | 'report_photo_table' | 'report_sample_table';
 
 /** 编辑器模式（与 FieldEditor/index.tsx 的 EditorMode 一致；此处独立声明以避免循环依赖）。 */
 export type EditorMode = 'record' | 'report-cover' | 'report-project';
@@ -35,6 +35,7 @@ export const FIELD_CATEGORIES: FieldCategoryEntry[] = [
   { key: 'choice', label: '选择',       icon: '●',  hint: '单选 / 多选 / 可自定义；每个选项还能挂子字段' },
   { key: 'image',  label: '图片',       icon: '📷', editors: ['record', 'report-cover'], hint: '上传图片（原始记录样品照片 / 首页录入的样品照片）' },
   { key: 'matrix', label: '数据表格',   icon: '▦',  editors: ['record'], hint: '样品×参数 的试验数据表，可配平均/最大等汇总行' },
+  { key: 'free_grid', label: '自由表格', icon: '⊞',  editors: ['record'], hint: '像 Excel 一样的自由网格：自定义行列、任意合并单元格（含表头）；每格可标为「表头」或「录入格」，录入时在录入格填值' },
   { key: 'device', label: '测试设备',   icon: '🔧', editors: ['record'], hint: '从设备库按管理编号查询；生成报告时自动展开为设备表' },
   { key: 'spacer', label: '间隔（空白）', icon: '↕',  hint: '纯版式的空白块，在字段/分区之间留白（封面排版常用）；可调高度，不产生数据' },
   { key: 'report_conclusion', label: '报告·结论汇总表', icon: '📋', editors: ['report-cover'],   hint: '【报告首页用】检测结论汇总表，行 = 项目，自动展开' },
@@ -96,6 +97,8 @@ export function categoryOfField(f: FieldDefinition): FieldCategory {
       return 'daterange';
     case 'data_matrix':
       return 'matrix';
+    case 'free_grid':
+      return 'free_grid';
     case 'computed':
     case 'reference':
       return 'text';
@@ -206,6 +209,15 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
     case 'report_sample_table':
       return { ...base, type: 'report_sample_table', label: '样品信息表', hide_label: true,
         sample_table: { columns: ['index', 'name', 'model'] } };
+    case 'free_grid':
+      return { ...base, type: 'free_grid', label: '自由表格',
+        free_table: {
+          columns: [{ id: 'c1', label: '' }, { id: 'c2', label: '' }, { id: 'c3', label: '' }],
+          rows: [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
+          cells: {},
+          header_cells: { 'r1::c1': true, 'r1::c2': true, 'r1::c3': true },  // 默认首行为表头
+          input_cells: {},
+        } };
     case 'matrix':
       return {
         ...base,
@@ -345,6 +357,14 @@ function rebuildFieldForCategoryInner(
             },
       };
     }
+    case 'free_grid':
+      return { ...common, type: 'free_grid',
+        label: label === '新字段' ? '自由表格' : label,
+        free_table: field.free_table || {
+          columns: [{ id: 'c1', label: '' }, { id: 'c2', label: '' }, { id: 'c3', label: '' }],
+          rows: [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
+          cells: {}, header_cells: { 'r1::c1': true, 'r1::c2': true, 'r1::c3': true }, input_cells: {},
+        } };
   }
 }
 

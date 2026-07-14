@@ -327,6 +327,7 @@ export interface FieldDefinition {
     | 'device_ref'
     | 'variant_list'
     | 'data_matrix'
+    | 'free_grid'                 // F0 统一自由网格：所有格子平等、任意合并（含表头）；每格可标 header(表头)/input(录入格)；录入值存 raw_data[code] 的 `${rowId}::${colId}` 键。结构复用 free_table
     | 'spacer'                    // 版式·间隔：纯排版的空白块（在字段/分区之间留白，无数据），渲染成 #v(高度)
     | 'report_conclusion_table'   // 报告首页：检测结论汇总表（行 = 项目，自动展开）
     | 'report_result_table'       // 项目报告：检测结果表（画布 + 每格 binding）
@@ -513,6 +514,10 @@ export interface FieldDefinition {
      * 让"自由编辑"也保留合并外观（如结果表汇总列跨所有数据行、汇总行跨整行）。被覆盖的格不渲染、可由
      * 调整跨度恢复成独立格。空/缺＝该格不合并。 */
     spans?: Record<string, { colspan?: number; rowspan?: number }>;
+    /** F0 free_grid：标记为「表头」的格（加粗 + 语义上跨页 repeat）。键 = `${rowId}::${colId}`。表头也是普通格、可自由合并。 */
+    header_cells?: Record<string, true>;
+    /** F0 free_grid：标记为「录入格」的格（数据录入时可填）。值不写模板，存进 record_data.raw_data[字段code] 的 `${rowId}::${colId}` 键。未标记的格＝固定文字（模板 cells）。 */
+    input_cells?: Record<string, true>;
   };
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {

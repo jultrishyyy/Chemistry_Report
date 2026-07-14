@@ -147,6 +147,57 @@ export default function FormRenderer({ template, data, onChange, recordId, excel
       );
     }
 
+    if (field.type === 'free_grid') {
+      const ft = field.free_table;
+      if (!ft?.columns?.length || !ft?.rows?.length) return null;
+      const cols = ft.columns, rows = ft.rows;
+      const spans = ft.spans || {}, cells = ft.cells || {}, headerCells = ft.header_cells || {}, inputCells = ft.input_cells || {};
+      const gridVal: Record<string, string> = (value && typeof value === 'object' && !Array.isArray(value)) ? value : {};
+      // 被合并主格覆盖的格（行列序号）——与出片端 renderFreeGridTypst 同口径
+      const colIdx = new Map(cols.map((c, i) => [c.id, i]));
+      const rowIdx = new Map(rows.map((r, i) => [r.id, i]));
+      const covered = new Set<string>();
+      for (const [k, sp] of Object.entries(spans)) {
+        const [rid, cid] = k.split('::'); const ri = rowIdx.get(rid), ci = colIdx.get(cid);
+        if (ri == null || ci == null) continue;
+        const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
+        const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
+        for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) { if (dr || dc) covered.add(`${ri + dr},${ci + dc}`); }
+      }
+      const setCell = (k: string, v: string) => handleChange(field.code, { ...gridVal, [k]: v });
+      return (
+        <div key={field.id} style={{ margin: '6px 0' }}>
+          {!field.hide_label && <label style={labelStyle}>{field.label}：</label>}
+          <div style={{ overflowX: 'auto', marginTop: 4 }}>
+            <table style={{ borderCollapse: 'collapse' }}>
+              <tbody>
+                {rows.map((r, ri) => (
+                  <tr key={r.id}>
+                    {cols.map((c, ci) => {
+                      if (covered.has(`${ri},${ci}`)) return null;
+                      const k = `${r.id}::${c.id}`;
+                      const sp = spans[k];
+                      const cspan = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
+                      const rspan = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
+                      const isHeader = !!headerCells[k], isInput = !!inputCells[k];
+                      return (
+                        <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
+                          style={{ border: '1px solid #d9d9d9', padding: isInput ? 0 : '4px 8px', minWidth: 60, textAlign: 'center', background: isHeader ? '#fafafa' : '#fff', fontWeight: isHeader ? 700 : 400 }}>
+                          {isInput
+                            ? <Input size="small" variant="borderless" value={gridVal[k] ?? ''} onChange={(e) => setCell(k, e.target.value)} style={{ textAlign: 'center' }} />
+                            : <span>{cells[k] ?? ''}</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
     if (field.type === 'variant_list') {
       return (
         <VariantListField
