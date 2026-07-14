@@ -378,8 +378,11 @@ function generateFieldBlockInner(f: FieldDefinition, template: RecordTemplate, f
     return embedDataMatrixTypst(f, empty, true, template);
   }
   if (f.type === 'free_grid') {
-    // F0：统一自由网格。模板期渲染固定文字 + 表头 + 合并（录入格暂空）；录入值注入见带数据渲染。
-    return renderFreeGridTypst(f, f.free_table || { columns: [], rows: [], cells: {} });
+    // F0：统一自由网格。模板期渲染固定文字 + 表头 + 合并（录入格暂空）；
+    // 带数据渲染（generateTypstWithData）按锚点替换成带录入值的版本。
+    return `// __FREE_GRID__:${f.code}__
+${renderFreeGridTypst(f, f.free_table || { columns: [], rows: [], cells: {} })}
+// __FREE_GRID_END__:${f.code}__`;
   }
   // 报告专属自动表：用锚点占位，generateTypstWithData / renderReportTypst 阶段替换
   if (f.type === 'report_conclusion_table') {
@@ -1559,6 +1562,18 @@ export function generateTypstWithData(template: RecordTemplate, data: Record<str
     }
   }
 
+  // 自由网格(free_grid)：锚点替换成带录入值的版本（录入值 = raw_data[code] 的 `${rowId}::${colId}` 映射，只填录入格）
+  for (const f of template.groups.flatMap(g => g.fields)) {
+    if (f.type === 'free_grid' && f.free_table) {
+      const re = new RegExp(
+        `// __FREE_GRID__:${escapeReg(f.code)}__[\\s\\S]*?// __FREE_GRID_END__:${escapeReg(f.code)}__`,
+        'g'
+      );
+      const gv = (data[f.code] && typeof data[f.code] === 'object' && !Array.isArray(data[f.code])) ? data[f.code] : {};
+      source = source.replace(re, renderFreeGridTypst(f, f.free_table, gv));
+    }
+  }
+
   // 富文本字段：把锚点替换成转换后的内容块（值取自录入数据）
   for (const f of template.groups.flatMap(g => g.fields)) {
     if (!f.rich) continue;
@@ -1600,6 +1615,11 @@ export function flattenDataForDisplay(template: RecordTemplate, data: Record<str
   for (const f of allFields) {
     if (f.type === 'image') {
       // image 字段不进 #let data；通过 __IMAGE_GROUP__ 锚点替换
+      delete result[f.code];
+      continue;
+    }
+    if (f.type === 'free_grid') {
+      // free_grid 录入值经 __FREE_GRID__ 锚点整块替换渲染，不进 #let data 字典
       delete result[f.code];
       continue;
     }
