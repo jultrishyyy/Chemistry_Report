@@ -43,7 +43,7 @@ export default function ProjectEditor() {
         axios.get(`${API}/record-templates/${data.linked_record_template_id}`)
           .then(r => setLinkedRecord({
             id: r.data.id, name: r.data.name, version: r.data.version,
-            groups: r.data.field_definitions, layout_options: r.data.layout_options || {},
+            groups: r.data.field_definitions || [], layout_options: r.data.layout_options || {},
           }))
           .catch(() => {});
       } else {

@@ -126,7 +126,7 @@ export function withMockPhotoTables(template: RecordTemplate): RecordTemplate {
  *  与 generateMockData 不同：后者返回展平+派生后的显示数据；本函数返回未展平的原始录入值。 */
 export function generateMockRawData(template: RecordTemplate): Record<string, any> {
   const data: Record<string, any> = {};
-  for (const g of template.groups) {
+  for (const g of (template.groups || [])) {
     for (const f of g.fields) {
       if (f.type === 'spacer') {
         continue; // 版式间隔无数据
@@ -141,16 +141,18 @@ export function generateMockRawData(template: RecordTemplate): Record<string, an
 }
 
 export function generateMockData(template: RecordTemplate): Record<string, any> {
-  const data = generateMockRawData(template);
+  // 容错：groups 缺失（如关联了尚无字段的原始记录）时归一为空数组，避免下游 flatten/公式迭代崩溃
+  const t: RecordTemplate = template.groups ? template : { ...template, groups: [] };
+  const data = generateMockRawData(t);
 
   // Flatten matrix values and compute formulas
-  let flat = flattenMatrixValuesToFlatData(template, data);
-  flat = applyMatrixCellFormulas(template, flat);
-  flat = applyPerCellFormulas(template, flat);
-  flat = applyMatrixSummaryFormulas(template, flat);
+  let flat = flattenMatrixValuesToFlatData(t, data);
+  flat = applyMatrixCellFormulas(t, flat);
+  flat = applyPerCellFormulas(t, flat);
+  flat = applyMatrixSummaryFormulas(t, flat);
 
   // Compute derived fields
-  const allFields = template.groups.flatMap(g => g.fields);
+  const allFields = (t.groups || []).flatMap(g => g.fields);
   const computedFields = allFields.filter(f => f.type === 'computed' && f.formula);
   const ordered = topologicalOrder(computedFields.map(f => ({ code: f.code, formula: f.formula! })));
   const result: Record<string, any> = { ...flat };
