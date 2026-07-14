@@ -226,53 +226,56 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   const removeFx = (k: string) => { const n = { ...cellFx }; delete n[k]; update({ cell_formulas: n }); };
 
   // ─── 渲染 ────────────────────────────────────────────────────────
-  const td: React.CSSProperties = { border: '1px solid #d9d9d9', padding: 0, minWidth: 64, height: 34, verticalAlign: 'middle' };
+  const td: React.CSSProperties = { border: '1px solid #eaecef', padding: 0, minWidth: 70, height: 36, verticalAlign: 'middle' };
+  const gLabel: React.CSSProperties = { fontSize: 12, color: '#8c8c8c' };
+  const sep: React.CSSProperties = { width: 1, height: 16, background: '#e8e8e8', margin: '0 3px' };
+  const hasSel = !!range;
   return (
-    <div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <span style={{ fontSize: 12, color: '#8c8c8c' }}>尺寸：</span>
-        <InputNumber size="small" min={1} max={50} style={{ width: 54 }} value={rows.length} onChange={setRowCount} />
-        <span style={{ fontSize: 12, color: '#8c8c8c' }}>行 ×</span>
-        <InputNumber size="small" min={1} max={30} style={{ width: 54 }} value={cols.length} onChange={setColCount} />
-        <span style={{ fontSize: 12, color: '#8c8c8c' }}>列</span>
-        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-        <span style={{ fontSize: 12, color: '#8c8c8c' }}>结构：</span>
-        <Tooltip title="在末尾加一行"><Button size="small" icon={<PlusOutlined />} onClick={addRow}>行</Button></Tooltip>
-        <Tooltip title="在末尾加一列"><Button size="small" icon={<PlusOutlined />} onClick={addCol}>列</Button></Tooltip>
-        <Button size="small" danger disabled={!range} onClick={delRows}>删所选行</Button>
-        <Button size="small" danger disabled={!range} onClick={delCols}>删所选列</Button>
-        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-        <Button size="small" type="primary" ghost icon={<MergeCellsOutlined />} disabled={selCount <= 1} onClick={mergeSel}>合并{selCount > 1 ? ` ${selCount} 格` : ''}</Button>
-        <Button size="small" icon={<SplitCellsOutlined />} disabled={!selHasMerge} onClick={splitSel}>拆分</Button>
-        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-        <Tooltip title="把所选格标为/取消表头（出片加粗，跨页重复）"><Button size="small" disabled={!range} onClick={() => toggleMark('header_cells')}>表头</Button></Tooltip>
-        <Tooltip title="把所选格标为/取消录入格（录入时可填值）"><Button size="small" disabled={!range} onClick={() => toggleMark('input_cells')}>录入格</Button></Tooltip>
-        {linkedRecord && <>
-          <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-          <Tooltip title="给所选单元格绑定原始记录的字段/单元格（报告生成时自动取值）">
-            <Button size="small" type="primary" ghost disabled={!selCellKey} onClick={() => { if (selCellKey) { setBindKey(selCellKey); setBindOpen(true); } }}>绑定原始记录</Button>
-          </Tooltip>
-          <Button size="small" disabled={!selCellKey || !cellBindings[selCellKey]} onClick={() => { if (selCellKey) clearCellBinding(selCellKey); }}>清除绑定</Button>
-        </>}
-        {linkedRecord && recordMatrices.length > 0 && <>
-          <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-          <span style={{ fontSize: 12, color: '#8c8c8c' }}>样品带：</span>
-          <Select size="small" style={{ width: 128 }} placeholder="样品来源矩阵" value={bandMatrix}
-            onChange={setBandMatrixSel} options={recordMatrices.map(m => ({ value: m.code, label: m.label }))} />
-          <Tooltip title="把所选格所在的【行】设为样品带：报告生成时按该矩阵实际样品数自动展开成多行（带内格用「当前试样」绑定）">
-            <Button size="small" disabled={!selRowId} onClick={() => setBand('row')}>设为样品带·行</Button>
-          </Tooltip>
-          <Tooltip title="把所选格所在的【列】设为样品带（每列一个样品）">
-            <Button size="small" disabled={!selColId} onClick={() => setBand('col')}>·列</Button>
-          </Tooltip>
-          {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消样品带</Button>}
-        </>}
-        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
-        <Tooltip title="给所选单格设公式（平均/求和/最值/阈值判定；来源引用其它格。样品带内=逐样品，带外=聚合整列）">
-          <Button size="small" disabled={!selCellKey} onClick={openFx}>公式</Button>
-        </Tooltip>
-        {selCellKey && cellFx[selCellKey] && <Button size="small" onClick={() => removeFx(selCellKey)}>移除公式</Button>}
+    <div style={{ border: '1px solid #eef0f3', borderRadius: 8, padding: 12, background: '#fff' }}>
+      {/* 主工具栏：尺寸 + 结构（常显、精简） */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+        <span style={gLabel}>尺寸</span>
+        <InputNumber size="small" min={1} max={50} style={{ width: 52 }} value={rows.length} onChange={setRowCount} />
+        <span style={{ color: '#bbb' }}>×</span>
+        <InputNumber size="small" min={1} max={30} style={{ width: 52 }} value={cols.length} onChange={setColCount} />
+        <span style={sep} />
+        <Tooltip title="末尾加一行"><Button size="small" icon={<PlusOutlined />} onClick={addRow}>行</Button></Tooltip>
+        <Tooltip title="末尾加一列"><Button size="small" icon={<PlusOutlined />} onClick={addCol}>列</Button></Tooltip>
+        <span style={{ ...gLabel, color: '#bbb', marginLeft: 4 }}>· 点格输入文字，拖动框选多格</span>
       </div>
+
+      {/* 选中操作栏：有选区才出现，按功能分组 */}
+      {hasSel && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 10, padding: '8px 10px', background: '#f7f9fc', border: '1px solid #eef0f3', borderRadius: 6 }}>
+          <span style={{ ...gLabel, color: '#1677ff', fontWeight: 500 }}>已选 {selCount} 格</span>
+          <span style={sep} />
+          <Button size="small" type="primary" ghost icon={<MergeCellsOutlined />} disabled={selCount <= 1} onClick={mergeSel}>合并</Button>
+          <Button size="small" icon={<SplitCellsOutlined />} disabled={!selHasMerge} onClick={splitSel}>拆分</Button>
+          <Button size="small" danger onClick={delRows}>删行</Button>
+          <Button size="small" danger onClick={delCols}>删列</Button>
+          <span style={sep} />
+          <Tooltip title="标为/取消 表头（出片加粗、跨页重复）"><Button size="small" onClick={() => toggleMark('header_cells')}>表头</Button></Tooltip>
+          <Tooltip title="标为/取消 录入格（数据录入时由工程师填值）"><Button size="small" onClick={() => toggleMark('input_cells')}>录入格</Button></Tooltip>
+          <Tooltip title="给所选单格设公式（平均/求和/最值/阈值判定；来源引用其它格）"><Button size="small" disabled={!selCellKey} onClick={openFx}>公式</Button></Tooltip>
+          {selCellKey && cellFx[selCellKey] && <Button size="small" onClick={() => removeFx(selCellKey)}>移除公式</Button>}
+          {linkedRecord && <>
+            <span style={sep} />
+            <Tooltip title="给所选单格绑定原始记录（报告生成时自动取值）">
+              <Button size="small" type="primary" ghost disabled={!selCellKey} onClick={() => { if (selCellKey) { setBindKey(selCellKey); setBindOpen(true); } }}>绑定记录</Button>
+            </Tooltip>
+            {selCellKey && cellBindings[selCellKey] && <Button size="small" onClick={() => clearCellBinding(selCellKey)}>清除绑定</Button>}
+          </>}
+          {linkedRecord && recordMatrices.length > 0 && <>
+            <span style={sep} />
+            <span style={gLabel}>样品带</span>
+            <Select size="small" style={{ width: 116 }} placeholder="来源矩阵" value={bandMatrix}
+              onChange={setBandMatrixSel} options={recordMatrices.map(m => ({ value: m.code, label: m.label }))} />
+            <Tooltip title="所选格所在【行】设为样品带（报告按该矩阵样品数自动展开成多行）"><Button size="small" disabled={!selRowId} onClick={() => setBand('row')}>行</Button></Tooltip>
+            <Tooltip title="所选格所在【列】设为样品带（每列一个样品）"><Button size="small" disabled={!selColId} onClick={() => setBand('col')}>列</Button></Tooltip>
+            {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消</Button>}
+          </>}
+        </div>
+      )}
       {fx && (
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8, padding: '6px 10px', background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
           <span style={{ fontSize: 12, color: '#722ed1' }}>公式 · 目标格 <b>{fx.target}</b>：</span>
@@ -290,7 +293,7 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           <Button size="small" onClick={() => { setFx(null); setPickSrc(false); }}>取消</Button>
         </div>
       )}
-      <div style={{ overflowX: 'auto' }}>
+      <div style={{ overflowX: 'auto', border: '1px solid #eaecef', borderRadius: 6, display: 'inline-block', maxWidth: '100%' }}>
         <table style={{ borderCollapse: 'collapse', userSelect: dragging ? 'none' : undefined }}>
           <tbody>
             {rows.map((r, ri) => (
@@ -308,32 +311,25 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                   const hasFx = cellFx[k];
                   const isSrc = !!(fx && pickSrc && fx.sources.includes(k));
                   const inSel = !!range && ri >= range.minR && ri <= range.maxR && ci >= range.minC && ci <= range.maxC;
-                  const bg = hasFx ? '#f9f0ff' : binding ? '#fffbe6' : inBand ? '#e6fffb' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
+                  const bg = hasFx ? '#f9f0ff' : binding ? '#fff7e6' : isInput ? '#e6f7ff' : isHeader ? '#f4f6fa' : inBand ? '#effcfb' : '#fff';
                   return (
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
-                      style={{ ...td, background: bg, outline: isSrc ? '2px dashed #eb2f96' : inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
+                      style={{ ...td, background: bg, boxShadow: inSel ? 'inset 0 0 0 2px #1677ff' : isSrc ? 'inset 0 0 0 2px #eb2f96' : undefined, cursor: 'cell', ...(inBand ? { borderLeft: '3px solid #13c2c2' } : {}) }}
                       onMouseDown={(e) => onCellDown(ri, ci, e)}
                       onMouseEnter={() => onCellEnter(ri, ci)}>
                       {hasFx ? (
-                        <div style={{ fontSize: 11, padding: '2px 4px', minHeight: 20, color: '#722ed1', fontWeight: isHeader ? 700 : 400 }}>
-                          ƒ {FX_LABELS[(hasFx as any).type] || '公式'}
-                        </div>
+                        <div style={{ fontSize: 11, padding: '4px 6px', color: '#722ed1', fontWeight: isHeader ? 700 : 400 }} title="公式格">ƒ {FX_LABELS[(hasFx as any).type] || '公式'}</div>
                       ) : binding ? (
-                        <div style={{ fontSize: 11, padding: '2px 4px', minHeight: 20, fontWeight: isHeader ? 700 : 400 }}>
+                        <div style={{ fontSize: 11, padding: '4px 6px', fontWeight: isHeader ? 700 : 400 }} title="绑定原始记录">
                           <BindingSummary value={binding} linkedRecord={linkedRecord || null} />
                         </div>
                       ) : (
                         <Input
-                          size="small" bordered={false} variant="borderless"
+                          size="small" variant="borderless"
                           value={cells[k] ?? ''}
-                          placeholder={isInput ? '录入格' : ''}
+                          placeholder={isInput ? '录入' : ''}
                           onChange={(e) => setCellText(ri, ci, e.target.value)}
-                          style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#69b1ff' : undefined }} />
-                      )}
-                      {(isHeader || isInput || binding || inBand || hasFx) && (
-                        <div style={{ fontSize: 8, lineHeight: 1, color: hasFx ? '#722ed1' : inBand ? '#08979c' : binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
-                          {[isHeader ? '表头' : '', hasFx ? '公式' : binding ? '绑定' : isInput ? '录入' : '', inBand ? '样品带' : ''].filter(Boolean).join('·')}
-                        </div>
+                          style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#9cc2ff' : undefined }} />
                       )}
                     </td>
                   );
@@ -343,8 +339,23 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           </tbody>
         </table>
       </div>
-      <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 6 }}>
-        点格子选中并直接输入固定文字；<b>在格上按住鼠标拖动</b>即可框选多个格（松开结束；也可按住 Shift 点另一格扩展）→ 合并 / 标记表头 / 标记录入格。<b>录入格</b>（蓝底）在数据录入时由工程师填值。{linkedRecord && <>选中<b>单个格</b>可「<b>绑定原始记录</b>」（黄底）报告生成时自动取值。</>}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11, color: '#8c8c8c', alignItems: 'center' }}>
+        {[
+          { c: '#f4f6fa', t: '表头' },
+          { c: '#e6f7ff', t: '录入格' },
+          ...(linkedRecord ? [{ c: '#fff7e6', t: '绑定记录' }] : []),
+          { c: '#f9f0ff', t: '公式' },
+        ].map(x => (
+          <span key={x.t} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 12, height: 12, background: x.c, border: '1px solid #e0e0e0', borderRadius: 3 }} />{x.t}
+          </span>
+        ))}
+        {linkedRecord && recordMatrices.length > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 12, height: 12, background: '#effcfb', border: '1px solid #e0e0e0', borderLeft: '3px solid #13c2c2', borderRadius: 2 }} />样品带
+          </span>
+        )}
+        <span style={{ color: '#bbb' }}>· 拖动框选多格，选中后在上方操作栏合并/标记/公式{linkedRecord ? '/绑定/样品带' : ''}</span>
       </div>
       {linkedRecord && bindKey && (
         <BindingPickerModal
