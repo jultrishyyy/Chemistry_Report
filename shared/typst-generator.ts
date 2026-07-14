@@ -1960,6 +1960,72 @@ export function renderFreeTableTypst(field: FieldDefinition, ft: NonNullable<Fie
 }
 
 /**
+ * F2：free_grid 样品带预展开。把标记为「样品带」的那一行/列，按录入样品数 N 复制成 N 份，
+ * 带内格子的 record_cell_sample/record_sample_label/record_sample_index 绑定按各样品落成字面量，
+ * 返回一张无 band 的普通网格，交给 renderFreeGridTypst 现有逻辑。与 expandResultTableBand 同口径。
+ */
+function expandFreeGridBand(
+  ft: NonNullable<FieldDefinition['free_table']>,
+  ctx: ReportRenderCtx,
+): NonNullable<FieldDefinition['free_table']> {
+  const band = ft.sample_band;
+  if (!band || !band.matrix_code || !band.ref) return ft;
+  const flat = ctx.record_flat_data || {};
+  const sids = deriveMatrixSampleIds(flat, band.matrix_code);
+  if (!sids.length) return ft;
+  const rawVal = ctx.record_raw_data?.[band.matrix_code] as any;
+  const labels: Record<string, string> = (rawVal && typeof rawVal === 'object' && rawVal.sample_labels) ? rawVal.sample_labels : {};
+  const prefix = findMatrixConfig(ctx.linked_record_template, band.matrix_code)?.row_header_prefix || '试样';
+  const sampleLabel = (sid: string, i: number) => labels[sid] || `${prefix} ${i + 1}`;
+  const concretize = (b: CellBinding, sid: string, i: number): CellBinding => {
+    if (b.source === 'record_cell_sample') {
+      const v = flat[`${band.matrix_code}__${sid}__${b.param_code}`];
+      return { source: 'literal', text: v === null || v === undefined ? '' : String(v) };
+    }
+    if (b.source === 'record_sample_label') return { source: 'literal', text: sampleLabel(sid, i) };
+    if (b.source === 'record_sample_index') return { source: 'literal', text: String(i + 1) };
+    return b;
+  };
+
+  const isRow = band.axis !== 'col';
+  const cols = ft.columns || [];
+  const rows = ft.rows || [];
+  const axisArr: Array<{ id: string }> = isRow ? rows : cols;
+  if (!axisArr.length) return ft;
+  let idx = axisArr.findIndex(x => x.id === band.ref);
+  if (idx < 0) idx = 0;
+  const bandId = axisArr[idx].id;
+  const touches = (rid: string, cid: string) => isRow ? rid === bandId : cid === bandId;
+  const remapKey = (rid: string, cid: string, sid: string) => isRow ? `${bandId}#${sid}::${cid}` : `${rid}::${bandId}#${sid}`;
+  function remap<T>(m: Record<string, T> | undefined, xf?: (v: T, sid: string, i: number) => T): Record<string, T> {
+    const out: Record<string, T> = {};
+    for (const [k, v] of Object.entries(m || {})) {
+      const [rid, cid] = k.split('::');
+      if (!touches(rid, cid)) { out[k] = v; continue; }
+      sids.forEach((sid, i) => { out[remapKey(rid, cid, sid)] = xf ? xf(v, sid, i) : v; });
+    }
+    return out;
+  }
+  const newRows = isRow
+    ? [...rows.slice(0, idx), ...sids.map(sid => ({ ...rows[idx], id: `${bandId}#${sid}` })), ...rows.slice(idx + 1)]
+    : rows;
+  const newCols = !isRow
+    ? [...cols.slice(0, idx), ...sids.map(sid => ({ ...cols[idx], id: `${bandId}#${sid}`, label: cols[idx].label ?? '' })), ...cols.slice(idx + 1)]
+    : cols;
+  return {
+    ...ft,
+    sample_band: undefined,
+    rows: newRows,
+    columns: newCols,
+    cells: remap(ft.cells),
+    spans: remap(ft.spans),
+    header_cells: remap(ft.header_cells),
+    input_cells: remap(ft.input_cells),
+    cell_bindings: remap(ft.cell_bindings, (b, sid, i) => concretize(b, sid, i)),
+  };
+}
+
+/**
  * F0 统一自由网格（free_grid 字段）渲染。与 renderFreeTableTypst 的区别：
  *  - 不强制"列标签表头行"——所有内容都来自 rows×cells（列只提供 id/宽度）；
  *  - `header_cells` 里的格子加粗（表头也是普通格、可自由合并）；
@@ -1971,6 +2037,8 @@ export function renderFreeGridTypst(
   dataOverride?: Record<string, any>,
   ctx?: ReportRenderCtx,
 ): string {
+  // F2：报告侧样品带按录入样品数预展开（无 band / 无 ctx ⇒ 原样）
+  if (ctx && ft.sample_band) ft = expandFreeGridBand(ft, ctx);
   const cols = ft.columns || [];
   const rows = ft.rows || [];
   if (!cols.length || !rows.length) return wrapFigure(field, '#text(fill: gray)[（空网格）]');

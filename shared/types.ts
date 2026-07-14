@@ -520,6 +520,8 @@ export interface FieldDefinition {
     input_cells?: Record<string, true>;
     /** F1 free_grid（报告侧）：每格绑定原始记录/接口取值。键 = `${rowId}::${colId}`。渲染时 `resolveBinding(ctx)` 优先于录入值/固定文字。 */
     cell_bindings?: Record<string, CellBinding>;
+    /** F2 free_grid（报告侧）：样品带——把某一行/列按录入样品数自动展开成 N 份。`matrix_code`＝驱动样品数的原始记录矩阵；`ref`＝作模板的行/列 id。带内格子用 `record_cell_sample`/`record_sample_label`/`record_sample_index` 相对绑定，展开时按各样品落地（同 result_table 的 band）。 */
+    sample_band?: { axis: 'row' | 'col'; matrix_code: string; ref: string };
   };
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {

@@ -7,7 +7,7 @@
  *  - 「表头」写 header_cells（出片加粗）；「录入格」写 input_cells（录入时可填，值存 raw_data[code]，不写模板）。
  */
 import { useState, useEffect } from 'react';
-import { Button, Input, InputNumber, Tooltip, message } from 'antd';
+import { Button, Input, InputNumber, Select, Tooltip, message } from 'antd';
 import { PlusOutlined, MergeCellsOutlined, SplitCellsOutlined } from '@ant-design/icons';
 import type { FieldDefinition, RecordTemplate, CellBinding } from '../../../../../shared/types';
 import BindingPickerModal, { BindingSummary } from '../../ReportEditor/BindingPickerModal';
@@ -177,6 +177,25 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
   const clearCellBinding = (k: string) => { const n = { ...cellBindings }; delete n[k]; update({ cell_bindings: n }); };
   const selCellKey = (range && selCount === 1) ? keyAt(range.minR, range.minC) : null;
 
+  // ─── F2 样品带（报告侧）：标记某行/列随样品数自动展开 ───────────
+  const sampleBand = ft.sample_band;
+  const recordMatrices = (linkedRecord?.groups || []).flatMap(g => g.fields || [])
+    .filter((f: any) => f.type === 'data_matrix').map((f: any) => ({ code: f.code, label: f.label || f.code }));
+  const [bandMatrixSel, setBandMatrixSel] = useState<string | undefined>(undefined);
+  const bandMatrix = bandMatrixSel || sampleBand?.matrix_code || recordMatrices[0]?.code;
+  const selRowId = range ? rows[range.minR]?.id : null;
+  const selColId = range ? cols[range.minC]?.id : null;
+  const setBand = (axis: 'row' | 'col') => {
+    const ref = axis === 'row' ? selRowId : selColId;
+    if (!ref || !bandMatrix) { message.info('先选中带内一个格，并选择「样品来源矩阵」'); return; }
+    update({ sample_band: { axis, matrix_code: bandMatrix, ref } });
+  };
+  const cellInBand = (k: string | null): boolean => {
+    if (!k || !sampleBand) return false;
+    const [rid, cid] = k.split('::');
+    return sampleBand.axis === 'row' ? rid === sampleBand.ref : cid === sampleBand.ref;
+  };
+
   // ─── 渲染 ────────────────────────────────────────────────────────
   const td: React.CSSProperties = { border: '1px solid #d9d9d9', padding: 0, minWidth: 64, height: 34, verticalAlign: 'middle' };
   return (
@@ -206,6 +225,19 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           </Tooltip>
           <Button size="small" disabled={!selCellKey || !cellBindings[selCellKey]} onClick={() => { if (selCellKey) clearCellBinding(selCellKey); }}>清除绑定</Button>
         </>}
+        {linkedRecord && recordMatrices.length > 0 && <>
+          <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
+          <span style={{ fontSize: 12, color: '#8c8c8c' }}>样品带：</span>
+          <Select size="small" style={{ width: 128 }} placeholder="样品来源矩阵" value={bandMatrix}
+            onChange={setBandMatrixSel} options={recordMatrices.map(m => ({ value: m.code, label: m.label }))} />
+          <Tooltip title="把所选格所在的【行】设为样品带：报告生成时按该矩阵实际样品数自动展开成多行（带内格用「当前试样」绑定）">
+            <Button size="small" disabled={!selRowId} onClick={() => setBand('row')}>设为样品带·行</Button>
+          </Tooltip>
+          <Tooltip title="把所选格所在的【列】设为样品带（每列一个样品）">
+            <Button size="small" disabled={!selColId} onClick={() => setBand('col')}>·列</Button>
+          </Tooltip>
+          {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消样品带</Button>}
+        </>}
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', userSelect: dragging ? 'none' : undefined }}>
@@ -221,8 +253,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                   const isHeader = !!headerCells[k];
                   const isInput = !!inputCells[k];
                   const binding = cellBindings[k];
+                  const inBand = cellInBand(k);
                   const inSel = !!range && ri >= range.minR && ri <= range.maxR && ci >= range.minC && ci <= range.maxC;
-                  const bg = binding ? '#fffbe6' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
+                  const bg = binding ? '#fffbe6' : inBand ? '#e6fffb' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
                   return (
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
                       style={{ ...td, background: bg, outline: inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
@@ -240,9 +273,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                           onChange={(e) => setCellText(ri, ci, e.target.value)}
                           style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#69b1ff' : undefined }} />
                       )}
-                      {(isHeader || isInput || binding) && (
-                        <div style={{ fontSize: 8, lineHeight: 1, color: binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
-                          {isHeader ? '表头' : ''}{isHeader && (isInput || binding) ? '·' : ''}{binding ? '绑定' : isInput ? '录入' : ''}
+                      {(isHeader || isInput || binding || inBand) && (
+                        <div style={{ fontSize: 8, lineHeight: 1, color: inBand ? '#08979c' : binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
+                          {[isHeader ? '表头' : '', binding ? '绑定' : isInput ? '录入' : '', inBand ? '样品带' : ''].filter(Boolean).join('·')}
                         </div>
                       )}
                     </td>
@@ -261,8 +294,11 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           open={bindOpen}
           value={cellBindings[bindKey] || { source: 'literal', text: cells[bindKey] || '' }}
           linkedRecord={linkedRecord}
-          allowedSources={['literal', 'record_field', 'record_cell', 'record_summary', 'record_header']}
-          title="为单元格绑定原始记录数据源"
+          allowedSources={cellInBand(bindKey)
+            ? ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header', 'record_cell_sample', 'record_sample_label', 'record_sample_index']
+            : ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header']}
+          bandMatrixCode={cellInBand(bindKey) ? sampleBand?.matrix_code : undefined}
+          title={cellInBand(bindKey) ? '样品带单元格：选「当前试样」按样品自动展开' : '为单元格绑定原始记录数据源'}
           onChange={(b) => setCellBinding(bindKey, b)}
           onClose={() => setBindOpen(false)}
         />
