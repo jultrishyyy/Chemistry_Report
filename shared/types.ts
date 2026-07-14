@@ -522,6 +522,8 @@ export interface FieldDefinition {
     cell_bindings?: Record<string, CellBinding>;
     /** F2 free_grid（报告侧）：样品带——把某一行/列按录入样品数自动展开成 N 份。`matrix_code`＝驱动样品数的原始记录矩阵；`ref`＝作模板的行/列 id。带内格子用 `record_cell_sample`/`record_sample_label`/`record_sample_index` 相对绑定，展开时按各样品落地（同 result_table 的 band）。 */
     sample_band?: { axis: 'row' | 'col'; matrix_code: string; ref: string };
+    /** F3 free_grid：每格公式（替代统计/汇总）。键 = `${rowId}::${colId}`；`Formula.sources` 用其它格的 `${rowId}::${colId}` 键引用（渲染时 execute）。样品带展开时：带内公式的 sources 逐样品落地、带外聚合公式的 sources 展开到全部样品。 */
+    cell_formulas?: Record<string, Formula>;
   };
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {

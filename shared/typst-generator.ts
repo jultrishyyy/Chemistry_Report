@@ -1,4 +1,4 @@
-import type { RecordTemplate, FieldGroup, FieldDefinition, DataMatrixValue, DataMatrixConfig, MatrixParameterDef, MatrixSummaryRowDef, MatrixSummaryColDef, CellBinding, StyleOverride } from './types';
+import type { RecordTemplate, FieldGroup, FieldDefinition, DataMatrixValue, DataMatrixConfig, MatrixParameterDef, MatrixSummaryRowDef, MatrixSummaryColDef, CellBinding, StyleOverride, Formula } from './types';
 import { buildGroupTree } from './group-tree';
 import {
   collectTypstDataKeys,
@@ -10,6 +10,7 @@ import {
   applyMatrixCellFormulas,
   applyMatrixSummaryFormulas,
 } from './matrix-flatten';
+import { execute } from './formula-engine';
 
 /** 仅出现在数据矩阵「汇总行」中的计算字段，不在分组里再单独渲染 #field */
 export function computedCodesOnlyInMatrixSummaries(template: RecordTemplate): Set<string> {
@@ -2012,6 +2013,20 @@ function expandFreeGridBand(
   const newCols = !isRow
     ? [...cols.slice(0, idx), ...sids.map(sid => ({ ...cols[idx], id: `${bandId}#${sid}`, label: cols[idx].label ?? '' })), ...cols.slice(idx + 1)]
     : cols;
+  // 公式：带内格逐样品复制（sources 引用带内格→该样品落地）；带外格保留、把引用带内格的 source 展开到全部样品（聚合整列）
+  function remapFormulas(m: Record<string, Formula> | undefined): Record<string, Formula> {
+    const out: Record<string, Formula> = {};
+    const mapSrc = (s: string, sid: string) => { const [sr, sc] = s.split('::'); return touches(sr, sc) ? remapKey(sr, sc, sid) : s; };
+    for (const [k, f] of Object.entries(m || {})) {
+      const [rid, cid] = k.split('::');
+      if (touches(rid, cid)) {
+        sids.forEach((sid) => { out[remapKey(rid, cid, sid)] = { ...f, sources: (f.sources || []).map(s => mapSrc(s, sid)) }; });
+      } else {
+        out[k] = { ...f, sources: (f.sources || []).flatMap(s => { const [sr, sc] = s.split('::'); return touches(sr, sc) ? sids.map(sid => remapKey(sr, sc, sid)) : [s]; }) };
+      }
+    }
+    return out;
+  }
   return {
     ...ft,
     sample_band: undefined,
@@ -2022,6 +2037,7 @@ function expandFreeGridBand(
     header_cells: remap(ft.header_cells),
     input_cells: remap(ft.input_cells),
     cell_bindings: remap(ft.cell_bindings, (b, sid, i) => concretize(b, sid, i)),
+    cell_formulas: remapFormulas(ft.cell_formulas),
   };
 }
 
@@ -2058,6 +2074,22 @@ export function renderFreeGridTypst(
     const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
     for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) { if (dr || dc) covered.add(`${ri + dr},${ci + dc}`); }
   }
+  // F3：先算各格「基础值」(报告绑定 > 录入值 > 固定文字)，再算公式格(execute；sources 引用其它格 `${rowId}::${colId}` 键)
+  const cellFormulas = ft.cell_formulas || {};
+  const resolved: Record<string, string> = {};
+  for (const r of rows) for (const c of cols) {
+    const key = `${r.id}::${c.id}`;
+    if (cellFormulas[key]) continue;
+    const bindVal = (ctx && ft.cell_bindings?.[key]) ? resolveBinding(ft.cell_bindings[key], ctx) : undefined;
+    const ov = dataOverride ? dataOverride[key] : undefined;
+    resolved[key] = (bindVal != null && bindVal !== '') ? String(bindVal)
+      : (ov != null && ov !== '') ? String(ov)
+      : (ft.cells?.[key] ?? '');
+  }
+  for (const [key, f] of Object.entries(cellFormulas)) {
+    const v = execute(f, resolved);
+    resolved[key] = (v === null || v === undefined) ? '' : String(v);
+  }
   rows.forEach((r, ri) => {
     const h = r.height && /^\d+(\.\d+)?(cm|mm|pt|em|in)$/i.test(String(r.height).trim()) ? String(r.height).trim() : '';
     let pendingMinH = h ? `#box(width: 0pt, height: ${h})` : '';
@@ -2065,12 +2097,7 @@ export function renderFreeGridTypst(
     cols.forEach((c, ci) => {
       if (covered.has(`${ri},${ci}`)) return;   // 被合并主格盖住：不出格
       const key = `${r.id}::${c.id}`;
-      // 取值优先级：报告侧绑定(resolveBinding) > 录入值(dataOverride) > 模板固定文字(cells)
-      const bindVal = (ctx && ft.cell_bindings?.[key]) ? resolveBinding(ft.cell_bindings[key], ctx) : undefined;
-      const ov = dataOverride ? dataOverride[key] : undefined;
-      const raw = (bindVal != null && bindVal !== '') ? bindVal
-        : (ov != null && ov !== '') ? ov
-        : (ft.cells?.[key] ?? '');
+      const raw = resolved[key] ?? '';   // F3：绑定/录入/固定文字/公式已在上方统一算好
       const isHeader = !!ft.header_cells?.[key];
       const sp = ft.spans?.[key];
       const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);

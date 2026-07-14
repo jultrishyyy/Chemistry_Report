@@ -53,6 +53,11 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
     return () => window.removeEventListener('mouseup', up);
   }, []);
   const onCellDown = (ri: number, ci: number, e: React.MouseEvent) => {
+    const k = keyAt(ri, ci);
+    if (fx && pickSrc) {   // 公式选来源模式：点格切换是否作来源（目标格自身除外）
+      if (k !== fx.target) setFx({ ...fx, sources: fx.sources.includes(k) ? fx.sources.filter(x => x !== k) : [...fx.sources, k] });
+      return;
+    }
     if (e.shiftKey && sel) setSel({ ...sel, r1: ri, c1: ci });
     else { setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); setDragging(true); }
   };
@@ -196,6 +201,30 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
     return sampleBand.axis === 'row' ? rid === sampleBand.ref : cid === sampleBand.ref;
   };
 
+  // ─── F3 每格公式（平均/求和/最值/阈值判定；来源引用其它格）────────
+  const cellFx = ft.cell_formulas || {};
+  const FX_LABELS: Record<string, string> = { average: '平均', sum: '求和', max: '最大', min: '最小', threshold: '阈值判定' };
+  const [fx, setFx] = useState<{ target: string; type: string; sources: string[]; op?: string; threshold?: number; decimals?: number } | null>(null);
+  const [pickSrc, setPickSrc] = useState(false);
+  const openFx = () => {
+    if (!selCellKey) return;
+    const cur: any = cellFx[selCellKey];
+    setFx(cur
+      ? { target: selCellKey, type: cur.type, sources: cur.sources || [], op: cur.params?.operator, threshold: cur.params?.threshold, decimals: cur.decimals }
+      : { target: selCellKey, type: 'average', sources: [], decimals: 2 });
+    setPickSrc(true);
+  };
+  const saveFx = () => {
+    if (!fx) return;
+    if (!fx.sources.length) { message.info('请「＋点格添加来源」选择来源格'); return; }
+    const f: any = { type: fx.type, sources: fx.sources };
+    if (fx.type === 'threshold') f.params = { operator: fx.op || '>=', threshold: fx.threshold ?? 0, pass: '合格', fail: '不合格' };
+    if ((fx.type === 'average' || fx.type === 'sum') && fx.decimals != null) f.decimals = fx.decimals;
+    update({ cell_formulas: { ...cellFx, [fx.target]: f } });
+    setFx(null); setPickSrc(false);
+  };
+  const removeFx = (k: string) => { const n = { ...cellFx }; delete n[k]; update({ cell_formulas: n }); };
+
   // ─── 渲染 ────────────────────────────────────────────────────────
   const td: React.CSSProperties = { border: '1px solid #d9d9d9', padding: 0, minWidth: 64, height: 34, verticalAlign: 'middle' };
   return (
@@ -238,7 +267,29 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
           </Tooltip>
           {sampleBand && <Button size="small" danger onClick={() => update({ sample_band: undefined })}>取消样品带</Button>}
         </>}
+        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
+        <Tooltip title="给所选单格设公式（平均/求和/最值/阈值判定；来源引用其它格。样品带内=逐样品，带外=聚合整列）">
+          <Button size="small" disabled={!selCellKey} onClick={openFx}>公式</Button>
+        </Tooltip>
+        {selCellKey && cellFx[selCellKey] && <Button size="small" onClick={() => removeFx(selCellKey)}>移除公式</Button>}
       </div>
+      {fx && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8, padding: '6px 10px', background: '#f9f0ff', border: '1px solid #d3adf7', borderRadius: 6 }}>
+          <span style={{ fontSize: 12, color: '#722ed1' }}>公式 · 目标格 <b>{fx.target}</b>：</span>
+          <Select size="small" style={{ width: 110 }} value={fx.type} onChange={(t) => setFx({ ...fx, type: t })}
+            options={Object.entries(FX_LABELS).map(([v, l]) => ({ value: v, label: l }))} />
+          {fx.type === 'threshold' && <>
+            <Select size="small" style={{ width: 64 }} value={fx.op || '>='} onChange={(op) => setFx({ ...fx, op })}
+              options={['>=', '>', '<=', '<', '=='].map(o => ({ value: o, label: o }))} />
+            <InputNumber size="small" style={{ width: 84 }} placeholder="阈值" value={fx.threshold} onChange={(v) => setFx({ ...fx, threshold: v ?? 0 })} />
+          </>}
+          <Button size="small" type={pickSrc ? 'primary' : 'default'} onClick={() => setPickSrc(!pickSrc)}>{pickSrc ? '点格选来源中…（点此完成）' : '＋点格添加来源'}</Button>
+          <span style={{ fontSize: 11, color: '#8c8c8c' }}>来源：{fx.sources.length ? fx.sources.join('、') : '（未选）'}</span>
+          {fx.sources.length > 0 && <Button size="small" onClick={() => setFx({ ...fx, sources: [] })}>清空</Button>}
+          <Button size="small" type="primary" onClick={saveFx}>确定</Button>
+          <Button size="small" onClick={() => { setFx(null); setPickSrc(false); }}>取消</Button>
+        </div>
+      )}
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', userSelect: dragging ? 'none' : undefined }}>
           <tbody>
@@ -254,14 +305,20 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                   const isInput = !!inputCells[k];
                   const binding = cellBindings[k];
                   const inBand = cellInBand(k);
+                  const hasFx = cellFx[k];
+                  const isSrc = !!(fx && pickSrc && fx.sources.includes(k));
                   const inSel = !!range && ri >= range.minR && ri <= range.maxR && ci >= range.minC && ci <= range.maxC;
-                  const bg = binding ? '#fffbe6' : inBand ? '#e6fffb' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
+                  const bg = hasFx ? '#f9f0ff' : binding ? '#fffbe6' : inBand ? '#e6fffb' : isInput ? '#e6f4ff' : isHeader ? '#f6ffed' : '#fff';
                   return (
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
-                      style={{ ...td, background: bg, outline: inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
+                      style={{ ...td, background: bg, outline: isSrc ? '2px dashed #eb2f96' : inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
                       onMouseDown={(e) => onCellDown(ri, ci, e)}
                       onMouseEnter={() => onCellEnter(ri, ci)}>
-                      {binding ? (
+                      {hasFx ? (
+                        <div style={{ fontSize: 11, padding: '2px 4px', minHeight: 20, color: '#722ed1', fontWeight: isHeader ? 700 : 400 }}>
+                          ƒ {FX_LABELS[(hasFx as any).type] || '公式'}
+                        </div>
+                      ) : binding ? (
                         <div style={{ fontSize: 11, padding: '2px 4px', minHeight: 20, fontWeight: isHeader ? 700 : 400 }}>
                           <BindingSummary value={binding} linkedRecord={linkedRecord || null} />
                         </div>
@@ -273,9 +330,9 @@ export default function FreeGridCanvas({ field, onChange, linkedRecord }: {
                           onChange={(e) => setCellText(ri, ci, e.target.value)}
                           style={{ textAlign: 'center', fontWeight: isHeader ? 700 : 400, color: isInput && !cells[k] ? '#69b1ff' : undefined }} />
                       )}
-                      {(isHeader || isInput || binding || inBand) && (
-                        <div style={{ fontSize: 8, lineHeight: 1, color: inBand ? '#08979c' : binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
-                          {[isHeader ? '表头' : '', binding ? '绑定' : isInput ? '录入' : '', inBand ? '样品带' : ''].filter(Boolean).join('·')}
+                      {(isHeader || isInput || binding || inBand || hasFx) && (
+                        <div style={{ fontSize: 8, lineHeight: 1, color: hasFx ? '#722ed1' : inBand ? '#08979c' : binding ? '#d48806' : isInput ? '#1677ff' : '#52c41a', paddingBottom: 2 }}>
+                          {[isHeader ? '表头' : '', hasFx ? '公式' : binding ? '绑定' : isInput ? '录入' : '', inBand ? '样品带' : ''].filter(Boolean).join('·')}
                         </div>
                       )}
                     </td>
