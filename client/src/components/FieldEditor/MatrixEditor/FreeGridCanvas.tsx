@@ -6,8 +6,8 @@
  *  - 合并写 free_table.spans[主格]；被盖格渲染时跳过（与出片端 renderFreeGridTypst 同口径）。
  *  - 「表头」写 header_cells（出片加粗）；「录入格」写 input_cells（录入时可填，值存 raw_data[code]，不写模板）。
  */
-import { useState } from 'react';
-import { Button, Input, Tooltip, message } from 'antd';
+import { useState, useEffect } from 'react';
+import { Button, Input, InputNumber, Tooltip, message } from 'antd';
 import { PlusOutlined, MergeCellsOutlined, SplitCellsOutlined } from '@ant-design/icons';
 import type { FieldDefinition } from '../../../../../shared/types';
 
@@ -41,9 +41,19 @@ export default function FreeGridCanvas({ field, onChange }: {
     minC: Math.min(sel.c0, sel.c1), maxC: Math.max(sel.c0, sel.c1),
   };
   const selCount = range ? (range.maxR - range.minR + 1) * (range.maxC - range.minC + 1) : 0;
-  const onCellClick = (ri: number, ci: number, e: React.MouseEvent) => {
+  // Excel 式框选：在格上按下并拖动即框选矩形区（松开结束）；Shift+点＝从当前选区扩展
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    const up = () => setDragging(false);
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+  }, []);
+  const onCellDown = (ri: number, ci: number, e: React.MouseEvent) => {
     if (e.shiftKey && sel) setSel({ ...sel, r1: ri, c1: ci });
-    else setSel({ r0: ri, c0: ci, r1: ri, c1: ci });
+    else { setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); setDragging(true); }
+  };
+  const onCellEnter = (ri: number, ci: number) => {
+    if (dragging) setSel(s => (s ? { ...s, r1: ri, c1: ci } : { r0: ri, c0: ci, r1: ri, c1: ci }));
   };
 
   // 被合并主格 span 覆盖的格（行列序号），与 renderFreeGridTypst 同口径
@@ -90,6 +100,19 @@ export default function FreeGridCanvas({ field, onChange }: {
     const removed = new Set(cols.slice(range.minC, range.maxC + 1).map(c => c.id));
     update({ columns: cols.filter(c => !removed.has(c.id)), ...cleanMaps((_rid, cid) => removed.has(cid)) });
     setSel(null);
+  };
+  // 尺寸直填：把网格调整到 N 行 / N 列（末尾增减，保留已有内容/合并/标记）
+  const setRowCount = (n: number | null) => {
+    const t = Math.max(1, Math.min(50, Math.round(n || 1)));
+    if (t === rows.length) return;
+    if (t > rows.length) update({ rows: [...rows, ...Array.from({ length: t - rows.length }, (_, i) => ({ id: `r_${Date.now()}_${i}` }))] });
+    else { const rm = new Set(rows.slice(t).map(r => r.id)); update({ rows: rows.slice(0, t), ...cleanMaps((rid) => rm.has(rid)) }); setSel(null); }
+  };
+  const setColCount = (n: number | null) => {
+    const t = Math.max(1, Math.min(30, Math.round(n || 1)));
+    if (t === cols.length) return;
+    if (t > cols.length) update({ columns: [...cols, ...Array.from({ length: t - cols.length }, (_, i) => ({ id: `c_${Date.now()}_${i}`, label: '' }))] });
+    else { const rm = new Set(cols.slice(t).map(c => c.id)); update({ columns: cols.slice(0, t), ...cleanMaps((_rid, cid) => rm.has(cid)) }); setSel(null); }
   };
 
   // ─── 合并 / 拆分 ─────────────────────────────────────────────────
@@ -148,6 +171,12 @@ export default function FreeGridCanvas({ field, onChange }: {
   return (
     <div>
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 12, color: '#8c8c8c' }}>尺寸：</span>
+        <InputNumber size="small" min={1} max={50} style={{ width: 54 }} value={rows.length} onChange={setRowCount} />
+        <span style={{ fontSize: 12, color: '#8c8c8c' }}>行 ×</span>
+        <InputNumber size="small" min={1} max={30} style={{ width: 54 }} value={cols.length} onChange={setColCount} />
+        <span style={{ fontSize: 12, color: '#8c8c8c' }}>列</span>
+        <span style={{ width: 1, height: 18, background: '#d9d9d9' }} />
         <span style={{ fontSize: 12, color: '#8c8c8c' }}>结构：</span>
         <Tooltip title="在末尾加一行"><Button size="small" icon={<PlusOutlined />} onClick={addRow}>行</Button></Tooltip>
         <Tooltip title="在末尾加一列"><Button size="small" icon={<PlusOutlined />} onClick={addCol}>列</Button></Tooltip>
@@ -161,7 +190,7 @@ export default function FreeGridCanvas({ field, onChange }: {
         <Tooltip title="把所选格标为/取消录入格（录入时可填值）"><Button size="small" disabled={!range} onClick={() => toggleMark('input_cells')}>录入格</Button></Tooltip>
       </div>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse' }}>
+        <table style={{ borderCollapse: 'collapse', userSelect: dragging ? 'none' : undefined }}>
           <tbody>
             {rows.map((r, ri) => (
               <tr key={r.id}>
@@ -178,7 +207,8 @@ export default function FreeGridCanvas({ field, onChange }: {
                   return (
                     <td key={c.id} colSpan={cspan > 1 ? cspan : undefined} rowSpan={rspan > 1 ? rspan : undefined}
                       style={{ ...td, background: bg, outline: inSel ? '2px solid #722ed1' : undefined, outlineOffset: -2, cursor: 'cell' }}
-                      onMouseDown={(e) => onCellClick(ri, ci, e)}>
+                      onMouseDown={(e) => onCellDown(ri, ci, e)}
+                      onMouseEnter={() => onCellEnter(ri, ci)}>
                       <Input
                         size="small" bordered={false} variant="borderless"
                         value={cells[k] ?? ''}
@@ -199,7 +229,7 @@ export default function FreeGridCanvas({ field, onChange }: {
         </table>
       </div>
       <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 6 }}>
-        点格子选中并直接输入固定文字；按住 <b>Shift</b> 点另一格框选矩形区 → 合并 / 标记表头 / 标记录入格。<b>录入格</b>（蓝底）在数据录入时由工程师填值。
+        点格子选中并直接输入固定文字；<b>在格上按住鼠标拖动</b>即可框选多个格（松开结束；也可按住 Shift 点另一格扩展）→ 合并 / 标记表头 / 标记录入格。<b>录入格</b>（蓝底）在数据录入时由工程师填值。
       </div>
     </div>
   );
