@@ -10,7 +10,6 @@ import type { FieldGroup, FieldDefinition } from '../../../../shared/types';
  * 已是 image 字段分区（无 gallery 字段）＝原样返回，幂等。
  */
 export function migrateGalleryGroup(g: FieldGroup): FieldGroup {
-  if (g.section_role !== 'images') return g;
   const gal = g.fields.find(f => f.type === 'report_image_gallery');
   if (!gal) return g;
   const cfg: any = (gal as any).image_gallery || {};
@@ -23,10 +22,14 @@ export function migrateGalleryGroup(g: FieldGroup): FieldGroup {
     : codes.map((src) => mk(`img_${src}`, '', src));
   const image_layout: any = {
     title_mode: cfg.title_mode || 'per', cols: cfg.cols, width_cm: cfg.width_cm, height_cm: cfg.height_cm,
-    solo: cfg.solo, shared_title: cfg.shared_title, header_follow: cfg.header_follow,
+    solo: cfg.solo, seamless: cfg.seamless, shared_title: cfg.shared_title, header_follow: cfg.header_follow,
+    inset_x: cfg.inset_x, inset_y: cfg.inset_y, title_inset_y: cfg.title_inset_y,
+    label_gap: cfg.label_gap, label_style: cfg.label_style,
     ...(gal.caption ? { caption: gal.caption } : {}),
   };
-  return { ...g, image_layout, fields: [...g.fields.filter(f => f !== gal), ...imgFields] };
+  // 部分历史项目模板漏写了 section_role='images'，但只要含旧图库字段就应视为图片分区；
+  // 否则编辑器会停留在旧的“图库/来源”配置，照片也不会走统一图片集合。
+  return { ...g, section_role: 'images', image_layout, fields: [...g.fields.filter(f => f !== gal), ...imgFields] };
 }
 
 /** 对一组分区逐个迁移（幂等）。 */

@@ -7,13 +7,14 @@ import { Button, Tooltip, message } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 
 export default function PdfDownloadButton({
-  onDownload, title = '下载渲染后的 PDF', size = 'small', type, children,
+  onDownload, title = '下载渲染后的 PDF', size = 'small', type, children, disabled,
 }: {
   onDownload: () => Promise<void>;
   title?: string;
   size?: 'small' | 'middle' | 'large';
   type?: 'default' | 'text' | 'link' | 'primary' | 'dashed';
   children?: React.ReactNode;
+  disabled?: boolean;
 }) {
   const [loading, setLoading] = useState(false);
   const run = async () => {
@@ -24,7 +25,7 @@ export default function PdfDownloadButton({
   };
   return (
     <Tooltip title={title}>
-      <Button size={size} type={type} icon={<DownloadOutlined />} loading={loading} onClick={run}>{children}</Button>
+      <Button size={size} type={type} icon={<DownloadOutlined />} loading={loading} disabled={disabled} onClick={run}>{children}</Button>
     </Tooltip>
   );
 }

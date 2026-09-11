@@ -150,6 +150,12 @@ export function buildReportMetaFromReq(req: {
  */
 export async function matchRequisitionScope(
   pool: pg.Pool, order_no: string, scope: { samples: any[] } | null | undefined,
+  savedSelections: Array<{
+    scope_key?: string;
+    record_data_id?: number;
+    project_template_id?: number;
+    project_template_version_id?: number | null;
+  }> = [],
 ): Promise<ReportReqMatchEntry[]> {
   const samples = Array.isArray(scope?.samples) ? scope!.samples : [];
   if (!samples.length) return [];
@@ -159,6 +165,8 @@ export async function matchRequisitionScope(
   const orderSamples: any[] = Array.isArray(wo.rows[0]?.payload?.samples) ? wo.rows[0].payload.samples : [];
   const orderSampleByName = new Map<string, any>();
   for (const os of orderSamples) if (os?.name) orderSampleByName.set(os.name, os);
+  const orderSampleById = new Map<string, any>();
+  for (const os of orderSamples) if (os?.id != null) orderSampleById.set(String(os.id), os);
 
   // 录入数据：按 (sample_external_id, test_item_name) 分桶
   const rd = await pool.query(
@@ -171,25 +179,58 @@ export async function matchRequisitionScope(
     (recByKey.get(k) || recByKey.set(k, []).get(k)!).push(r);
   }
 
-  // 项目报告模板：record_template_id → project_template_id（多个取首个，文员可改）。
+  // 项目报告模板：record_template_id → 全部候选。
   // 只取【当前生效版本已审核通过】的项目模板——未审核通过的不参与匹配，不会被自动用于生成
   // （否则会生成出结构不完整/无法编辑的报告）。
   const pt = await pool.query(
-    `SELECT t.id, t.linked_record_template_id FROM report_templates t
+    `SELECT t.id, t.name, t.linked_record_template_id,
+            t.host_manufacturer_id,t.updated_at,
+            cv.id AS version_id, cv.version_no, cv.layout_options
+       FROM report_templates t
      JOIN report_template_versions cv ON cv.id = t.current_version_id AND cv.status = 'approved'
-     WHERE t.template_kind = 'project' AND t.archived_at IS NULL AND t.linked_record_template_id IS NOT NULL`,
+     WHERE t.template_kind = 'project' AND t.archived_at IS NULL AND t.linked_record_template_id IS NOT NULL
+     ORDER BY t.name, t.id`,
   );
-  const projByRecTpl = new Map<number, number>();
-  for (const row of pt.rows) if (!projByRecTpl.has(row.linked_record_template_id)) projByRecTpl.set(row.linked_record_template_id, row.id);
+  const projByRecTpl = new Map<number, any[]>();
+  for (const row of pt.rows) {
+    const list = projByRecTpl.get(row.linked_record_template_id) || [];
+    list.push({
+      id: row.id,
+      name: row.name,
+      version_id: row.version_id,
+      version_no: row.version_no,
+      project_name: row.layout_options?.project_name || null,
+      host_manufacturer_id: row.host_manufacturer_id || null,
+      updated_at: row.updated_at || null,
+    });
+    projByRecTpl.set(row.linked_record_template_id, list);
+  }
+  const savedByKey = new Map(savedSelections.map(x => [
+    `${x.scope_key || ''}::${Number(x.record_data_id)}`,
+    x,
+  ]));
+  // 取号接口的默认范围可以在后续被扩展为整单范围；扩展后 scope_key 的序号可能变化。
+  // 同一原始记录的已选项目模板仍应被带回，避免用户重新选择。
+  const savedByRecordId = new Map(savedSelections
+    .filter(x => Number.isFinite(Number(x.record_data_id)))
+    .map(x => [Number(x.record_data_id), x]));
 
   const out: ReportReqMatchEntry[] = [];
-  for (const smp of samples) {
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
+    const smp = samples[sampleIndex];
     const sampleName = smp?.name || '';
-    const orderSample = orderSampleByName.get(sampleName);
-    for (const t of (smp?.test_infos || [])) {
+    // 名称可能重复或后续被修改；整单候选优先按稳定的外部样品 ID 关联。
+    const sampleIdFromScope = smp?.id ?? smp?.sample_external_id;
+    const orderSample = sampleIdFromScope != null
+      ? orderSampleById.get(String(sampleIdFromScope)) || orderSampleByName.get(sampleName)
+      : orderSampleByName.get(sampleName);
+    const tests = smp?.test_infos || [];
+    for (let testIndex = 0; testIndex < tests.length; testIndex++) {
+      const t = tests[testIndex];
       const projectName = t?.name || '';
+      const scopeKey = `s${sampleIndex + 1}:t${testIndex + 1}`;
       if (!orderSample) {
-        out.push({ sample_name: sampleName, project_name: projectName, sample_external_id: null, status: 'unmatched', note: '委托单中找不到该样品（可能已删除/改名）', assignments: [] });
+        out.push({ scope_key: scopeKey, sample_name: sampleName, project_name: projectName, sample_external_id: null, status: 'unmatched', note: '委托单中找不到该样品（可能已删除/改名）', assignments: [] });
         continue;
       }
       const sampleId = orderSample.id;
@@ -197,6 +238,7 @@ export async function matchRequisitionScope(
       const recs = recByKey.get(`${sampleId}||${projectName}`) || [];
       if (!recs.length) {
         out.push({
+          scope_key: scopeKey,
           sample_name: sampleName, project_name: projectName, sample_external_id: sampleId,
           status: inOrder ? 'needs_record' : 'unmatched',
           note: inOrder ? '该项目尚无录入数据' : '委托单该样品下找不到此项目（可能已删除/改名）',
@@ -205,20 +247,40 @@ export async function matchRequisitionScope(
         continue;
       }
       // 有 record_data：优先 reviewed 排前
-      recs.sort((a, b) => (a.audit_status === 'reviewed' ? -1 : 0) - (b.audit_status === 'reviewed' ? -1 : 0));
-      const assignments: ReportReqMatchAssignment[] = recs.map((r) => ({
-        record_data_id: r.id,
-        record_data_status: r.audit_status,
-        record_template_id: r.template_id,
-        project_template_id: projByRecTpl.get(r.template_id) ?? null,
-      }));
+      recs.sort((a, b) => {
+        const reviewedOrder = Number(b.audit_status === 'reviewed') - Number(a.audit_status === 'reviewed');
+        return reviewedOrder || Number(b.id) - Number(a.id);
+      });
+      const assignments: ReportReqMatchAssignment[] = recs.map((r) => {
+        const candidates = projByRecTpl.get(r.template_id) || [];
+        const saved = savedByKey.get(`${scopeKey}::${Number(r.id)}`)
+          || savedByRecordId.get(Number(r.id));
+        // 项目模板只能由文员在“报告配置”中确认。即使只有一个候选，也仅作为推荐项显示，
+        // 不再静默写入/自动生成，避免匹配成为不可校对的黑箱。
+        const selected = saved
+          ? candidates.find(c => Number(c.id) === Number(saved.project_template_id))
+          : undefined;
+        return {
+          record_data_id: r.id,
+          record_data_status: r.audit_status,
+          record_template_id: r.template_id,
+          project_template_id: selected?.id ?? null,
+          project_template_version_id: selected?.version_id ?? null,
+          project_template_candidates: candidates,
+        };
+      });
       const anyReviewed = recs.some((r) => r.audit_status === 'reviewed');
-      const anyProjectTpl = assignments.some((a) => a.project_template_id != null);
+      const reviewedAssignments = assignments.filter(a => a.record_data_status === 'reviewed');
+      const anyCandidates = reviewedAssignments.some(a => (a.project_template_candidates?.length || 0) > 0);
+      const needsChoice = reviewedAssignments.some(a =>
+        (a.project_template_candidates?.length || 0) > 0 && a.project_template_id == null);
       out.push({
+        scope_key: scopeKey,
         sample_name: sampleName, project_name: projectName, sample_external_id: sampleId,
         status: 'matched',
         note: !anyReviewed ? '已找到录入数据，但尚未审核通过'
-          : !anyProjectTpl ? '项目报告模板未审核通过或未配置，暂不能生成'
+          : !anyCandidates ? '项目报告模板未审核通过或未配置，暂不能生成'
+          : needsChoice ? '存在多个关联的项目报告模板，请确认本次出报告使用哪一份'
           : undefined,
         assignments,
       });

@@ -6,6 +6,8 @@ import { randomUUID } from 'crypto';
 import ExcelJS from 'exceljs';
 import { uploadsDir } from '../../../config/index.js';
 import { storeAttachment, resolveStoredFile, recordDirName } from '../services/upload-paths.js';
+import { requirePermission } from './auth.js';
+import { workbookPreview, isExcelTempPath } from '../services/excel-workbook.ts';
 
 const router = Router();
 import { pool } from '../db.js';
@@ -32,9 +34,27 @@ function sweepOldExcelTemps(): void {
 sweepOldExcelTemps();  // 启动时清一次历史残留
 
 const upload = multer({ dest: EXCEL_TMP_DIR });
+const workbookUpload = multer({ dest: EXCEL_TMP_DIR, limits: { fileSize: 10 * 1024 * 1024 } });
+
+/** New preview flow returns bounded sheet data, never a server filesystem path. */
+router.post('/workbook', requirePermission('record.entry'), (req, res) => {
+  workbookUpload.single('file')(req, res, async error => {
+    if (error) return res.status(400).json({ error: '文件上传失败或超过10MB，请缩小文件后重试' });
+    if (!req.file) return res.status(400).json({ error: '请选择Excel文件' });
+    try {
+      if (!/\.xlsx$/i.test(req.file.originalname)) return res.status(400).json({ error: '目前支持.xlsx；请将旧.xls文件用Excel另存为.xlsx后导入' });
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.readFile(req.file.path);
+      const sheets = workbookPreview(wb);
+      if (!sheets.length) throw new Error('工作簿中没有可读取的Sheet');
+      res.json({ sheets });
+    } catch (error: any) { res.status(400).json({ error: error.message || 'Excel文件无法解析' }); }
+    finally { if (req.file && existsSync(req.file.path)) { try { unlinkSync(req.file.path); } catch { /* TTL cleanup remains available */ } } }
+  });
+});
 
 /** POST /api/excel-import/parse — 上传 Excel，返回 sheet 列表 + 各 sheet 前几行预览 */
-router.post('/parse', upload.single('file'), async (req, res) => {
+router.post('/parse', requirePermission('record.entry'), upload.single('file'), async (req, res) => {
   try {
     sweepOldExcelTemps();  // 机会性清理旧临时文件
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -65,10 +85,13 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 });
 
 /** POST /api/excel-import/extract — 按映射配置提取数据 */
-router.post('/extract', async (req, res) => {
+router.post('/extract', requirePermission('record.entry'), async (req, res) => {
   try {
-    const { tempPath, sheetName, dataStartRow = 2, columnMapping, rowLabelColumn = 0, dataStartCol } = req.body;
+    const { tempPath, sheetName, dataStartRow = 2, columnMapping, rowLabelColumn = 0, dataStartCol, rowCount, colCount } = req.body;
     if (!tempPath || !sheetName) return res.status(400).json({ error: 'Missing tempPath or sheetName' });
+    if (!isExcelTempPath(tempPath, EXCEL_TMP_DIR) || !existsSync(tempPath)) {
+      return res.status(400).json({ error: '导入临时文件无效或已过期，请重新上传' });
+    }
 
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.readFile(tempPath);
@@ -79,6 +102,23 @@ router.post('/extract', async (req, res) => {
     // 行表头/列表头都由模板配置，Excel 里的表头区整体跳过
     if (dataStartCol !== undefined && dataStartCol !== null) {
       const grid: any[][] = [];
+      // 自由表格会传明确的目标尺寸：逐格读取固定矩形，必须保留中间的整空行/空列，
+      // 否则 Excel 里的物理位置会在导入后发生上移。数据矩阵不传尺寸，继续兼容旧行为。
+      if (Number(rowCount) > 0 && Number(colCount) > 0) {
+        const rows = Math.min(500, Math.max(1, Number(rowCount)));
+        const cols = Math.min(200, Math.max(1, Number(colCount)));
+        for (let r = 0; r < rows; r++) {
+          const out: any[] = [];
+          const row = ws.getRow(Number(dataStartRow) + 1 + r);
+          for (let c = 0; c < cols; c++) {
+            const raw = row.getCell(Number(dataStartCol) + 1 + c).value as any;
+            const x = raw && typeof raw === 'object' && 'result' in raw ? raw.result : raw;
+            out.push(x === null || x === undefined ? '' : x);
+          }
+          grid.push(out);
+        }
+        return res.json({ grid, sheetName });
+      }
       ws.eachRow((row, rowNum) => {
         if (rowNum <= dataStartRow) return;
         const vals = (row.values as any[])?.slice(1) || [];
@@ -135,9 +175,9 @@ async function recordContext(recordId: string): Promise<{ orderNo: string; sampl
 }
 
 /** POST /api/record-data/:id/attachments — 保存文件并记录附件 */
-router.post('/:id/attachments', upload.single('file'), async (req, res) => {
+router.post('/:id/attachments', requirePermission('record.entry'), upload.single('file'), async (req, res) => {
   try {
-    const recordId = req.params.id;
+    const recordId = String(req.params.id);
     if (!req.file) return res.status(400).json({ error: 'No file' });
 
     // multer/busboy 默认按 latin1 解析上传文件名，中文(UTF-8)会变乱码——按字节重新解回 UTF-8。
@@ -155,6 +195,7 @@ router.post('/:id/attachments', upload.single('file'), async (req, res) => {
       filename: originalName,
       path: stored.relPath,   // 相对上传根目录的新结构路径
       uploaded_at: new Date().toISOString(),
+      size_bytes: req.file.size,
       // kind 区分：'excel'＝导入并留存的 Excel（数据表区显示）；'file'＝通用附件（图片旁/录入页底显示）。缺省 file。
       kind: req.body?.kind === 'excel' ? 'excel' : 'file',
     };
@@ -192,7 +233,31 @@ router.get('/:id/attachments/:fileId', async (req, res) => {
       'Content-Disposition',
       `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(utf8Name)}`,
     );
+    res.setHeader('Content-Length', statSync(filePath).size);
     createReadStream(filePath).pipe(res);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** DELETE /api/record-data/:id/attachments/:fileId — 删除附件记录及其已落盘文件。 */
+router.delete('/:id/attachments/:fileId', requirePermission('record.entry'), async (req, res) => {
+  try {
+    const { id, fileId } = req.params;
+    const result = await pool.query('SELECT attachments FROM record_data WHERE id = $1', [id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Record not found' });
+    const attachments = Array.isArray(result.rows[0].attachments) ? result.rows[0].attachments : [];
+    const attachment = attachments.find((item: any) => item?.id === fileId);
+    if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
+
+    // 先更新数据库，文件清理失败不影响用户从记录中移除该附件；路径由 resolveStoredFile 校验。
+    const next = attachments.filter((item: any) => item?.id !== fileId);
+    await pool.query('UPDATE record_data SET attachments = $1::jsonb WHERE id = $2', [JSON.stringify(next), id]);
+    const storedPath = resolveStoredFile(attachment.path);
+    if (storedPath && existsSync(storedPath)) {
+      try { unlinkSync(storedPath); } catch { /* 已从记录移除，磁盘残留交给后续清理 */ }
+    }
+    res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, Drawer, Dropdown, Input, InputNumber, Modal, Popover, Segmented, Space, Tag, Tooltip } from 'antd';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Alert, Button, Card, Drawer, Dropdown, InputNumber, message, Modal, Segmented, Space, Tag, Tooltip } from 'antd';
 import {
-  AppstoreAddOutlined, ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownOutlined,
+  AppstoreAddOutlined, ArrowDownOutlined, ArrowUpOutlined, CloseOutlined, DeleteOutlined, DownOutlined,
   ExportOutlined, EyeInvisibleOutlined, EyeOutlined, FontColorsOutlined, FunctionOutlined, HolderOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined, PlusOutlined, RightOutlined, TableOutlined, VerticalAlignTopOutlined,
 } from '@ant-design/icons';
@@ -12,7 +12,7 @@ import { expandMatrixFieldCodes, uniqueCode } from '../../../../shared/matrix-fl
 import { buildGroupTree, isSubgroup } from '../../../../shared/group-tree';
 import {
   FIELD_CATEGORIES,
-  categoriesForEditor,
+  categoriesForGroup,
   categoryOfField,
   createFieldForCategory,
   editorCapabilities,
@@ -23,11 +23,17 @@ import { SECTION_PRESETS, isSignatureGroup } from './section-presets';
 import FormulaEditor from '../FormulaEditor';
 import FieldPropsPanel from './FieldPropsPanel';
 import DocumentStylePanel from './DocumentStylePanel';
+import AutoGrowTextArea from '../AutoGrowTextArea';
 import TitleStylePanel from './TitleStylePanel';
 import FormatPanel from './FormatPanel';
 import ImageSectionPanel from './ImageSectionPanel';
 import ImageSectionNotes from './ImageSectionNotes';
+import ClosablePopover from '../ClosablePopover';
 import { FORMULA_TYPES } from '../../../../shared/formula-engine';
+import { cloneTemplateField } from '../../../../shared/clone-template-field';
+
+// In-app clipboard survives route changes, but is not persisted with template data.
+let fieldClipboard: { field: FieldDefinition; mode: EditorMode; templateId?: number; templateName: string } | null = null;
 
 export type EditorMode = 'record' | 'report-cover' | 'report-project';
 
@@ -39,9 +45,13 @@ interface FieldEditorProps {
   /** project 模式下关联的原始记录模板（供 BindingEditor 使用） */
   linkedRecord?: RecordTemplate | null;
   /** 选中/点击字段时回调（code, groupId）——编辑器 ⇄ PDF 正向跳转用；code 为空 = 仅分区 */
-  onFieldFocus?: (code: string, groupId: string) => void;
+  onFieldFocus?: (code: string, groupId: string, field?: FieldDefinition) => void;
+  /** 字段属性卡关闭/取消选中时，通知 PDF 清除持续定位标记。 */
+  onFieldBlur?: () => void;
   /** 外部请求选中（PDF Ctrl+点击反向跳转）：kind=field 按 code 选字段，kind=group 滚到分区 */
   selectRequest?: { kind: 'field' | 'group'; code: string; token: number } | null;
+  /** 文档未取得编辑权时为 true：仍可浏览结构和属性，但禁止产生误导性的新增/修改操作。 */
+  readOnly?: boolean;
 }
 
 // 「排版」选择器（竖排/多列/表格）已按需求移除；存量 grid/table 分区仍按存储值渲染（渲染路径保留），编辑器不再提供切换。
@@ -77,13 +87,16 @@ export default function FieldEditor(props: FieldEditorProps) {
   );
 }
 
-function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRecord = null, onFieldFocus, selectRequest }: FieldEditorProps) {
+function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRecord = null, onFieldFocus, onFieldBlur, selectRequest, readOnly = false }: FieldEditorProps) {
   // 选中字段（打开属性面板）/ 公式编辑目标 —— 用 field.id 引用，拖拽重排后不会指错
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [formulaId, setFormulaId] = useState<string | null>(null);
+  const [, refreshClipboard] = useState(0);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [outlineOpen, setOutlineOpen] = useState<boolean>(() => localStorage.getItem('feOutlineOpen') !== '0');
   const mainRef = useRef<HTMLDivElement | null>(null);
+  // 属性卡片通过 body 浮层显示，但用编辑区边界约束位置：可越过左栏向右拉伸，同时不遮页面顶栏。
+  const editorRootRef = useRef<HTMLDivElement | null>(null);
 
   // 字段属性 / 公式弹窗宽度（拖左缘调整，持久化到 localStorage）
   const [panelWidth, setPanelWidth] = useState<number>(() => {
@@ -91,7 +104,10 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
     return v >= 380 && v <= 1100 ? v : 640;
   });
   const updatePanelWidth = (w: number) => {
-    const clamped = Math.min(Math.max(Math.round(w), 380), 1100);
+    const boundary = editorRootRef.current?.closest('[data-editor-split-root="true"]') as HTMLElement | null;
+    const left = boundary?.getBoundingClientRect().left ?? editorRootRef.current?.getBoundingClientRect().left ?? 0;
+    const available = Math.max(320, window.innerWidth - left - 12);
+    const clamped = Math.min(Math.max(Math.round(w), Math.min(380, available)), Math.min(1100, available));
     setPanelWidth(clamped);
     localStorage.setItem('fieldPanelWidth', String(clamped));
   };
@@ -127,14 +143,99 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
   const updateGroups = (groups: FieldGroup[]) => {
     onChange({ ...template, groups });
   };
+  const clearSelectedField = () => {
+    const close = () => { setSelectedId(null); onFieldBlur?.(); };
+    if (document.querySelector('.free-grid-formula-host [data-formula-dirty="true"]')) {
+      Modal.confirm({ title: '公式修改尚未应用', content: '关闭字段属性会放弃当前公式草稿。其他已保存的设置不受影响。', okText: '放弃并关闭', cancelText: '继续编辑', zIndex: 1200, onOk: close });
+    } else close();
+  };
 
   /** 模板内已用字段 code（编码系统自动生成、防撞，用户不可见不可改） */
   const usedFieldCodes = () => new Set(template.groups.flatMap(g => g.fields.map(f => f.code)));
 
+  const copyField = (field: FieldDefinition) => {
+    fieldClipboard = { field: JSON.parse(JSON.stringify(field)), mode: editorMode, templateId: template.id, templateName: template.name };
+    refreshClipboard(n => n + 1);
+    message.success('字段已复制，可右键或使用快捷键粘贴');
+  };
+  const pasteField = (groupId: string, afterId?: string) => {
+    if (readOnly) { message.info('请先点击“开始编辑”'); return; }
+    const clipboard = fieldClipboard;
+    if (!clipboard) { message.info('请先右键复制一个字段'); return; }
+    const group = template.groups.find(g => g.id === groupId);
+    if (!group || isSignatureGroup(group)) return;
+    if (clipboard.mode !== editorMode) { message.warning('请在同类型模板之间复制粘贴，避免录入配置与报告映射混用'); return; }
+    if (clipboard.field.conclusion_role || clipboard.field.signature_line) {
+      message.warning('结论专用字段和签字字段请通过对应分区添加，不能重复粘贴'); return;
+    }
+    if (!categoriesForGroup(editorMode, group.section_role).some(c => c.key === categoryOfField(clipboard.field))) {
+      message.warning('该字段不适用于此分区，请选择兼容的分区'); return;
+    }
+    const insert = () => {
+      const copy = cloneTemplateField(clipboard.field, template);
+      const index = afterId ? group.fields.findIndex(f => f.id === afterId) + 1 : group.fields.length;
+      const fields = [...group.fields]; fields.splice(index, 0, copy);
+      updateGroups(template.groups.map(g => g.id === groupId ? { ...g, fields } : g));
+      message.success('已粘贴字段');
+    };
+    if (clipboard.templateId !== template.id || clipboard.templateName !== template.name) {
+      Modal.confirm({ title: '粘贴到另一份模板？', content: '字段内容与配置将保留。引用其他字段的公式、图片来源和报告映射仍指向原配置，请在粘贴后核对；系统不会自动改绑。', okText: '粘贴并核对', cancelText: '取消', onOk: insert });
+    } else insert();
+  };
+
+  const handleFieldClipboardKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.repeat || event.altKey || event.shiftKey || !(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    if (key !== 'c' && key !== 'v') return;
+    const target = event.target as HTMLElement;
+    // Never steal text, cell/range clipboard operations or modal keyboard input.
+    if (target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], table, .ant-modal, .ant-select') || window.getSelection()?.toString()) return;
+    const fieldId = target.closest<HTMLElement>('[data-field-clipboard]')?.dataset.fieldClipboard;
+    const groupId = target.closest<HTMLElement>('[data-field-paste-group]')?.dataset.fieldPasteGroup;
+    const location = locate(fieldId || (groupId ? null : selectedId));
+    if (!location && !groupId) return;
+    const group = location ? template.groups[location.g] : template.groups.find(g => g.id === groupId);
+    if (!group || isSignatureGroup(group)) return;
+    const field = location ? group.fields[location.f] : undefined;
+    if (key === 'c' && !field) return;
+    if (key === 'v' && (!fieldClipboard || readOnly)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (key === 'c') copyField(field!); else pasteField(group.id, field?.id);
+  };
+
   const addGroupFromPreset = (presetKey: string) => {
+    if (readOnly) { message.info('当前为只读查看，请先点击页面右上角“开始编辑”'); return; }
+    if (presetKey === 'conclusion' && template.groups.some(group =>
+      group.section_role === 'conclusion' && !group.parent_group_id
+      && (group.conclusion_kind === 'project' || group.fields.some(field => field.conclusion_role === 'project_name' || field.type === 'record_conclusion')))) {
+      message.warning('一份原始记录模板只能配置一个结论模块；请在现有结论模块中添加子项目');
+      return;
+    }
     const preset = SECTION_PRESETS.find(p => p.key === presetKey);
     if (!preset) return;
     const newGroup = preset.build(genId);
+    // 项目模板手动添加“图片记录”时，直接按关联原始记录的首个图片分区建立来源，
+    // 避免出现三个空图位还要逐一绑定的旧操作。数据期仍按动态集合整体拉取。
+    if (editorMode === 'report-project' && presetKey === 'proj_images' && linkedRecord) {
+      const sourceGroup = linkedRecord.groups.find(group =>
+        group.section_role === 'images' && group.fields.some(field => field.type === 'image'));
+      const sourceFields = sourceGroup?.fields.filter(field => field.type === 'image') || [];
+      if (sourceGroup && sourceFields.length) {
+        newGroup.label = sourceGroup.label;
+        newGroup.image_layout = sourceGroup.image_layout
+          ? JSON.parse(JSON.stringify(sourceGroup.image_layout))
+          : { cols: 2, title_mode: 'per', solo: 'first', width_cm: 7, height_cm: 6 };
+        newGroup.fields = sourceFields.map(source => {
+          const field: FieldDefinition = JSON.parse(JSON.stringify(source));
+          field.id = genId();
+          field.code = `img_${source.code}`;
+          field.image_source_code = source.code;
+          delete field.image_photos;
+          delete field.image_items;
+          return field;
+        });
+      }
+    }
     // 同一预设可重复添加（如两个数据表分区）——逐字段防撞改 code
     const used = usedFieldCodes();
     newGroup.fields = newGroup.fields.map(f => {
@@ -169,18 +270,76 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
   };
 
   const addField = (groupIdx: number, cat: FieldCategory) => {
+    if (readOnly) { message.info('当前为只读查看，请先点击页面右上角“开始编辑”'); return; }
     const groups = [...template.groups];
     const field = createFieldForCategory(cat, genId());
+    if (cat === 'image' && editorMode === 'report-project' && linkedRecord) {
+      const sources = linkedRecord.groups.flatMap(group => group.fields).filter(candidate => candidate.type === 'image');
+      const usedSources = new Set(groups[groupIdx].fields.map(candidate => candidate.image_source_code).filter(Boolean));
+      const source = sources.find(candidate => !usedSources.has(candidate.code)) || sources[0];
+      if (source) {
+        field.label = source.label;
+        field.image_source_code = source.code;
+      }
+    }
     field.code = uniqueCode(field.code, usedFieldCodes());
     groups[groupIdx] = { ...groups[groupIdx], fields: [...groups[groupIdx].fields, field] };
     updateGroups(groups);
     setSelectedId(field.id);
   };
 
+  /** 结论模块专用：一个子项目就是一个真实子分区，其中三个值仍是可独立编辑的普通字段。 */
+  const addConclusionItem = (parent: FieldGroup) => {
+    if (readOnly) { message.info('当前为只读查看，请先点击页面右上角“开始编辑”'); return; }
+    const seq = template.groups.filter(group => group.parent_group_id === parent.id && group.conclusion_kind === 'item').length + 1;
+    const used = usedFieldCodes();
+    const withCode = (field: FieldDefinition) => {
+      field.code = uniqueCode(field.code, used);
+      used.add(field.code);
+      return field;
+    };
+    const child: FieldGroup = {
+      id: genId(),
+      label: `子项目 ${seq}`,
+      layout: 'vertical',
+      section_role: 'conclusion',
+      conclusion_kind: 'item',
+      parent_group_id: parent.id,
+      fields: [
+        withCode({ id: genId(), code: `conclusion_item_${seq}_name`, label: '子项目名称', type: 'text', required: true, conclusion_role: 'item_name' }),
+        withCode({ id: genId(), code: `conclusion_item_${seq}_judgment`, label: '判定要求', type: 'textarea', required: true, conclusion_role: 'judgment_requirement' }),
+        withCode({ id: genId(), code: `conclusion_item_${seq}_result`, label: '结论', type: 'select', required: true,
+          options: ['符合', '不符合'], allow_custom: true, conclusion_role: 'conclusion' }),
+      ],
+    };
+    updateGroups([...template.groups, child]);
+  };
+
+  const addConclusionRoleField = (groupIdx: number, role: 'judgment_requirement' | 'conclusion') => {
+    const groups = [...template.groups];
+    const group = groups[groupIdx];
+    if (!group || group.fields.some(field => field.conclusion_role === role)) return;
+    const isChild = group.conclusion_kind === 'item' || !!group.parent_group_id;
+    const hasChildren = template.groups.some(candidate => candidate.parent_group_id === group.id && candidate.conclusion_kind === 'item');
+    const required = isChild || !hasChildren;
+    const field: FieldDefinition = role === 'judgment_requirement'
+      ? { id: genId(), code: 'conclusion_judgment', label: '判定要求', type: 'textarea', required, conclusion_role: role }
+      : { id: genId(), code: 'conclusion_result', label: isChild ? '结论' : '总结论', type: 'select', required,
+          options: ['符合', '不符合'], allow_custom: true, conclusion_role: role };
+    field.code = uniqueCode(field.code, usedFieldCodes());
+    groups[groupIdx] = { ...group, fields: [...group.fields, field] };
+    updateGroups(groups);
+    setSelectedId(field.id);
+  };
+
   const removeField = (groupIdx: number, fieldIdx: number) => {
     const target = template.groups[groupIdx]?.fields[fieldIdx];
+    if (target?.conclusion_role === 'project_name' || target?.conclusion_role === 'item_name') {
+      message.warning(`${target.label || '名称'}是结论模块的必要字段，不能删除`);
+      return;
+    }
     if (target) {
-      if (selectedId === target.id) setSelectedId(null);
+      if (selectedId === target.id) clearSelectedField();
       if (formulaId === target.id) setFormulaId(null);
     }
     const groups = [...template.groups];
@@ -240,6 +399,10 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
     });
     if (fromG < 0) return;
     const [fld] = groups[fromG].fields.splice(fromF, 1);
+    if (fld.conclusion_role && fromG !== toGroup) {
+      message.warning('结论模块的名称、判定要求和结论字段不能移动到其他分区');
+      return;
+    }
     let ins = insertIdx;
     if (fromG === toGroup && fromF < insertIdx) ins -= 1;
     ins = Math.max(0, Math.min(ins, groups[toGroup].fields.length));
@@ -288,8 +451,20 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
   const formulaLoc = locate(formulaId);
   const formulaField = formulaLoc ? template.groups[formulaLoc.g].fields[formulaLoc.f] : null;
 
-  // 「什么编辑器就显示什么字段」：按 editors 白名单过滤（矩阵/设备仅原始记录；结论汇总仅首页；结果表/设备表/图片表仅项目）
-  const visibleCategories = categoriesForEditor(editorMode);
+  // Drawer portal 到 body 后，以整个 EditorSplit 工作区作为浮层原点：项目模板的名称/结论卡位于工作区内，
+  // 会被字段属性卡正确覆盖；页面最上方工具栏位于工作区外，始终保持可见。
+  const splitRoot = editorRootRef.current?.closest('[data-editor-split-root="true"]') as HTMLElement | null;
+  const editorRect = splitRoot?.getBoundingClientRect() || editorRootRef.current?.getBoundingClientRect();
+  const overlayTop = Math.max(0, editorRect?.top || 0);
+  const overlayLeft = Math.max(0, editorRect?.left || 0);
+  const overlayWidth = Math.max(320, window.innerWidth - overlayLeft);
+  const overlayHeight = Math.max(240, window.innerHeight - overlayTop);
+  const visiblePanelWidth = Math.min(panelWidth, overlayWidth - 12);
+  const drawerRootStyle: CSSProperties = {
+    position: 'fixed', top: overlayTop, left: overlayLeft,
+    width: overlayWidth, height: overlayHeight,
+  };
+
   // 编辑器能力开关（集中映射，替代散落的 editorMode === 判断）
   const caps = editorCapabilities(editorMode);
 
@@ -298,6 +473,16 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
   const docFieldGap = (() => {
     const lg = (template.layout_options?.theme_config as any)?.line_gap;
     return lg != null && lg !== '' ? (typeof lg === 'number' ? `${lg}em` : String(lg)) : '0.6em';
+  })();
+  // 文档级默认 字体/字号：透传给分区「格式」面板，未设本级时字体/字号框直接显示实际生效值（宋体/10pt 为主题内建默认）。
+  const docFont = (template.layout_options?.theme_config as any)?.font || 'Songti SC';
+  const docSize = typeof (template.layout_options?.theme_config as any)?.body_size === 'number'
+    ? (template.layout_options?.theme_config as any).body_size : 10;
+  const docFigureGapPt = (() => {
+    const raw = docFieldGap.trim();
+    if (raw.endsWith('em')) return Math.round((parseFloat(raw) || 0.6) * docSize * 10) / 10;
+    if (raw.endsWith('pt')) return parseFloat(raw) || Math.round(0.6 * docSize * 10) / 10;
+    return Math.round(0.6 * docSize * 10) / 10;
   })();
   const formulaSourceFields = allFields.flatMap(f => {
     if (f.type === 'computed') return [];
@@ -310,15 +495,15 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
       template.groups
         .flatMap(g => g.fields)
         .filter(f => f.type === 'computed')
-        .map(f => ({ code: f.code, label: `${f.label}（${f.code}）` })),
+        .map(f => ({ code: f.code, label: f.label || '未命名图片字段' })),
     [template.groups]
   );
 
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+    <div ref={editorRootRef} onKeyDown={handleFieldClipboardKey} style={{ position: 'relative', display: 'flex', height: '100%', minHeight: 0 }}>
       {/* —— 大纲导航（可折叠）—— */}
       {outlineOpen ? (
-        <div className="fe-outline" style={{ width: 190 }}>
+        <div className="fe-outline" style={{ width: 190, minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 6px 4px 12px' }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: '#5a6478' }}>大纲</span>
             <Tooltip title="收起大纲">
@@ -335,7 +520,7 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
                   key={f.id}
                   className={`fe-outline-item ${f.id === selectedId ? 'fe-sel' : ''}`}
                   style={{ paddingLeft: 26 }}
-                  onClick={() => { setSelectedId(f.id); scrollToNode(f.id); onFieldFocus?.(f.code, g.id); }}
+                  onClick={() => { setSelectedId(f.id); scrollToNode(f.id); onFieldFocus?.(f.code, g.id, f); }}
                 >
                   {f.label || f.code}
                 </div>
@@ -354,7 +539,7 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
                       key={f.id}
                       className={`fe-outline-item ${f.id === selectedId ? 'fe-sel' : ''}`}
                       style={{ paddingLeft: 38 }}
-                      onClick={() => { setSelectedId(f.id); scrollToNode(f.id); onFieldFocus?.(f.code, c.id); }}
+                      onClick={() => { setSelectedId(f.id); scrollToNode(f.id); onFieldFocus?.(f.code, c.id, f); }}
                     >
                       {f.label || f.code}
                     </div>
@@ -373,13 +558,18 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
       )}
 
       {/* —— 主列 —— */}
-      <div ref={mainRef} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 12 }}>
+      <div ref={mainRef} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', padding: 12 }}>
+        {readOnly && (
+          <Alert type="info" showIcon style={{ marginBottom: 10 }}
+            message="当前为只读查看"
+            description="请先点击页面右上角“开始编辑”，取得编辑权后即可添加样品描述表或修改模板。" />
+        )}
         {/* —— 模板属性顶部条 —— */}
         <Card size="small" style={{ marginBottom: 12 }}>
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <div>
               <div style={{ fontSize: 11, color: '#666', marginBottom: 2 }}>模板名称（内部，用于检索）</div>
-              <Input
+              <AutoGrowTextArea
                 value={template.name}
                 onChange={(e) => onChange({ ...template, name: e.target.value })}
                 style={{ fontWeight: 'bold', fontSize: 16 }}
@@ -404,16 +594,22 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
           ) => {
             const gIdx = template.groups.findIndex(g => g.id === group.id);
             const locked = isSignatureGroup(group);   // 签发/签字栏分区：整段置灰只读，仅允许删除/在别处新增
+            // family_inherited 仅是旧项目组方案留下的快照标记；项目组简化后不再锁定分区。
+            const inherited = false;
             return (
               <GroupCard
                 group={group}
                 gIdx={gIdx}
                 docFieldGap={docFieldGap}
+                docFont={docFont}
+                docSize={docSize}
+                docFigureGapPt={docFigureGapPt}
                 editorMode={editorMode}
                 isSub={meta.isSub}
                 siblingPos={meta.siblingPos}
                 siblingCount={meta.siblingCount}
                 locked={locked}
+                inherited={inherited}
                 collapsed={collapsedGroups.has(group.id)}
                 onToggleCollapse={() => {
                   const next = new Set(collapsedGroups);
@@ -423,10 +619,10 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
                 onUpdateGroup={(patch) => updateGroup(gIdx, patch)}
                 onSetParent={(pid) => updateGroup(gIdx, { parent_group_id: pid })}
                 onMoveGroup={(dir) => moveGroup(gIdx, dir)}
-                onRemoveGroup={() => removeGroup(gIdx)}
+                onRemoveGroup={() => inherited ? message.info('继承分区不能在派生模板中删除，请修改项目组基础模板') : removeGroup(gIdx)}
                 onDropGroup={dropGroupTo}
               >
-                {locked ? (
+                {locked || inherited ? (
                   // 签发分区：渲染与普通分区【完全一样】的字段行（排版/样式不变），整段置灰 + 屏蔽交互（不可点选/拖拽/增删/改属性）。
                   <div style={{ pointerEvents: 'none', opacity: 0.6, userSelect: 'none' }} aria-disabled>
                     {group.fields.map((field, fIdx) => (
@@ -450,30 +646,41 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
                 ) : (
                   <>
                     {group.fields.map((field, fIdx) => (
-                      <FieldRow
-                        key={field.id}
+                      <Dropdown key={field.id} trigger={['contextMenu']} menu={{ items: [
+                        { key: 'copy', label: '复制字段' },
+                        { key: 'paste', label: '粘贴字段', disabled: readOnly || !fieldClipboard },
+                      ], onClick: ({ key, domEvent }) => {
+                        domEvent.stopPropagation();
+                        if (key === 'copy') copyField(field); else pasteField(group.id, field.id);
+                      } }}>
+                      <div data-field-clipboard={field.id} tabIndex={0}><FieldRow
                         field={field}
                         groupIdx={gIdx}
                         fieldIdx={fIdx}
                         fieldCount={group.fields.length}
                         selected={field.id === selectedId}
-                        onSelect={() => { setSelectedId(field.id); onFieldFocus?.(field.code, group.id); }}
+                        onSelect={() => { setSelectedId(field.id); onFieldFocus?.(field.code, group.id, field); }}
                         onLabelChange={(label) => updateField(gIdx, fIdx, { label })}
                         onOpenFormula={() => setFormulaId(field.id)}
                         onMoveUp={() => moveField(gIdx, fIdx, -1)}
                         onMoveDown={() => moveField(gIdx, fIdx, 1)}
                         onRemove={() => removeField(gIdx, fIdx)}
                         onDropField={dropFieldTo}
-                      />
+                      /></div>
+                      </Dropdown>
                     ))}
+                    <Dropdown trigger={['contextMenu']} menu={{ items: [{ key: 'paste', label: '粘贴字段', disabled: readOnly || !fieldClipboard }],
+                      onClick: ({ domEvent }) => { domEvent.stopPropagation(); pasteField(group.id); } }}>
+                    <div data-field-paste-group={group.id} tabIndex={0}>
                     <FieldTailDrop groupIdx={gIdx} fieldCount={group.fields.length} onDropField={dropFieldTo}>
                       {group.fields.length === 0 && (
                         <div className="fe-empty-hint">暂无字段 —— 点下方「添加字段」，或把其他分区的字段拖进来</div>
                       )}
                       <Space size={8}>
                         <Dropdown
+                          disabled={readOnly}
                           menu={{
-                            items: visibleCategories.map(c => ({
+                            items: categoriesForGroup(editorMode, group.section_role).map(c => ({
                               key: c.key,
                               label: (
                                 <div style={{ minWidth: 220 }}>
@@ -486,11 +693,28 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
                             style: { maxHeight: '70vh', overflowY: 'auto' },
                           }}
                         >
-                          <Button size="small" type="primary" ghost icon={<PlusOutlined />}>添加字段</Button>
+                          <Button size="small" type="primary" ghost icon={<PlusOutlined />} disabled={readOnly}
+                            title={readOnly ? '请先点击页面右上角“开始编辑”' : undefined}>添加字段</Button>
                         </Dropdown>
+                        {editorMode === 'record' && group.section_role === 'conclusion' && group.conclusion_kind !== 'item' && !group.parent_group_id && (
+                          <Button size="small" type="dashed" icon={<PlusOutlined />} disabled={readOnly}
+                            onClick={() => addConclusionItem(group)}>添加子项目</Button>
+                        )}
+                        {editorMode === 'record' && group.section_role === 'conclusion'
+                          && !group.fields.some(field => field.conclusion_role === 'judgment_requirement') && (
+                          <Button size="small" type="dashed" disabled={readOnly}
+                            onClick={() => addConclusionRoleField(gIdx, 'judgment_requirement')}>添加判定要求</Button>
+                        )}
+                        {editorMode === 'record' && group.section_role === 'conclusion'
+                          && !group.fields.some(field => field.conclusion_role === 'conclusion') && (
+                          <Button size="small" type="dashed" disabled={readOnly}
+                            onClick={() => addConclusionRoleField(gIdx, 'conclusion')}>{group.conclusion_kind === 'item' ? '添加结论' : '添加总结论'}</Button>
+                        )}
                         {/* 「子分区」（新建子分区）功能已按需求移除；存量子分区仍正常渲染、可用「转为顶级分区」展平。 */}
                       </Space>
                     </FieldTailDrop>
+                    </div>
+                    </Dropdown>
                   </>
                 )}
               </GroupCard>
@@ -514,6 +738,7 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
 
         {/* —— 添加分区（带预设）—— */}
         <Dropdown
+          disabled={readOnly}
           menu={{
             items: SECTION_PRESETS.filter(p => !p.editors || p.editors.includes(editorMode)).map(p => ({
               key: p.key,
@@ -527,7 +752,8 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
             onClick: ({ key }) => addGroupFromPreset(key),
           }}
         >
-          <Button icon={<AppstoreAddOutlined />} block type="dashed">添加分区</Button>
+          <Button icon={<AppstoreAddOutlined />} block type="dashed" disabled={readOnly}
+            title={readOnly ? '请先点击页面右上角“开始编辑”' : undefined}>添加分区</Button>
         </Dropdown>
       </div>
 
@@ -537,16 +763,19 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
         title={currentField ? `字段属性 · ${currentField.label || currentField.code}` : '字段属性'}
         placement="left"
         open={!!currentField}
-        onClose={() => setSelectedId(null)}
-        width={panelWidth}
+        onClose={clearSelectedField}
+        closable={false}
+        extra={<Button type="text" icon={<CloseOutlined />} aria-label="关闭字段属性" title="关闭" onClick={clearSelectedField} />}
+        width={visiblePanelWidth}
         mask={false}
+        rootStyle={drawerRootStyle}
         footer={
           <div style={{ textAlign: 'right' }}>
-            <Button type="primary" onClick={() => setSelectedId(null)}>保存并返回</Button>
+            <Button type="primary" onClick={clearSelectedField}>保存并返回</Button>
           </div>
         }
       >
-        <PanelResizeHandle width={panelWidth} onResize={updatePanelWidth} />
+        <PanelResizeHandle width={visiblePanelWidth} onResize={(clientX) => updatePanelWidth(clientX - overlayLeft)} />
         {currentField && selLoc && (
           <FieldPropsPanel
             field={currentField}
@@ -556,6 +785,7 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
             computedFieldOptions={computedFieldOptions}
             editorMode={editorMode}
             linkedRecord={linkedRecord}
+            onDetailFocus={(code) => onFieldFocus?.(code, template.groups[selLoc.g].id, currentField)}
           />
         )}
       </Drawer>
@@ -566,10 +796,13 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
         placement="left"
         open={!!formulaField}
         onClose={() => setFormulaId(null)}
-        width={panelWidth}
+        closable={false}
+        extra={<Button type="text" icon={<CloseOutlined />} aria-label="关闭公式编辑" title="关闭" onClick={() => setFormulaId(null)} />}
+        width={visiblePanelWidth}
         mask={false}
+        rootStyle={drawerRootStyle}
       >
-        <PanelResizeHandle width={panelWidth} onResize={updatePanelWidth} />
+        <PanelResizeHandle width={visiblePanelWidth} onResize={(clientX) => updatePanelWidth(clientX - overlayLeft)} />
         {formulaField && formulaLoc && (
           <div>
             <div style={{ marginBottom: 16, padding: 12, background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 4 }}>
@@ -595,7 +828,7 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
 }
 
 // ============ 弹窗右缘拖拽调宽手柄 ============
-// 固定定位贴在左侧 Drawer 右边缘，拖动改宽度（持久化 fieldPanelWidth）。
+// 贴在左侧 Drawer 右边缘，拖动改宽度（持久化 fieldPanelWidth）。
 function PanelResizeHandle({ width, onResize }: { width: number; onResize: (w: number) => void }) {
   const [dragging, setDragging] = useState(false);
   return (
@@ -605,7 +838,8 @@ function PanelResizeHandle({ width, onResize }: { width: number; onResize: (w: n
       onPointerMove={(e) => { if (dragging) onResize(e.clientX); }}
       onPointerUp={(e) => { (e.target as HTMLElement).releasePointerCapture(e.pointerId); setDragging(false); }}
       style={{
-        position: 'fixed', top: 0, left: width - 3, width: 7, height: '100vh',
+        // Drawer 浮层已被限制在编辑区以下；手柄只负责其右边缘宽度。
+        position: 'absolute', top: 0, left: width - 3, width: 7, height: '100%',
         cursor: 'col-resize', zIndex: 1002,
         background: dragging ? 'rgba(19,102,217,0.35)' : 'transparent',
         transition: dragging ? 'none' : 'background 0.15s',
@@ -618,17 +852,24 @@ function PanelResizeHandle({ width, onResize }: { width: number; onResize: (w: n
 
 // ============ 分组卡（可拖拽重排 + 折叠 + hover 工具条）============
 function GroupCard({
-  group, gIdx, isSub, siblingPos, siblingCount, collapsed, children, docFieldGap, editorMode, locked,
+  group, gIdx, isSub, siblingPos, siblingCount, collapsed, children, docFieldGap, docFont, docSize, docFigureGapPt, editorMode, locked, inherited,
   onToggleCollapse, onUpdateGroup, onSetParent, onMoveGroup, onRemoveGroup, onDropGroup,
 }: {
   group: FieldGroup;
   gIdx: number;
   /** 文档级「字段间距」(theme_config.line_gap)，作为分区「字段间距」的继承提示值（GroupCard 无 template，故由父层透传） */
   docFieldGap: string;
+  /** 文档级默认 字体/字号：分区「格式」面板未设本级时直接显示实际生效值。 */
+  docFont: string;
+  docSize: number;
+  /** 图片标签/备注未单设距离时，当前文档字段间距换算成的实际 pt。 */
+  docFigureGapPt: number;
   /** 编辑器模式：报告模式(report-*)下分区不再显示「字段间距」(改为文档默认+每字段单独设)。 */
   editorMode: EditorMode;
   /** 签发/签字栏分区：整段置灰只读——锁分区名/排版/格式/层级/加字段，只保留折叠/移动/删除 */
   locked?: boolean;
+  /** 旧项目组基础模板继承分区标记（当前简化方案不再锁定）。 */
+  inherited?: boolean;
   /** 是否子分区（限一层嵌套；子分区禁拖拽，用 ↑↓ 在同父内排序） */
   isSub: boolean;
   /** 同层（顶级之间 / 同父子分区之间）的位置与数量，控制 ↑↓ 禁用 */
@@ -649,9 +890,9 @@ function GroupCard({
   const [{ isDragging }, drag, preview] = useDrag(() => ({
     type: DND_GROUP,
     item: { id: group.id },
-    canDrag: !isSub,
+    canDrag: !isSub && !inherited,
     collect: m => ({ isDragging: m.isDragging() }),
-  }), [group.id, isSub]);
+  }), [group.id, isSub, inherited]);
   const [{ isOver }, drop] = useDrop<{ id: string }, void, { isOver: boolean }>(() => ({
     accept: DND_GROUP,
     collect: m => ({ isOver: m.isOver() && m.getItem()?.id !== group.id }),
@@ -671,6 +912,9 @@ function GroupCard({
 
   const hidden = !!group.hide_title;
   const pageBreak = !!group.page_break_before;
+  const imageInheritedFont = group.style?.font || docFont;
+  const imageInheritedSize = group.style?.size ? (parseFloat(group.style.size) || docSize) : docSize;
+  const imageDefaultInset = group.fields.find(field => field.type === 'image')?.image_table_style?.inset_pt ?? 6;
 
   return (
     <div
@@ -686,9 +930,9 @@ function GroupCard({
       <Card
         size="small"
         className="fe-group-card"
-        style={{ borderColor: '#e4e8f0' }}
+        style={{ borderColor: group.common_component_id ? '#91caff' : '#e4e8f0' }}
         styles={{
-          header: { background: '#f8fafc', borderBottomColor: collapsed ? 'transparent' : '#eef0f4' },
+          header: { background: group.common_component_id ? '#f0f7ff' : '#f8fafc', borderBottomColor: collapsed ? 'transparent' : '#eef0f4' },
           body: collapsed ? { display: 'none' } : { padding: '10px 12px' },
         }}
         title={
@@ -699,19 +943,22 @@ function GroupCard({
               </span>
             )}
             {isSub && <Tag color="orange" style={{ marginInlineEnd: 0, fontSize: 11 }}>子分区</Tag>}
+            {group.common_component_id && <Tooltip title={`项目组历史公共组件：${group.common_component_name || group.common_component_code} · v${group.common_component_version_no || '?' }。当前模板保存完整快照。`}>
+              <Tag color="blue" style={{ marginInlineEnd: 0, fontSize: 11 }}>公共区域 v{group.common_component_version_no || '?'}</Tag>
+            </Tooltip>}
             <Button
               type="text" size="small" style={{ width: 22, minWidth: 22 }}
               icon={collapsed ? <RightOutlined style={{ fontSize: 10 }} /> : <DownOutlined style={{ fontSize: 10 }} />}
               onClick={onToggleCollapse}
             />
-            <Input
+            <AutoGrowTextArea
               size="small"
               variant="filled"
               value={group.label}
               onChange={(e) => onUpdateGroup({ label: e.target.value })}
               style={{ width: 180, fontWeight: 600 }}
               placeholder="分区名称"
-              disabled={hidden || locked}
+              disabled={hidden || locked || inherited}
             />
             <span className="fe-meta">{group.fields.length} 字段</span>
             {hidden && <Tag style={{ marginInlineEnd: 0 }}>标题隐藏</Tag>}
@@ -721,7 +968,7 @@ function GroupCard({
         }
         extra={
           <Space size={0}>
-            {!locked && (<>
+            {!locked && !inherited && (<>
             <Tooltip title={hidden ? 'PDF 中已隐藏分组标题，点击恢复显示' : '隐藏 PDF 中的分组标题（仅作为组织字段使用）'}>
               <Button size="small" type="text" icon={hidden ? <EyeInvisibleOutlined /> : <EyeOutlined />}
                 style={hidden ? { color: BRAND } : undefined}
@@ -739,14 +986,16 @@ function GroupCard({
                 if (group.section_role === 'images' && !locked) {
                   const il = group.image_layout || {};
                   return (
-                    <Popover trigger="click" placement="bottomRight" title="图片分区版式（统一管本分区所有图位）"
-                      overlayInnerStyle={{ maxHeight: '78vh', overflowY: 'auto' }}
-                      content={<ImageSectionPanel value={il} onChange={(patch) => onUpdateGroup({ image_layout: { ...il, ...patch } })} />}>
+                    <ClosablePopover trigger="click" placement="bottomRight" title="图片分区版式（统一管本分区所有图位）"
+                      overlayInnerStyle={{ maxHeight: 'calc(100vh - 24px)', maxWidth: 'calc(100vw - 24px)', overflow: 'hidden' }}
+                      content={<ImageSectionPanel value={il} inheritedFont={imageInheritedFont} inheritedSize={imageInheritedSize}
+                        defaultInset={imageDefaultInset}
+                        onChange={(patch) => onUpdateGroup({ image_layout: { ...il, ...patch } })} />}>
                       <Tooltip title="设置本图片分区的版式：每行几个图位 / 尺寸 / 独立·粘连 / 单数独占 / 标题与备注样式">
                         <Button size="small" type="text" icon={<TableOutlined />}
                           style={group.image_layout ? { color: BRAND } : undefined}>图片版式</Button>
                       </Tooltip>
-                    </Popover>
+                    </ClosablePopover>
                   );
                 }
                 return (
@@ -759,35 +1008,37 @@ function GroupCard({
               // 存量 grid/table 分区仍按存储的 layout 值正常渲染（渲染路径保留），此处不再提供切换入口。
               return null;
             })()}
-            <Popover trigger="click" placement="bottomRight" title="本区块格式（覆盖文档默认）"
-              overlayInnerStyle={{ maxHeight: '78vh', overflowY: 'auto' }}
+            <ClosablePopover trigger="click" placement="bottomRight" title="本区块格式（覆盖文档默认）"
+              overlayInnerStyle={{ maxHeight: 'calc(100vh - 24px)', maxWidth: 'calc(100vw - 24px)', overflow: 'hidden' }}
               content={
-                <div style={{ display: 'flex', gap: 16 }}>
-                  <div>
+                <div className="fe-section-format-card">
+                  <div className="fe-section-format-column">
                     <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: '#555' }}>分区标题</div>
-                    <FormatPanel variant="text" value={group.title_style}
+                    <FormatPanel variant="text" value={group.title_style} inheritedFont={docFont} inheritedSize={docSize} inheritedBold={true}
                       onChange={(title_style) => onUpdateGroup({ title_style })} />
                     <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                       <Tooltip title="分区标题（如「检测结果」）和它下方第一块内容（表格/字段）之间的留白。留空＝默认。">
                         <span style={{ fontSize: 12, color: '#888' }}>标题与内容间距</span>
                       </Tooltip>
-                      <InputNumber size="small" style={{ width: 96 }} min={0} max={60} step={1} addonAfter="pt" placeholder="默认"
-                        value={group.title_gap ? parseFloat(group.title_gap) : undefined}
+                      <InputNumber size="small" style={{ width: 96 }} min={0} max={60} step={0.5} addonAfter="pt"
+                        value={group.title_gap ? parseFloat(group.title_gap) : Math.round(0.4 * docSize * 10) / 10}
                         onChange={(v) => onUpdateGroup({ title_gap: v != null ? `${v}pt` : undefined })} />
                     </div>
                   </div>
-                  <div style={{ borderLeft: '1px solid #eee', paddingLeft: 16 }}>
+                  <div className="fe-section-format-column fe-section-format-aside">
                     {group.section_role === 'images' ? (
                       /* 图片分区：右侧＝图表上方标签 + 图表下方备注（表内标题在「图片版式」里；此处不出通用区块内容） */
                       <ImageSectionNotes value={group.image_layout || {}}
+                        inheritedFont={imageInheritedFont} inheritedSize={imageInheritedSize} inheritedFigureGapPt={docFigureGapPt}
                         onChange={(patch) => onUpdateGroup({ image_layout: { ...(group.image_layout || {}), ...patch } })} />
                     ) : (<>
                     <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: '#555' }}>区块内容</div>
                     <FormatPanel block value={group.style} onChange={(style) => onUpdateGroup({ style })}
-                      inheritedFieldGap={docFieldGap} hideFieldGap={editorMode !== 'record'} />
+                      inheritedFieldGap={docFieldGap} hideFieldGap={editorMode !== 'record'}
+                      inheritedFont={docFont} inheritedSize={docSize} />
                     {/* 值对齐（标签↔值距离）：覆盖文档级 label_width。仅竖排字段有效（多列本就紧贴）。 */}
                     <div style={{ marginTop: 10 }}>
-                      <Tooltip title="字段「名」与「值」之间的距离：跟随文档=用文档统一设置；紧贴=值紧跟标签后无距离;对齐=本区标签占固定宽、各值对齐到同一竖线（仅竖排有效，多列本就紧贴）">
+                      <Tooltip title="字段「名」与「值」之间的距离：跟随文档=用文档统一设置；紧凑=值紧接在字段名后、无额外间距；对齐=本区字段名占固定列宽、各值对齐到同一竖线（仅竖排有效，多列本就紧凑）">
                         <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>字段值对齐（名↔值距离）</div>
                       </Tooltip>
                       <Space size={8}>
@@ -801,7 +1052,7 @@ function GroupCard({
                           }}
                           options={[
                             { label: '跟随文档', value: 'inherit' },
-                            { label: '紧贴', value: 'tight' },
+                            { label: '紧凑', value: 'tight' },
                             { label: '对齐', value: 'align' },
                           ]}
                         />
@@ -820,7 +1071,7 @@ function GroupCard({
                 <Button size="small" type="text" icon={<FontColorsOutlined />}
                   style={(group.style || group.title_style) ? { color: BRAND } : undefined} />
               </Tooltip>
-            </Popover>
+            </ClosablePopover>
             {/* 层级调整：「移入子分区」（把顶级分区变成别人的子分区）已按需求移除；
                 仅保留存量子分区的「转为顶级分区」展平入口，便于把历史子分区拉回顶级。 */}
             {isSub && (
@@ -849,13 +1100,13 @@ function GroupCard({
             <span className="fe-hover-actions">
               <Tooltip title={isSub ? '在本父分区内上移' : '上移分区'}>
                 <Button size="small" type="text" icon={<ArrowUpOutlined />}
-                  disabled={siblingPos === 0} onClick={() => onMoveGroup(-1)} />
+                  disabled={inherited || siblingPos === 0} onClick={() => onMoveGroup(-1)} />
               </Tooltip>
               <Tooltip title={isSub ? '在本父分区内下移' : '下移分区'}>
                 <Button size="small" type="text" icon={<ArrowDownOutlined />}
-                  disabled={siblingPos === siblingCount - 1} onClick={() => onMoveGroup(1)} />
+                  disabled={inherited || siblingPos === siblingCount - 1} onClick={() => onMoveGroup(1)} />
               </Tooltip>
-              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={onRemoveGroup} />
+              <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={inherited} onClick={onRemoveGroup} />
             </span>
           </Space>
         }
@@ -959,7 +1210,7 @@ function FieldRow({
         <HolderOutlined className="fe-drag" />
       </span>
       <span className="fe-cat-chip" title={getCategoryLabel(cat)}>{isComputed ? 'ƒ' : catEntry?.icon}</span>
-      <Input
+      <AutoGrowTextArea
         size="small"
         variant="borderless"
         value={field.label}

@@ -8,6 +8,319 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
+/* 图片调整是模型无关的左侧浮层。Ant Design 的 modal-wrap 即使没有 mask 也会铺满窗口，
+   因此需让容器穿透事件，仅由实际卡片接收点击；右侧 PDF 可继续滚动和查看实时渲染。 */
+.image-process-modeless-wrap {
+  pointer-events: none;
+}
+.image-process-modeless-wrap .ant-modal {
+  pointer-events: auto;
+}
+
+/* 表格条目操作：内容动作与流程动作分列后始终保持单行。
+   窄屏由 Table 横向滚动承接，不允许按钮在单元格内折成两层。 */
+.table-row-actions,
+.table-row-actions.ant-space {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  white-space: nowrap;
+}
+.table-row-actions > .ant-space-item {
+  flex: none;
+}
+.table-workflow-actions {
+  min-height: 24px;
+}
+.row-action-strip,
+.row-action-cluster,
+.row-workflow-cluster {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  white-space: nowrap;
+}
+.row-action-strip {
+  flex: none;
+  gap: 4px;
+}
+.row-action-cluster,
+.row-workflow-cluster {
+  gap: 4px;
+}
+.row-workflow-cluster {
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid #d9dee8;
+}
+.clickable-detail-row {
+  cursor: pointer;
+}
+.clickable-detail-row > td {
+  transition: background-color 0.15s ease;
+}
+.clickable-detail-row:hover > td {
+  background: #f5f9ff !important;
+}
+/* 各模板列表中的项目组使用同一整条柔和色块。固定列必须保持不透明，
+   否则横向滚动时底层文字会穿过固定操作列，造成内容和按钮重叠。 */
+.compact-template-list .template-family-row {
+  background: #edf3fb;
+}
+.compact-template-list .template-family-row > td,
+.compact-template-list .template-family-row > td.ant-table-cell-fix-left,
+.compact-template-list .template-family-row > td.ant-table-cell-fix-right {
+  background: #edf3fb !important;
+  border-top: 1px solid #b8c9df;
+  border-bottom: 1px solid #b8c9df;
+  border-inline-end-color: transparent !important;
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+.compact-template-list .template-family-row > td:first-child {
+  border-left: 4px solid #527aa8;
+}
+.compact-template-list .template-family-row > td:last-child {
+  border-right: 1px solid #b8c9df;
+}
+.compact-template-list .template-family-row:hover > td {
+  background: #e3edf8 !important;
+}
+.compact-template-list .template-family-row > td.ant-table-cell-fix-left,
+.compact-template-list .template-family-row > td.ant-table-cell-fix-right {
+  z-index: 3;
+}
+.compact-template-list .template-family-heading {
+  display: grid;
+  gap: 3px;
+  color: #203b5a;
+}
+.compact-template-list .template-family-heading-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 7px;
+  color: #fff;
+  background: #527aa8;
+  border-radius: 6px;
+}
+.compact-template-list .template-family-heading-meta {
+  padding-left: 29px;
+  color: #64748b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.compact-template-list .template-family-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #365a82;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.compact-template-list .template-family-member-row > td {
+  background: #fbfcfe;
+  border-bottom-color: #e4eaf1;
+}
+.compact-template-list .template-family-member-row > td:first-child {
+  box-shadow: inset 4px 0 0 #b8c9df;
+}
+.compact-template-list .template-family-member-row:hover > td {
+  background: #f3f7fb !important;
+}
+.compact-template-list .template-family-member-last > td {
+  border-bottom: 2px solid #b8c9df;
+}
+/* 订单详情表：柔和网格 + 左右固定信息区。普通纵线弱化，横向记录边界保持清晰。 */
+.order-detail-table .ant-table-container {
+  border-color: #d3dbe6 !important;
+  border-radius: 8px;
+}
+.order-detail-table .ant-table-thead > tr > th {
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #cbd5e1 !important;
+  border-inline-end: 1px solid #dde4ed !important;
+  background: #f5f7fa !important;
+}
+.order-detail-table .ant-table-tbody > tr > td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid #d5dde8 !important;
+  border-inline-end: 1px solid #e5eaf0 !important;
+}
+.order-detail-table .ant-table-thead > tr > th:first-child {
+  border-inline-end: 1px solid #c8d2df !important;
+}
+.order-detail-table .ant-table-cell-fix-left,
+.order-detail-table .ant-table-cell-fix-right {
+  background: #fff;
+}
+.order-detail-table .ant-table-thead .ant-table-cell-fix-left,
+.order-detail-table .ant-table-thead .ant-table-cell-fix-right {
+  background: #eef2f7 !important;
+}
+.order-detail-table .ant-table-cell-fix-left-last::after {
+  box-shadow: inset 9px 0 9px -9px rgba(31, 50, 73, 0.30) !important;
+}
+.order-detail-table .ant-table-cell-fix-right-first::after {
+  box-shadow: inset -9px 0 9px -9px rgba(31, 50, 73, 0.30) !important;
+}
+.order-detail-table .ant-table-tbody > tr:last-child > td {
+  border-bottom-color: transparent !important;
+}
+.project-record-link-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 4px 7px;
+  color: #667085;
+  background: #f3f6fa;
+  border: 1px solid #dde5ef;
+  border-radius: 999px;
+}
+.project-record-link-actions-label {
+  padding-right: 2px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.project-record-link-actions .ant-btn {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #35658f;
+  background: #fff;
+  border-color: #c9d6e5;
+  box-shadow: none;
+}
+.project-record-link-actions .ant-btn:not(:disabled):hover {
+  color: #0958d9;
+  background: #eaf3ff;
+  border-color: #91bde8;
+}
+/* 模板列表：项目模板列较多，行距与标签收紧以避免操作列被挤出；ID/名称由列定义固定在左侧。 */
+.compact-template-list .ant-table-thead > tr > th,
+.compact-template-list .ant-table-tbody > tr > td {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.compact-template-list .ant-tag {
+  line-height: 20px;
+}
+.compact-template-list .template-manufacturer-cell {
+  overflow: hidden;
+}
+.compact-template-list .template-reference-cell {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.compact-template-list .template-status-cell {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.template-reference-scroll {
+  width: 100%;
+  min-width: 0;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: #c7d2e0 transparent;
+}
+.template-reference-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+.template-reference-scroll::-webkit-scrollbar-thumb {
+  background: #c7d2e0;
+  border-radius: 999px;
+}
+.template-reference-centered {
+  text-align: center;
+}
+.template-status-scroll > .ant-space {
+  display: inline-flex;
+  flex-wrap: nowrap;
+}
+.template-status-scroll .ant-tag {
+  flex: none;
+  white-space: nowrap;
+}
+.template-reference-link {
+  appearance: none;
+  padding: 1px 0;
+  color: #1769aa;
+  font: inherit;
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dashed transparent;
+}
+.template-reference-link:hover,
+.template-reference-link:focus-visible {
+  color: #0958d9;
+  border-bottom-color: currentColor;
+  outline: none;
+}
+.template-reference-link.is-empty,
+.template-reference-empty {
+  color: #98a2b3;
+}
+.template-reference-readonly {
+  color: #475467;
+}
+.template-reference-note {
+  margin-left: 4px;
+  color: #98a2b3;
+  font-size: 11px;
+}
+.template-manufacturer-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.template-manufacturer-content > .ant-tooltip-open,
+.template-manufacturer-tag {
+  min-width: 0;
+}
+.template-manufacturer-tag {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-inline-end: 0;
+}
+.template-manufacturer-empty {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #aaa;
+}
+.template-manufacturer-content > .ant-btn {
+  flex: 0 0 auto;
+  padding-inline: 5px;
+}
+.clickable-report-entry {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.clickable-report-entry:hover {
+  border-color: #b9d3f7 !important;
+  box-shadow: 0 2px 8px rgba(19, 102, 217, 0.08);
+}
+
 /* ===== FieldEditor(模板编辑器)— 统一中性视觉 + hover 降噪 ===== */
 
 /* 字段行:白底细边卡,整行可点选;选中高亮,操作按钮 hover 才浮现 */
@@ -89,3 +402,270 @@ body {
 .fe-subgroup-area { border-left: 2px solid #eef0f4; padding-left: 10px; }
 
 .inst-outline-item:hover { background: #eef4ff; color: #1366d9 !important; }
+
+/* 原始记录 / 数据表格的 Excel 式活动单元格：内阴影不影响合并表格和列宽计算。 */
+.spreadsheet-active-cell {
+  box-shadow: inset 0 0 0 2px #1677ff !important;
+  position: relative;
+  z-index: 1;
+}
+
+/* 映射来源较多时使用左侧竖向导航，避免横向 Tab 省略菜单被编辑卡片遮挡。 */
+.binding-picker-source-tabs > .ant-tabs-nav {
+  flex: 0 0 148px;
+  max-height: calc(100vh - 230px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+.binding-picker-source-tabs > .ant-tabs-nav .ant-tabs-tab {
+  margin: 0 0 3px !important;
+  padding: 8px 10px !important;
+  border-radius: 5px;
+}
+.binding-picker-source-tabs > .ant-tabs-content-holder {
+  min-width: 0;
+  padding-left: 14px;
+}
+/* 兼容窄屏或组件回退到省略菜单时，确保菜单始终位于 Modal 与字段编辑卡片之上。 */
+.binding-picker-tabs-popup {
+  z-index: 3200 !important;
+}
+
+/* 分区格式弹层：桌面端以左栏的紧凑高度为基准，较长的右栏独立滚动。 */
+.fe-section-format-card {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.9fr) minmax(300px, 1.1fr);
+  gap: 16px;
+  width: min(620px, calc(100vw - 64px));
+  max-width: 100%;
+  height: min(270px, calc(100vh - 150px));
+  min-height: min(220px, calc(100vh - 150px));
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.fe-section-format-column {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.fe-section-format-aside {
+  border-left: 1px solid #eee;
+  padding-left: 16px;
+}
+
+@media (max-width: 720px) {
+  .binding-picker-source-tabs {
+    display: block;
+  }
+  .binding-picker-source-tabs > .ant-tabs-nav {
+    max-height: none;
+    overflow-x: auto;
+    padding-right: 0;
+  }
+  .binding-picker-source-tabs > .ant-tabs-content-holder {
+    padding-left: 0;
+  }
+  .fe-section-format-card {
+    grid-template-columns: minmax(0, 1fr);
+    width: calc(100vw - 48px);
+    height: min(520px, calc(100vh - 140px));
+    overflow-y: auto;
+  }
+  .fe-section-format-column {
+    overflow: visible;
+    padding-right: 4px;
+  }
+  .fe-section-format-aside {
+    border-left: 0;
+    border-top: 1px solid #eee;
+    padding-left: 0;
+    padding-top: 14px;
+  }
+}
+/* Workbook review: constrain every flex/table child so wide worksheets never expand the dialog. */
+.excel-import-modal .ant-modal-content { min-width: 0; }
+.excel-import-modal .ant-modal-title { padding-right: 24px; overflow-wrap: anywhere; }
+.excel-import-filename { font-size: 13px; font-weight: 400; color: #667085; }
+.excel-import-modal .ant-modal-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.excel-import-modal .ant-modal-footer > .ant-btn { margin-inline-start: 0 !important; }
+.excel-import-modal .ant-tabs-content-holder,
+.excel-import-modal .ant-tabs-content,
+.excel-import-modal .ant-tabs-tabpane,
+.excel-import-modal .ant-collapse,
+.excel-import-modal .ant-collapse-content-box,
+.excel-import-modal .ant-table-wrapper { min-width: 0; max-width: 100%; }
+.excel-import-modal .ant-alert-message,
+.excel-import-modal .ant-alert-description,
+.excel-import-modal .ant-table-cell { overflow-wrap: anywhere; }
+.excel-import-modal .ant-space-item { min-width: 0; max-width: 100%; }
+.excel-import-tab-label { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.excel-import-tab-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; padding-bottom: 8px; }
+.excel-source-preview { min-width: 0; max-width: 100%; border: 1px solid #d0d5dd; border-radius: 8px; overflow: hidden; }
+.excel-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px; background: #f8fafc; font-size: 12px; }
+.excel-preview-toolbar strong { overflow-wrap: anywhere; }
+.excel-preview-legend { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.excel-preview-legend i { width: 12px; height: 12px; border: 1px solid #bac8d8; border-radius: 2px; }
+.excel-preview-hint { color: #667085; }
+.excel-sheet-scroll { max-width: 100%; max-height: min(380px, 44dvh); overflow: auto; overscroll-behavior: contain; }
+.excel-sheet-grid { table-layout: fixed; border-collapse: separate; border-spacing: 0; user-select: none; font-size: 12px; }
+.excel-sheet-grid th, .excel-sheet-grid td { border-right: 1px solid #dce2e9; border-bottom: 1px solid #dce2e9; padding: 7px 8px; }
+.excel-sheet-grid th { background: #f0f3f7; color: #667085; font-weight: 500; text-align: center; }
+.excel-sheet-grid thead th { position: sticky; top: 0; z-index: 2; }
+.excel-sheet-grid tbody th, .excel-sheet-grid thead th:first-child { position: sticky; left: 0; z-index: 1; }
+.excel-sheet-grid thead th:first-child { z-index: 3; }
+.excel-sheet-grid td { cursor: cell; }
+.excel-cell-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 70px; overflow: hidden; }
+.excel-import-mapping-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12px; }
+.excel-import-mapping-summary strong { flex-basis: 100%; overflow-wrap: anywhere; }
+.excel-import-mapping-summary span { background: #f5f8ff; padding: 5px 8px; border-radius: 4px; overflow-wrap: anywhere; max-width: 100%; }
+@media (max-width: 600px) {
+  .excel-import-modal .ant-modal-content { padding: 12px; }
+  .excel-import-tab-label { max-width: 140px; }
+  .excel-import-filename { display: block; max-height: 40px; overflow: hidden; }
+  .excel-import-modal .ant-select { max-width: 100%; }
+  .excel-sheet-scroll { max-height: 36dvh; }
+}
+/* Keep the formula dock inside the field drawer's own stacking context. */
+.free-grid-formula-host { position: relative; }
+@font-face { font-family: 'FangSong_GB2312'; src: url('/api/report-fonts/%E4%BB%BF%E5%AE%8B_GB2312.ttf') format('truetype'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'FangSong'; src: url('/api/report-fonts/Fangsong.ttf') format('truetype'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'KaiTi'; src: url('/api/report-fonts/Kaiti.ttf') format('truetype'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'SimHei'; src: url('/api/report-fonts/SimHei.ttf') format('truetype'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Arial'; src: url('/api/report-fonts/arial.ttf') format('truetype'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Arial'; src: url('/api/report-fonts/arialbd.ttf') format('truetype'); font-style: normal; font-weight: 700; font-display: swap; }
+@font-face { font-family: 'Arial'; src: url('/api/report-fonts/ariali.ttf') format('truetype'); font-style: italic; font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Arial'; src: url('/api/report-fonts/arialbi.ttf') format('truetype'); font-style: italic; font-weight: 700; font-display: swap; }
+.report-document-paper {
+  background: #fff;
+  overflow-x: auto;
+  max-width: 850px;
+  margin: 12px auto 32px;
+  padding: clamp(16px, 3vw, 44px);
+  box-shadow: 0 1px 3px #1822300a, 0 8px 28px #1822300d;
+  line-height: 1.65;
+  min-width: 0;
+}
+.report-paper-scroll { width: 100%; min-width: 0; overflow-x: auto; }
+.report-paper-scaled { margin: 0 auto; }
+.report-paper-scaled > .report-document-paper { width: 100%; max-width: none; box-sizing: border-box; padding: 52px 48px 28px; margin: 8px 0 24px; overflow: visible; }
+.report-document-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding-top: 4px; }
+.report-document-editor .report-document-toolbar { flex-shrink: 0; }
+.report-idle-text-tools { display: contents; }
+.report-cross-root { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+.report-cross-selected { background: #d8e9ff; }
+.report-cross-figure[data-cross-selected] { outline: 2px solid #7ca9e9; outline-offset: 2px; }
+.report-cross-figure[data-cross-selected] textarea { background-color: #e7f0ff !important; }
+.report-cross-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.report-document-toolbar.report-cross-active > :not(.report-cross-tools) { display: none !important; }
+.report-document-section { position: relative; }
+.report-section-divider { box-sizing: border-box; min-height: 34px; margin: 0 -16px 18px; padding: 8px 14px; background: #edf2f8; border: 1px solid #dce5ef; border-radius: 5px; color: #536b87; font: 600 12px/18px sans-serif; user-select: none; overflow-wrap: anywhere; }
+.report-document-section + .report-document-section > .report-section-divider { margin-top: 28px; }
+.report-project-heading { font-synthesis: none; }
+.report-heading-synthetic-bold strong { -webkit-text-stroke: .015em currentColor; }
+.report-figure-edge { position: absolute; left: 12px; right: 0; height: 7px; padding: 0; border: 0; border-radius: 3px; background: transparent; cursor: text; z-index: 2; }
+.report-figure-edge-before { top: -7px; }
+.report-figure-edge-after { bottom: -7px; }
+.report-figure-edge:hover, .report-figure-edge:focus-visible { background: #91caff33; }
+.report-figure-edge:hover, .report-figure-edge:focus-visible { outline: 1px solid #69b1ff; }
+.report-document-paper .report-document-group { margin-bottom: 18px; }
+.report-document-paper .report-group-tools { display: none !important; }
+.report-document-paper .report-group-active > .report-group-tools,
+.report-document-paper .report-document-group:focus-within > .report-group-tools { display: flex !important; padding-bottom: 8px; }
+.report-document-paper .report-section-heading { font-size: 1.08em; font-weight: 600; margin: 0 0 .6em; }
+.report-document-paper .report-section-settings { margin-bottom: 6px; }
+.report-document-paper .report-section-settings > summary { color: #8993a1; font-size: 12px; cursor: pointer; text-align: right; }
+.report-document-paper .report-section-settings[open] > .report-group-tools { display: flex !important; padding: 8px; border: 1px solid #e5e7eb; background: #fafbfc; }
+.report-image-preview-title { padding: 6px; font-weight: 600; text-align: center; border-bottom: 1px solid #ddd; white-space: pre-wrap; }
+.report-image-preview p { white-space: pre-wrap; margin: .4em 0; }
+.report-image-empty { display: block; min-height: 64px; padding: 20px; color: #999; font-size: 12px; }
+.report-document-paper .fe-row { border-color: transparent; border-radius: 2px; background: transparent; padding: 3px 0; align-items: flex-start; }
+.report-document-paper .fe-row:hover { background: transparent; }
+.report-document-paper .fe-row.fe-selected { border-color: #c6d9ed; background: transparent; }
+.report-document-paper .fe-drag { opacity: 0; margin-left: -14px; border-radius: 4px; color: #7e91a8; transition: opacity .12s ease, color .12s ease; }
+.report-document-paper .fe-row:hover > .fe-drag,
+.report-document-paper .fe-row.fe-selected > .fe-drag,
+.report-document-paper .fe-row:focus-within > .fe-drag { opacity: 1; }
+.report-document-paper .fe-drag:hover { color: #245c99; background: #edf3fa; }
+.report-document-paper .report-visual-paragraph:focus { outline: 1px solid #d9e5f2; outline-offset: 5px; border-radius: 2px; }
+.report-document-paper .report-image-preview [contenteditable="true"]:focus { outline: 1px solid #8bb3df; outline-offset: -1px; background: #f8fbff; }
+.report-document-paper .report-inline-table textarea.ant-input { border-radius: 0; box-shadow: none; background: transparent; }
+.report-document-paper .report-table-coordinate { opacity: .5; transition: opacity .12s ease; }
+.report-document-paper .report-inline-table:hover .report-table-coordinate,
+.report-document-paper .report-inline-table:focus-within .report-table-coordinate,
+.report-show-edit-marks .report-table-coordinate { opacity: 1; }
+.report-document-paper .report-editor-block { border: 0 !important; box-shadow: none !important; border-radius: 0 !important; }
+.report-document-paper .report-block-body { padding: 0 !important; }
+.report-document-paper .fe-row:not(.fe-selected) .report-block-tools { display: none !important; }
+.report-document-paper .report-figure-heading { font-weight: 600; margin-bottom: .5em; }
+.report-document-paper .report-figure-caption { white-space: pre-wrap; margin: .5em 0; font-size: .95em; }
+.report-document-paper .report-empty-content { color: #aab2bd; font-size: 12px; }
+.report-visual-paragraph { min-height: 3em; outline: none; padding: 6px 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-document-paper .report-visual-paragraph { padding: 0; min-height: 1.5em; }
+.report-visual-paragraph p, .report-rich-text p { margin: 0 0 var(--report-paragraph-gap, .65em); }
+.report-visual-paragraph p:last-child, .report-rich-text p:last-child { margin-bottom: 0; }
+.report-visual-paragraph, .report-rich-text { display: flow-root; }
+.report-visual-paragraph ul, .report-rich-text ul { list-style: disc; padding-left: 1.5em; margin: .4em 0; }
+.report-visual-paragraph ol, .report-rich-text ol { list-style: decimal; padding-left: 1.5em; margin: .4em 0; }
+.report-visual-paragraph strong, .report-rich-text strong { font-weight: 700; }
+.report-visual-paragraph em, .report-rich-text em { font-style: italic; }
+.report-continuous-text { margin: 0 0 1em; }
+.report-continuous-text .report-paragraph-tools { position: sticky; top: 0; z-index: 4; background: white; padding: 4px 0; }
+.report-mixed-document .report-paragraph-tools { position: sticky; top: 0; z-index: 4; background: white; padding: 4px 0; }
+.report-continuous-text .report-visual-paragraph { padding: 0; min-height: 1.5em; }
+.report-document-paper .report-continuous-text .report-visual-paragraph:focus { outline: 1px solid #d9e5f2; outline-offset: 5px; }
+.report-text-spacer { position: relative; min-height: 0; }
+.report-text-spacer.ProseMirror-selectednode { outline: 1px dashed #91baff; background: #f0f7ff; }
+.report-document-toolbar { position: sticky; top: 0; z-index: 6; background: #eef3f9; padding: 9px 10px; margin-bottom: 12px; display: flex; align-items: center; align-content: flex-start; flex-wrap: wrap; gap: 6px; border: 1px solid #d3deeb; border-radius: 10px; box-shadow: 0 2px 6px #263e600d; }
+.report-shared-figure-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.report-image-number { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 12px; color: #425b78; }
+.report-selected-block-tools { min-width: 0; max-width: 100%; }
+/* Portal hosts stay mounted for focus/events, but must not form separate flex rows. */
+.report-document-toolbar .report-selected-block-tools,
+.report-document-toolbar .report-figure-toolbar-host,
+.report-document-toolbar .report-shared-figure-tools,
+.report-document-toolbar .report-shared-text-tools,
+.report-document-toolbar .report-paragraph-tools,
+.report-document-toolbar .report-paragraph-tools > .ant-space-item { display: contents; }
+.report-document-toolbar .ant-btn-sm { height: 28px; padding-inline: 7px; border-radius: 5px; flex-shrink: 0; font-size: 12px; box-shadow: none; }
+.report-document-toolbar .ant-btn-default:not(:disabled):not(.ant-btn-dangerous) { background: #fff; border-color: #d4deeb; color: #344a65; }
+.report-document-toolbar .ant-btn-default:not(:disabled):hover { border-color: #1677ff; background: #e1edff; }
+.report-document-toolbar .ant-select-single.ant-select-sm { height: 28px; flex-shrink: 0; }
+.report-document-toolbar .ant-select, .report-document-toolbar .ant-input-number, .report-document-toolbar .ant-input { font-size: 12px; }
+.report-document-toolbar .ant-input-number-sm { height: 28px; border-color: #d4deeb; border-radius: 5px; }
+.report-document-toolbar .ant-input-number-sm input { height: 26px; }
+.report-document-toolbar .ant-btn-dangerous:not(:hover):not(:focus-visible):not(:disabled) { color: #a44d56; border-color: #e3cbd0; background: #fff; }
+.report-document-toolbar .ant-btn:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }
+.report-document-editor > .ant-card-body { scrollbar-color: #b9c8da transparent; scrollbar-width: thin; }
+@media (pointer: coarse) {
+  .report-document-paper .fe-drag { opacity: .75; }
+  .report-document-toolbar .ant-btn-sm { min-height: 32px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .report-document-paper .fe-drag, .report-document-paper .report-table-coordinate { transition: none; }
+}
+.report-document-toolbar .ant-select[aria-label="表格字体"],
+.report-document-toolbar .ant-select[aria-label="正文字体"] { max-width: 112px; }
+.report-document-toolbar .ant-checkbox-wrapper { margin-inline-start: 3px; white-space: nowrap; color: #425b78; }
+.report-document-toolbar .ant-divider-vertical { border-color: #bacbdf; }
+.report-shared-text-tools:empty { display: none; }
+.report-document-editor .report-shared-text-tools .report-paragraph-tools { position: static; margin: 0 !important; padding: 0; }
+.report-document-editor .report-paragraph-tools { top: 38px; }
+.report-fixed-spacer { position: relative; }
+.report-fixed-spacer:focus { outline: 1px dashed #91baff; }
+.report-document-paper .fe-row:has(.report-fixed-spacer) { position: relative; padding: 0; border: 0 !important; background: transparent; }
+.report-document-paper .fe-row:has(.report-fixed-spacer) > .fe-drag { position: absolute; left: 0; top: 0; }
+.report-document-paper .fe-selected .report-fixed-spacer,
+.report-show-edit-marks .report-fixed-spacer,
+.report-show-edit-marks .report-text-spacer { outline: 1px dashed #c5ccd7; }
+.report-show-edit-marks .report-fixed-spacer::after,
+.report-show-edit-marks .report-text-spacer::after { content: '留白 ' attr(data-height); position: absolute; top: 0; right: 0; font: 11px sans-serif; color: #8c96a5; pointer-events: none; }
+.report-show-edit-marks .report-visual-paragraph p::after,
+.report-show-edit-marks .report-rich-text p::after { content: '¶'; position: absolute; margin-left: 2px; color: #aab2bf; font: 11px sans-serif; pointer-events: none; }
+.report-show-edit-marks [data-report-page-break="true"] { position: relative; }
+.report-show-edit-marks [data-report-page-break="true"]::before { content: '分页'; position: absolute; top: -10px; right: 0; color: #8c96a5; font: 10px sans-serif; pointer-events: none; }
+.report-continuous-actions { display: flex; justify-content: flex-end; opacity: 0; }
+.report-continuous-text:hover .report-continuous-actions,
+.report-continuous-text:focus-within .report-continuous-actions { opacity: 1; }

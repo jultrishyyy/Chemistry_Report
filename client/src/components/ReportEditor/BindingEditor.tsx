@@ -3,8 +3,9 @@
  * 支持的来源：自定义 / 委托单字段 / 系统字段 / 原始记录字段 / 原始记录矩阵单元 / 原始记录汇总行
  */
 import { useMemo } from 'react';
-import { Select, Input, Space, InputNumber } from 'antd';
+import { Select, Space, InputNumber } from 'antd';
 import type { CellBinding, RecordTemplate, FieldDefinition } from '../../../../shared/types';
+import AutoGrowTextArea from '../AutoGrowTextArea';
 
 interface Props {
   value: CellBinding;
@@ -32,17 +33,29 @@ const ORDER_KEYS = [
   { value: 'customer_name', label: '委托单位' },
   { value: 'sample_name', label: '样品名称（报告范围）' },
   { value: 'received_at', label: '接收日期' },
+  { value: 'test_period', label: '检测周期（开始~结束）' },
+  { value: 'test_start', label: '检测开始日期' },
+  { value: 'test_end', label: '检测结束日期' },
   { value: 'company_address', label: '委托单位地址' },
   { value: 'send_date', label: '送检日期' },
   { value: 'time_required', label: '客户要求期限' },
   { value: 'test_time_required', label: '检测要求期限' },
   { value: 'report_deadline', label: '报告期限' },
   { value: 'authorites', label: '证书单位' },
+  { value: 'english_authorites', label: '英文证书单位' },
   { value: 'authorites_address', label: '证书单位地址' },
+  { value: 'english_authorites_address', label: '英文证书单位地址' },
   { value: 'sale_name', label: '业务员' },
+  { value: 'job_no', label: '业务员工号' },
   { value: 'buyer', label: '买家' },
   { value: 'status', label: '委托单状态' },
   { value: 'remark', label: '订单备注' },
+  { value: 'is_chinese_report', label: '是否需要中文报告' },
+  { value: 'is_english_report', label: '是否需要英文报告' },
+  { value: 'is_paper_report', label: '是否需要纸质报告' },
+  { value: 'report_count', label: '报告数量' },
+  { value: 'other_report_count', label: '其他报告数量' },
+  { value: 'complete_way', label: '完工方式' },
 ];
 
 // 样品级（接口 1.1 样品属性）
@@ -80,9 +93,9 @@ const SYSTEM_KEYS = [
 
 const META_KEYS = [
   { value: 'tester_name', label: '主检姓名' },
-  { value: 'tested_at', label: '检测日期' },
+  { value: 'tested_at', label: '检测时间' },
   { value: 'reviewer_name', label: '审核姓名' },
-  { value: 'reviewed_at', label: '审核日期' },
+  { value: 'reviewed_at', label: '审核时间' },
 ];
 
 export default function BindingEditor({ value, onChange, linkedRecord, compact }: Props) {
@@ -94,7 +107,7 @@ export default function BindingEditor({ value, onChange, linkedRecord, compact }
     const opts: { value: string; label: string }[] = [];
     for (const g of linkedRecord.groups) {
       for (const f of g.fields) {
-        if (f.type !== 'data_matrix') opts.push({ value: f.code, label: `${f.label} (${f.code})` });
+        if (f.type !== 'data_matrix') opts.push({ value: f.code, label: f.label || '未命名字段' });
       }
     }
     return opts;
@@ -134,7 +147,7 @@ export default function BindingEditor({ value, onChange, linkedRecord, compact }
       />
 
       {value.source === 'literal' && (
-        <Input size="small" placeholder="写死的文字" value={value.text}
+        <AutoGrowTextArea size="small" placeholder="写死的文字" value={value.text}
           onChange={(e) => onChange({ source: 'literal', text: e.target.value })} />
       )}
 

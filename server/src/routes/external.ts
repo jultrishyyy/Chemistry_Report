@@ -5,7 +5,9 @@
  *   - 1.1 PushOrderInfos     委托单信息   → POST /api/external/orders       ✅ 已实现
  *   - 1.2 PushReportInfos    报告取号信息 → POST /api/external/reports      ✅ 已实现
  *   - 1.3 RefreshReportInfo  报告改号+退回 → POST /api/external/report-modify ✅ 已实现（data_entry/report_edit + RecordState/SecondAuditDate/Remark）
- *   - 1.4 PushReportFile     回传报告 PDF → 出站 POST /api/external/requisitions/:id/deliver（SOAP）✅
+ *   - 1.4 AcceptReportFromDiGui  回传报告 PDF → 出站 POST /api/external/requisitions/:id/deliver（SOAP）✅
+ *   - 1.5 CancelFlowFromDiGui    撤销报告送审 → 出站 SOAP ✅
+ *   - 1.6 UpdateMaterialTaskState 数据审核完工 → 出站 SOAP（由 record-data / record-batches 触发）✅
  *
  * 解析逻辑在 services/external-orders.ts（parseOrderInfos）。本路由只负责
  * HTTP 接收 + 入库 work_orders（与界面「新建订单」同构）。
@@ -15,7 +17,7 @@ import { parseOrderInfos, type ExternalOrder } from '../services/external-orders
 import { parseReportInfos, matchRequisitionScope, buildReportMetaFromReq, dateOnly } from '../services/external-report-info.js';
 import { generateAndStoreReport } from './reports.js';
 import { compileTypst } from '../services/typst-compiler.js';
-import { submitReportToDiGui } from '../services/external-report-delivery.js';
+import { submitReportToDiGui, cancelReportFlowFromDiGui } from '../services/external-report-delivery.js';
 import { parseReportFeedback } from '../services/external-report-feedback.js';
 import { returnReportForEdit, returnReportToDataEntry, markReportApproved } from '../services/rework-ops.js';
 
@@ -27,6 +29,42 @@ function readActor(req: Request): string | null {
   const raw = (req.header('X-Demo-User') || '').trim();
   if (!raw) return null;
   try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
+/** 当前登录账号工号（前端 X-User-Job 头，与 auth.ts RBAC 鉴权同源）。 */
+function readJobNo(req: Request): string {
+  return (req.header('X-User-Job') || '').trim();
+}
+
+/**
+ * 报告编号接口给出的 scope 是“默认范围”，而不是编辑上限。
+ * 文员可在一份报告中改选本订单的任意样品/项目，因此匹配时展开订单的完整样品清单；
+ * default_enabled 仅用于前端首开时保留接口下发的默认勾选。
+ */
+async function matchRequisitionWithOrderScope(row: any, selections = Array.isArray(row.template_selections) ? row.template_selections : []) {
+  const wo = await pool.query('SELECT payload FROM work_orders WHERE order_no=$1', [row.order_no]);
+  const orderSamples: any[] = Array.isArray(wo.rows[0]?.payload?.samples) ? wo.rows[0].payload.samples : [];
+  const defaultPairs = new Set<string>();
+  for (const sample of (Array.isArray(row.scope?.samples) ? row.scope.samples : [])) {
+    for (const test of (Array.isArray(sample?.test_infos) ? sample.test_infos : [])) {
+      defaultPairs.add(`${sample?.name || ''}||${test?.name || ''}`);
+    }
+  }
+  const expandedScope = {
+    samples: orderSamples.map((sample: any) => ({
+      id: sample?.id != null ? String(sample.id) : undefined,
+      name: sample?.name || '',
+      test_infos: Array.isArray(sample?.test_infos) ? sample.test_infos.map((test: any) => ({ name: test?.name || '' })) : [],
+    })),
+  };
+  const match = await matchRequisitionScope(
+    pool, row.order_no, expandedScope,
+    selections,
+  );
+  return match.map((entry: any) => ({
+    ...entry,
+    default_enabled: defaultPairs.has(`${entry.sample_name || ''}||${entry.project_name || ''}`),
+  }));
 }
 
 /** 读旧 payload 里某测试项目的关联模板集（兼容旧单值 linked_template_id）。 */
@@ -100,6 +138,7 @@ async function upsertOrder(order: ExternalOrder): Promise<{ action: 'inserted' |
   // 已存在：按 样品名||项目名 索引旧关联，合并到新结构
   const oldSamples: any[] = Array.isArray(existing.rows[0].payload?.samples) ? existing.rows[0].payload.samples : [];
   const oldLinks = new Map<string, number[]>();
+  const oldTaskIds = new Map<string, string>();
   const oldKeys = new Set<string>();
   for (const os of oldSamples) {
     for (const ot of (os.test_infos || [])) {
@@ -107,6 +146,8 @@ async function upsertOrder(order: ExternalOrder): Promise<{ action: 'inserted' |
       oldKeys.add(k);
       const ids = linkedIdsOf(ot);
       if (ids.length) oldLinks.set(k, ids);
+      const taskId = String(ot?.task_id ?? ot?.TaskId ?? '').trim();
+      if (taskId) oldTaskIds.set(k, taskId);
     }
   }
 
@@ -117,7 +158,12 @@ async function upsertOrder(order: ExternalOrder): Promise<{ action: 'inserted' |
       const k = `${ns.name}||${nt.name}`;
       newKeys.add(k);
       const ids = oldLinks.get(k);
-      return ids && ids.length ? { ...nt, linked_template_ids: ids } : nt;
+      const taskId = nt.task_id || oldTaskIds.get(k);
+      return {
+        ...nt,
+        ...(taskId ? { task_id: taskId } : {}),
+        ...(ids && ids.length ? { linked_template_ids: ids } : {}),
+      };
     }),
   }));
 
@@ -169,20 +215,34 @@ router.post('/orders', async (req: Request, res: Response) => {
 
 /**
  * 取号单自动生成报告（接口 1.2 收到即生成的核心）。
- * 仅对【尚未生成 + 有 matched 且数据已审核(reviewed) 的样品×项目】生成；缺默认首页模板或无可用
- * assignment 则返回 null（跳过，不报错）。与 /requisitions/generate 同口径（复用 generateAndStoreReport
- * + 首页草稿 carry + buildReportMetaFromReq），生成后回填 requisition.report_id。
+ * 已停用自动生成：每份报告必须先由文员确认样品/项目范围与项目模板后，调用
+ * /requisitions/generate 显式生成。保留函数仅兼容旧调用，始终返回 null。
  * @returns 新报告 id 或 null（未生成）。
  */
 async function autoGenerateRequisition(reqRow: any, actor: string | null): Promise<number | null> {
+  void reqRow; void actor;
+  return null;
+  /* legacy implementation retained below for migration reference */
   if (reqRow.report_id) return null; // 已生成：幂等，不覆盖（避免冲掉文员已编辑的报告）
   const match: any[] = Array.isArray(reqRow.match_result) ? reqRow.match_result : [];
-  // 已匹配且原始记录已审核通过的条目 → assignment（取首个有项目模板的已审核记录）
-  const assignments = match
-    .filter(m => m.status === 'matched')
-    .map(m => (m.assignments || []).find((a: any) => a.record_data_status === 'reviewed' && a.project_template_id))
-    .filter((a: any) => a && a.record_data_id && a.project_template_id)
-    .map((a: any, i: number) => ({ record_data_id: a.record_data_id, project_template_id: a.project_template_id, enabled: true, page_break: true, _order: i }));
+  // 每个已匹配格子都必须有一个明确选择。唯一候选可自动确定；多候选必须等文员确认，
+  // 不能再静默取第一份模板，也不能只生成报告范围中的一部分。
+  const matched = match.filter(m => m.status === 'matched'
+    && (m.assignments || []).some((a: any) => a.record_data_status === 'reviewed'));
+  if (!matched.length) return null;
+  const picked = matched.map(m => ({
+    scope_key: m.scope_key,
+    assignment: (m.assignments || []).find((a: any) =>
+      a.record_data_status === 'reviewed' && a.project_template_id),
+  }));
+  if (picked.some(x => !x.assignment)) return null;
+  const assignments = picked.map((x, i) => ({
+    scope_key: x.scope_key,
+    record_data_id: x.assignment.record_data_id,
+    project_template_id: x.assignment.project_template_id,
+    project_template_version_id: x.assignment.project_template_version_id,
+    enabled: true, page_break: true, _order: i,
+  }));
   if (!assignments.length) return null;
 
   const cov = await pool.query(
@@ -221,9 +281,19 @@ async function autoGenerateRequisition(reqRow: any, actor: string | null): Promi
     report_meta: buildReportMetaFromReq(reqRow), cover_groups_override: coverGroupsOverride,
     cover_ctx_photos: coverCtxPhotos, report_samples, actor,
   });
+  const frozenSelections = assignments.map((a: any) => ({
+    scope_key: a.scope_key,
+    record_data_id: a.record_data_id,
+    project_template_id: a.project_template_id,
+    project_template_version_id: a.project_template_version_id,
+    selected_at: new Date().toISOString(),
+    selected_by: actor,
+  }));
   await pool.query(
-    'UPDATE report_requisitions SET report_id=$2, status=$3, stale=false, updated_at=NOW() WHERE id=$1',
-    [reqRow.id, result.report_id, 'generated']);
+    `UPDATE report_requisitions
+        SET report_id=$2, status=$3, stale=false, template_selections=$4::jsonb, updated_at=NOW()
+      WHERE id=$1`,
+    [reqRow.id, result.report_id, 'generated', JSON.stringify(frozenSelections)]);
   return result.report_id;
 }
 
@@ -247,7 +317,15 @@ router.post('/reports', async (req: Request, res: Response) => {
     const actor = readActor(req);
     const results: any[] = [];
     for (const rq of requisitions) {
-      const match = await matchRequisitionScope(pool, rq.order_no, rq.scope);
+      // 外部重复推送同一取号单时保留文员已经确认过的模板选择；若候选关系已失效，
+      // matchRequisitionScope 会自动丢弃该选择并重新标成“待选择”。
+      const previous = await pool.query(
+        'SELECT template_selections FROM report_requisitions WHERE sys_number=$1',
+        [rq.sys_number],
+      );
+      const savedSelections = Array.isArray(previous.rows[0]?.template_selections)
+        ? previous.rows[0].template_selections : [];
+      const match = await matchRequisitionScope(pool, rq.order_no, rq.scope, savedSelections);
       await pool.query(
         `INSERT INTO report_requisitions
            (order_no, sys_number, report_number, check_code, language, sample_name, issue_date, header_footer, scope, match_result, status)
@@ -330,8 +408,11 @@ router.post('/report-modify', async (req: Request, res: Response) => {
              issue_date=COALESCE($3, issue_date),
              record_state=COALESCE($4, record_state),
              last_modify_remark=COALESCE($5, last_modify_remark),
-             stale=(report_id IS NOT NULL), updated_at=NOW()
-           WHERE sys_number=$1 RETURNING report_id, report_number, issue_date, record_state`,
+             -- 1.3 的审核状态回执不是报告内容变更；只有确实改号时才需要重生成。
+             -- 旧逻辑对每一条回执都置 stale=true，进一步放大了“未送审却被外部状态锁死”的影响。
+             stale=CASE WHEN report_id IS NOT NULL AND NULLIF($2,'') IS NOT NULL AND report_number <> $2 THEN true ELSE stale END,
+             updated_at=NOW()
+           WHERE sys_number=$1 RETURNING report_id, report_number, issue_date, record_state, delivery_status`,
           [sys, rn, issueDate, recordState, remark],
         );
         if (!r.rows.length) { await client.query('ROLLBACK'); results.push({ sys_number: sys, ok: false, error: '未找到该取号单' }); continue; }
@@ -339,7 +420,8 @@ router.post('/report-modify', async (req: Request, res: Response) => {
         const newNo: string = r.rows[0].report_number;
         const newIssueDate: string | null = r.rows[0].issue_date;
         const newRecordState: string | null = r.rows[0].record_state;
-        if (reportId && rn) await client.query('UPDATE reports SET report_no=$2, stale=true WHERE id=$1', [reportId, rn]);
+        const deliveryStatus: string = r.rows[0].delivery_status || 'none';
+        if (reportId && rn) await client.query('UPDATE reports SET report_no=$2, stale=(stale OR report_no IS DISTINCT FROM $2) WHERE id=$1', [reportId, rn]);
 
         // 2) 退回环节（仅已生成报告可退回）
         if (modifyType && !reportId) {
@@ -370,9 +452,16 @@ router.post('/report-modify', async (req: Request, res: Response) => {
         //    审核通过 → external_approved（签发完成，终态）；审核不通过（未显式给 ModifyType）→ 语义等价
         //    report_edit：退回文员改报告（external_revision + 建 scope=report 工单）。草稿/审核中/无报告 →
         //    仅记录元数据（record_state 已在上面的 UPDATE 落库）。
-        if (reportId && (newRecordState === '审核通过' || newRecordState === '审核不通过')) {
-          const rep = await client.query('SELECT id, order_no, report_no, record_data_ids FROM reports WHERE id=$1', [reportId]);
+        if (reportId && deliveryStatus === 'sent' && (newRecordState === '审核通过' || newRecordState === '审核不通过')) {
+          const rep = await client.query('SELECT id, order_no, report_no, record_data_ids, external_status FROM reports WHERE id=$1', [reportId]);
           const report = rep.rows[0];
+          // 外部结论只能作用于本系统已经成功送出的报告。没有经过 submitted_external
+          // 状态的一律只记录外部元数据，不能反向把未送审报告锁成“审核通过”。
+          if (report?.external_status !== 'submitted_external') {
+            await client.query('COMMIT');
+            results.push({ sys_number: sys, ok: true, report_number: newNo, issue_date: newIssueDate, record_state: newRecordState, regenerate_needed: false, warning: '外部回执未对应本系统已送审状态，仅记录元数据' });
+            continue;
+          }
           if (newRecordState === '审核通过') {
             await markReportApproved(client, reportId, { externalRef: null });
             // 审核通过＝终态：取号单不再是"待重新生成"（上面的 UPDATE 因 report_id 非空置了 stale=true，这里回退）
@@ -453,21 +542,158 @@ router.get('/requisitions', async (req: Request, res: Response) => {
   if (!order_no) { res.status(400).json({ error: 'order_no 必填' }); return; }
   try {
     const r = await pool.query(
-      `SELECT rq.*, rp.external_status
+      `SELECT rq.*, rp.external_status, rp.scope AS report_scope
          FROM report_requisitions rq
          LEFT JOIN reports rp ON rp.id = rq.report_id
         WHERE rq.order_no=$1 ORDER BY rq.report_number`, [order_no]);
     const rows: any[] = [];
     for (const row of r.rows) {
-      const match = await matchRequisitionScope(pool, order_no, row.scope);
-      await pool.query('UPDATE report_requisitions SET match_result=$2::jsonb, updated_at=NOW() WHERE id=$1', [row.id, JSON.stringify(match)]);
+      const match = await matchRequisitionWithOrderScope(
+        row, Array.isArray(row.template_selections) ? row.template_selections : [],
+      );
+      await pool.query('UPDATE report_requisitions SET match_result=$2::jsonb WHERE id=$1', [row.id, JSON.stringify(match)]);
       // 文员侧锁：该报告若有未关闭的 data_entry 返工工单，前端据此禁用重新生成/编辑/送审。
       const data_rework_open = row.report_id ? await hasOpenDataEntryRework(pool, row.report_id) : false;
       // 报告退回(scope=report)：在原报告上编辑修改（非重生成），退回意见展示在该条目下方。
       const report_rework = row.report_id ? await getOpenReportRework(pool, row.report_id) : null;
-      rows.push({ ...row, match_result: match, data_rework_open, report_rework });
+      // 已生成报告以 reports.scope 为唯一事实来源。编辑器内调整范围后，工作台重新打开时
+      // 用这一快照重建勾选状态，保证两个入口看到的是同一份样品/项目范围。
+      const reportPairs = new Map<string, any>((Array.isArray(row.report_scope?.project_assignments)
+        ? row.report_scope.project_assignments : [])
+        .filter((a: any) => a?.record_data_id && a?.project_template_id)
+        .map((a: any) => [`${Number(a.record_data_id)}:${Number(a.project_template_id)}`, a]));
+      const reportSelectedRecordIds = new Set<number>(Array.isArray(row.report_scope?.selected_record_data_ids)
+        ? row.report_scope.selected_record_data_ids.map(Number) : []);
+      const displaySelections = row.report_id && (reportPairs.size || reportSelectedRecordIds.size)
+        ? match.map((entry: any) => {
+          const selected = entry.assignments?.find((a: any) =>
+            reportSelectedRecordIds.has(Number(a.record_data_id))
+            || [...reportPairs.keys()].some(pair => pair.startsWith(`${Number(a.record_data_id)}:`)));
+          const pair = selected && [...reportPairs.entries()].find(([key]) => key.startsWith(`${Number(selected.record_data_id)}:`));
+          return {
+            scope_key: entry.scope_key,
+            enabled: !!pair || !!selected,
+            record_data_id: selected?.record_data_id,
+            project_template_id: pair ? Number(String(pair[0]).split(':')[1]) : undefined,
+            project_template_version_id: pair?.[1]?.project_template_version_id ?? null,
+          };
+        })
+        : row.template_selections;
+      rows.push({ ...row, template_selections: displaySelections, match_result: match, data_rework_open, report_rework });
     }
     res.json(rows);
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/**
+ * 保存一条“报告范围格子 → 原始记录 → 项目模板”的人工选择。
+ * 同一 record_data_id 可在不同 scope_key 下选择不同项目模板，避免一份原始记录对应多个报告模板时互相覆盖。
+ */
+router.put('/requisitions/:id/template-selection', async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const scopeKey = String(req.body?.scope_key || '').trim();
+  const recordDataId = Number(req.body?.record_data_id);
+  const projectTemplateId = Number(req.body?.project_template_id);
+  if (!Number.isFinite(id) || !scopeKey || !Number.isFinite(recordDataId) || !Number.isFinite(projectTemplateId)) {
+    res.status(400).json({ error: 'scope_key / record_data_id / project_template_id 必填' });
+    return;
+  }
+  try {
+    const rqRes = await pool.query('SELECT * FROM report_requisitions WHERE id=$1', [id]);
+    if (!rqRes.rows.length) { res.status(404).json({ error: '取号单不存在' }); return; }
+    const row = rqRes.rows[0];
+    const currentMatch = await matchRequisitionWithOrderScope(
+      row, Array.isArray(row.template_selections) ? row.template_selections : [],
+    );
+    const entry = currentMatch.find(m => m.scope_key === scopeKey);
+    const assignment = entry?.assignments?.find((a: any) => Number(a.record_data_id) === recordDataId);
+    const candidate = assignment?.project_template_candidates?.find((c: any) => Number(c.id) === projectTemplateId);
+    if (!entry || !assignment || !candidate) {
+      res.status(409).json({ error: '所选项目模板与该报告范围或原始记录的关联关系不一致，请刷新后重选' });
+      return;
+    }
+    const now = new Date().toISOString();
+    const actor = readActor(req);
+    const old = Array.isArray(row.template_selections) ? row.template_selections : [];
+    const next = old.filter((x: any) =>
+      !(String(x.scope_key) === scopeKey && Number(x.record_data_id) === recordDataId));
+    next.push({
+      scope_key: scopeKey,
+      record_data_id: recordDataId,
+      project_template_id: projectTemplateId,
+      project_template_version_id: candidate.version_id,
+      selected_at: now,
+      selected_by: actor,
+    });
+    const match = await matchRequisitionWithOrderScope(row, next);
+    await pool.query(
+      `UPDATE report_requisitions
+          SET template_selections=$2::jsonb, match_result=$3::jsonb,
+              generation_configured_at=NULL, generation_configured_by=NULL, updated_at=NOW()
+        WHERE id=$1`,
+      [id, JSON.stringify(next), JSON.stringify(match)],
+    );
+    res.json({ ok: true, template_selections: next, match_result: match });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/**
+ * 确认本次报告配置。每个可用的“样品 × 项目”都必须明确选择「纳入」或「不纳入」；
+ * 纳入时还必须选择一份与该原始记录关联且已生效的项目模板。
+ */
+router.put('/requisitions/:id/generation-config', async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const requested = Array.isArray(req.body?.assignments) ? req.body.assignments : null;
+  if (!Number.isFinite(id) || !requested) { res.status(400).json({ error: 'assignments 必填' }); return; }
+  try {
+    const found = await pool.query('SELECT * FROM report_requisitions WHERE id=$1', [id]);
+    if (!found.rows.length) { res.status(404).json({ error: '取号单不存在' }); return; }
+    const row = found.rows[0];
+    if (row.report_id && !row.stale) { res.status(409).json({ error: '该报告已生成；如需调整范围或模板，请先发起重新生成' }); return; }
+    const freshMatch = await matchRequisitionWithOrderScope(row, []);
+    const configurable = freshMatch.filter((entry: any) => entry.status === 'matched'
+      && entry.assignments.some((a: any) => a.record_data_status === 'reviewed'));
+    const byScope = new Map(requested.map((a: any) => [String(a?.scope_key || ''), a]));
+    if (byScope.size !== requested.length || configurable.some((entry: any) => !byScope.has(String(entry.scope_key)))) {
+      res.status(400).json({ error: '请对每个已审核的样品和项目明确选择“纳入”或“不纳入”' }); return;
+    }
+    const selections: any[] = [];
+    for (const entry of configurable) {
+      const choice: any = byScope.get(String(entry.scope_key));
+      const enabled = choice?.enabled !== false;
+      if (!enabled) {
+        selections.push({ scope_key: entry.scope_key, enabled: false });
+        continue;
+      }
+      const recordDataId = Number(choice?.record_data_id);
+      const projectTemplateId = Number(choice?.project_template_id);
+      const assignment = entry.assignments.find((a: any) => Number(a.record_data_id) === recordDataId && a.record_data_status === 'reviewed');
+      const candidate = assignment?.project_template_candidates?.find((c: any) => Number(c.id) === projectTemplateId);
+      if (!assignment || !candidate) {
+        res.status(400).json({ error: `“${entry.sample_name} · ${entry.project_name}”未选择有效的项目模板` }); return;
+      }
+      selections.push({
+        scope_key: entry.scope_key, enabled: true, record_data_id: recordDataId,
+        project_template_id: projectTemplateId, project_template_version_id: candidate.version_id,
+      });
+    }
+    if (!selections.some(x => x.enabled)) { res.status(400).json({ error: '请至少纳入一个已审核项目后再生成报告' }); return; }
+    const actor = readActor(req);
+    const now = new Date().toISOString();
+    selections.forEach(s => { s.selected_at = now; s.selected_by = actor; });
+    const match = await matchRequisitionWithOrderScope(row, selections);
+    await pool.query(
+      `UPDATE report_requisitions
+          SET template_selections=$2::jsonb, match_result=$3::jsonb,
+              generation_configured_at=NOW(), generation_configured_by=$4, updated_at=NOW()
+        WHERE id=$1`,
+      [id, JSON.stringify(selections), JSON.stringify(match), actor],
+    );
+    res.json({ ok: true, template_selections: selections, match_result: match, generation_configured_at: now, generation_configured_by: actor });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || String(e) });
   }
@@ -486,7 +712,7 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
   }
   const actor = readActor(req);
   try {
-    const ord = await pool.query('SELECT customer_name, received_at FROM work_orders WHERE order_no=$1', [order_no]);
+    const ord = await pool.query('SELECT customer_name, received_at, payload FROM work_orders WHERE order_no=$1', [order_no]);
     const customer_name = ord.rows[0]?.customer_name || '';
     const received_at = ord.rows[0]?.received_at || '';
     // 首页草稿 carry-over：本订单若有文员编辑过的首页草稿，取其已编辑 cover groups，
@@ -507,12 +733,49 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
       const rq = await pool.query('SELECT * FROM report_requisitions WHERE id=$1 AND order_no=$2', [it.requisition_id, order_no]);
       if (!rq.rows.length) { out.push({ requisition_id: it.requisition_id, ok: false, error: '取号单不存在' }); continue; }
       const row = rq.rows[0];
-      const assignments = (Array.isArray(it.assignments) ? it.assignments : [])
-        .filter((a: any) => a && a.record_data_id && a.project_template_id)
-        .map((a: any, i: number) => ({
-          record_data_id: a.record_data_id, project_template_id: a.project_template_id,
+      if (!row.generation_configured_at) {
+        out.push({ requisition_id: row.id, ok: false, error: '请先确认本报告的样品、项目和项目模板配置' });
+        continue;
+      }
+      const frozenSelections = Array.isArray(row.template_selections) ? row.template_selections : [];
+      const configured = frozenSelections.filter((x: any) => x?.enabled !== false && x?.scope_key && x?.record_data_id && x?.project_template_id);
+      if (!configured.length) {
+        out.push({ requisition_id: row.id, ok: false, error: '报告配置中没有纳入可生成的项目' }); continue;
+      }
+      const freshMatch = await matchRequisitionWithOrderScope(row, frozenSelections);
+      const requested = (Array.isArray(it.assignments) ? it.assignments : [])
+        .filter((a: any) => a && a.record_data_id && a.project_template_id);
+      const configuredKeys = new Set(configured.map((a: any) => `${a.scope_key}:${a.record_data_id}:${a.project_template_id}`));
+      const requestedKeys = new Set(requested.map((a: any) => `${a.scope_key}:${a.record_data_id}:${a.project_template_id}`));
+      if (configuredKeys.size !== requestedKeys.size || [...configuredKeys].some(k => !requestedKeys.has(k))) {
+        out.push({ requisition_id: row.id, ok: false, error: '生成内容与已确认的报告配置不一致，请刷新后重新生成' }); continue;
+      }
+      const assignments: any[] = [];
+      let invalidSelection = '';
+      for (let i = 0; i < requested.length; i++) {
+        const a = requested[i];
+        const entry = freshMatch.find(m => m.scope_key === a.scope_key);
+        const matchedAssignment = entry?.assignments?.find((x: any) =>
+          Number(x.record_data_id) === Number(a.record_data_id)
+          && x.record_data_status === 'reviewed');
+        const candidate = matchedAssignment?.project_template_candidates?.find((x: any) =>
+          Number(x.id) === Number(a.project_template_id));
+        if (!entry || !matchedAssignment || !candidate) {
+          invalidSelection = `第 ${i + 1} 个项目模板与原始记录或报告范围不匹配`;
+          break;
+        }
+        assignments.push({
+          scope_key: a.scope_key,
+          record_data_id: Number(a.record_data_id),
+          project_template_id: Number(a.project_template_id),
+          project_template_version_id: candidate.version_id,
           enabled: true, title: a.title || undefined, page_break: a.page_break !== false, _order: i,
-        }));
+        });
+      }
+      if (invalidSelection) {
+        out.push({ requisition_id: row.id, ok: false, error: invalidSelection });
+        continue;
+      }
       if (!assignments.length) { out.push({ requisition_id: row.id, ok: false, error: '没有可生成的项目（请先补齐样品/项目/原始记录关联）' }); continue; }
       // 文员侧锁：实验室数据退回(data_entry)未重审通过前不能重新生成（待重审后自动解锁）。
       const prevReportId: number | null = row.report_id;
@@ -520,8 +783,13 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
         out.push({ requisition_id: row.id, ok: false, locked: true, error: '实验室数据退回修改中，待重新审核通过后才能重新生成' });
         continue;
       }
-      // 本报告编号自带样品清单（scope.samples）→ report_samples，首页样品清单/样品信息表直接用它（同 autoGenerate）。
-      const scopeSamples: any[] = Array.isArray(row.scope?.samples) ? row.scope.samples : [];
+      // 报告编号接口下发的是默认范围；实际取用本订单完整样品清单，按本次已选项目收敛。
+      const selectedScopes = new Set(assignments.map((a: any) => String(a.scope_key)));
+      const selectedSampleNames = new Set(freshMatch
+        .filter((m: any) => selectedScopes.has(String(m.scope_key)))
+        .map((m: any) => m.sample_name));
+      const scopeSamples: any[] = (Array.isArray(ord.rows[0]?.payload?.samples) ? ord.rows[0].payload.samples : [])
+        .filter((s: any) => selectedSampleNames.has(s?.name));
       const report_samples = scopeSamples.map((smp: any, i: number) => ({
         no: (smp?.sort_no != null && String(smp.sort_no).trim()) || String(i + 1),
         name: smp?.name ?? '',
@@ -543,8 +811,10 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
         await pool.query('UPDATE reports SET superseded_by=$2 WHERE id=$1', [prevReportId, result.report_id]);
       }
       await pool.query(
-        'UPDATE report_requisitions SET report_id=$2, status=$3, stale=false, updated_at=NOW() WHERE id=$1',
-        [row.id, result.report_id, 'generated'],
+        `UPDATE report_requisitions
+            SET report_id=$2, status=$3, stale=false, template_selections=$4::jsonb, updated_at=NOW()
+          WHERE id=$1`,
+        [row.id, result.report_id, 'generated', JSON.stringify(frozenSelections)],
       );
       out.push({ requisition_id: row.id, ok: true, ...result });
     }
@@ -571,14 +841,16 @@ router.post('/requisitions/:id/deliver', async (req: Request, res: Response) => 
       res.status(409).json({ error: '实验室数据退回修改中，待重新审核通过并重新生成后才能回传' }); return;
     }
 
-    const rep = await pool.query('SELECT final_typst FROM reports WHERE id=$1', [row.report_id]);
+    const rep = await pool.query('SELECT final_typst, external_status FROM reports WHERE id=$1', [row.report_id]);
     if (!rep.rows.length || !rep.rows[0].final_typst) { res.status(400).json({ error: '报告内容缺失，无法编译 PDF' }); return; }
+    if (rep.rows[0].external_status === 'external_approved') {
+      res.status(409).json({ error: '报告已外部审核通过，不能再次送审' }); return;
+    }
 
     const compiled = await compileTypst(rep.rows[0].final_typst);
     const pdfBase64 = Buffer.from(compiled.pdf).toString('base64');
-    // 业务员工号 JobNo（接口1.4 第三参）：来自委托单（接口1.1 → work_orders.payload.meta.job_no）
-    const woMeta = await pool.query(`SELECT payload->'meta'->>'job_no' AS job_no FROM work_orders WHERE order_no=$1`, [row.order_no]);
-    const jobNo = woMeta.rows[0]?.job_no || '';
+    // 操作人工号 JobNo（接口1.4 第三参）：取当前登录账号工号（X-User-Job 头，即谁点的回传）
+    const jobNo = readJobNo(req);
     const result = await submitReportToDiGui(row.sys_number, pdfBase64, jobNo);
 
     await pool.query(
@@ -608,6 +880,97 @@ router.post('/requisitions/:id/deliver', async (req: Request, res: Response) => 
 });
 
 /**
+ * 撤回送审：仅允许撤回“已回传、外部尚未审核通过”的报告。
+ * 撤回后恢复为可编辑/可重新生成/可再次送审；已外部审核通过的报告是终态，不允许撤回。
+ *
+ * 先调用业务系统 CancelFlowFromDiGui(sysNumber, jobNo)。仅当其同步回执为
+ * { Msg: 'OK', RecordState: '草稿' } 才更新本地；任何远端失败都保留“已送审”状态。
+ */
+router.post('/requisitions/:id/withdraw-delivery', async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: '非法取号单 id' }); return; }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const rq = await client.query(
+      `SELECT rq.*, r.external_status
+         FROM report_requisitions rq
+         LEFT JOIN reports r ON r.id=rq.report_id
+        WHERE rq.id=$1
+        FOR UPDATE OF rq`,
+      [id],
+    );
+    if (!rq.rows.length) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: '取号单不存在' });
+      return;
+    }
+    const row = rq.rows[0];
+    if (!row.report_id) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: '该取号单尚未生成报告' });
+      return;
+    }
+    if (row.external_status === 'external_approved') {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: '报告已经外部审核通过，不能撤回送审' });
+      return;
+    }
+    if (row.delivery_status !== 'sent') {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: '该报告当前不是已送审状态，无需撤回' });
+      return;
+    }
+    if (row.external_status === 'external_revision') {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: '该报告已被外部退回，请完成修改后重新送审，无需撤回' });
+      return;
+    }
+    // 远端撤回必须先成功。本事务持有该取号单行锁，避免用户在撤回响应返回前再次送审或并发撤回。
+    const jobNo = readJobNo(req);
+    const remote = await cancelReportFlowFromDiGui(row.sys_number, jobNo);
+    if (!remote.ok) {
+      await client.query('ROLLBACK');
+      res.status(502).json({
+        ok: false,
+        error: remote.error || '业务系统撤回失败',
+        record_state: remote.recordState || null,
+      });
+      return;
+    }
+    await client.query(
+      `UPDATE report_requisitions
+          SET delivery_status='none', delivered_at=NULL, delivery_error=NULL,
+              record_state=$2, updated_at=NOW()
+        WHERE id=$1`,
+      [id, remote.recordState],
+    );
+    await client.query(
+      `UPDATE reports
+          SET external_status='none', external_ref=NULL, external_feedback_at=NULL, stale=false
+        WHERE id=$1`,
+      [row.report_id],
+    );
+    await client.query(
+      `INSERT INTO report_audit_log (report_id, action, actor_name, diff, note)
+       VALUES ($1,'edit',$2,'[]'::jsonb,$3)`,
+      [row.report_id, readActor(req), `外部撤回送审成功，状态：${remote.recordState}${remote.receipt ? `；回执：${remote.receipt.slice(0, 500)}` : ''}`],
+    );
+    await client.query('COMMIT');
+    res.json({
+      ok: true,
+      record_state: remote.recordState,
+      receipt: remote.receipt,
+    });
+  } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: e?.message || String(e) });
+  } finally {
+    client.release();
+  }
+});
+
+/**
  * 外部报告回执（P-Flow-2 场景3）—— 外部审批结论入站（mock 可手动触发）。
  * body: { report_id? | report_no? | sys_number?, order_no?, decision:'approved'|'needs_revision', suggestions?/suggestion?, external_ref? }
  *   - approved       → markReportApproved（external_approved，签发完成）。
@@ -622,16 +985,23 @@ router.post('/report-feedback', async (req: Request, res: Response) => {
 
   const client = await pool.connect();
   try {
-    // 定位报告：report_id > report_no > sys_number(经 requisition)
+    // 定位报告：report_id > report_no > sys_number(经 requisition)。外部结论只能作用于
+    // 已由本系统成功送审、当前正等待回执的报告，不能把任意历史报告直接“审核通过”。
     let rep: any = null;
-    if (fb.report_id) rep = (await client.query('SELECT id, order_no, report_no FROM reports WHERE id=$1', [fb.report_id])).rows[0];
-    if (!rep && fb.report_no) rep = (await client.query('SELECT id, order_no, report_no FROM reports WHERE report_no=$1 ORDER BY id DESC LIMIT 1', [fb.report_no])).rows[0];
+    const reportSelect = `SELECT r.id, r.order_no, r.report_no, r.external_status, rq.delivery_status
+      FROM reports r LEFT JOIN report_requisitions rq ON rq.report_id=r.id`;
+    if (fb.report_id) rep = (await client.query(`${reportSelect} WHERE r.id=$1`, [fb.report_id])).rows[0];
+    if (!rep && fb.report_no) rep = (await client.query(`${reportSelect} WHERE r.report_no=$1 ORDER BY r.id DESC LIMIT 1`, [fb.report_no])).rows[0];
     if (!rep && fb.sys_number) {
       const rq = await client.query('SELECT report_id FROM report_requisitions WHERE sys_number=$1', [fb.sys_number]);
       const rid = rq.rows[0]?.report_id;
-      if (rid) rep = (await client.query('SELECT id, order_no, report_no FROM reports WHERE id=$1', [rid])).rows[0];
+      if (rid) rep = (await client.query(`${reportSelect} WHERE r.id=$1`, [rid])).rows[0];
     }
     if (!rep) { res.status(404).json({ error: '未找到对应报告（report_id/report_no/sys_number 都定位不到，或报告尚未生成）' }); return; }
+    if (rep.delivery_status !== 'sent' || rep.external_status !== 'submitted_external') {
+      res.status(409).json({ error: '该报告尚未由本系统送审，或当前不在等待外部回执状态；已忽略该外部结论' });
+      return;
+    }
 
     await client.query('BEGIN');
     if (fb.decision === 'approved') {

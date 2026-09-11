@@ -28,15 +28,29 @@ export const dbConfig = mergeWithEnv({ ...dbBase, ...dbLocal }, 'DB');
 const typstBase = loadJson('typst.json');
 export const typstConfig = mergeWithEnv(typstBase, 'TYPST');
 
-// 外部 OA 登录（接口 5.1 commonLogin/login）：auth.json(基础) + auth.local.json(部署填真实值) + AUTH_* 环境变量
-const authBase = loadJson('auth.json');
-const authLocal = loadJson('auth.local.json');
-export const authConfig = mergeWithEnv({ ...authBase, ...authLocal }, 'AUTH');
+// 所有外部接口统一由 interfaces.{demo|server}.json 管理。
+// 未设 INTEGRATIONS_PROFILE 时安全地使用 demo（OA / SOAP 都不会真实调用）。
+const requestedProfile = String(process.env.INTEGRATIONS_PROFILE || 'demo').trim().toLowerCase();
+if (requestedProfile !== 'demo' && requestedProfile !== 'server') {
+  throw new Error(`[config] INTEGRATIONS_PROFILE 只能是 demo 或 server（当前：${requestedProfile || '(空)'}）`);
+}
+export const integrationsProfile = requestedProfile === 'server' ? 'server' : 'demo';
+const interfacesProfile = loadJson(`interfaces.${integrationsProfile}.json`);
+if (integrationsProfile === 'server' && Object.keys(interfacesProfile).length === 0) {
+  throw new Error('[config] server 模式缺少 config/interfaces.server.json；拒绝回退到 mock，请复制 interfaces.server.json.example 后填写真实值。');
+}
+const interfaceConfig = integrationsProfile === 'server'
+  ? interfacesProfile
+  : (Object.keys(interfacesProfile).length ? interfacesProfile : loadJson('interfaces.demo.json'));
 
-// 接口 1.4 报告回传（AcceptReportFromDiGui，SOAP）：report-delivery.json + .local.json + DELIVERY_* 环境变量
-const deliveryBase = loadJson('report-delivery.json');
-const deliveryLocal = loadJson('report-delivery.local.json');
-export const deliveryConfig = mergeWithEnv({ ...deliveryBase, ...deliveryLocal }, 'DELIVERY');
+// 本地认证/RBAC 策略仍在 auth.json；外部 OA 端点来自统一接口配置。
+const authBase = loadJson('auth.json');
+export const authConfig = mergeWithEnv({ ...authBase, ...(interfaceConfig.auth || {}) }, 'AUTH');
+
+// 接口 1.4 / 1.5 / 1.6（SOAP）：报告回传、撤回送审、材料任务状态通知共用配置。
+export const deliveryConfig = mergeWithEnv({ ...(interfaceConfig.report_delivery || {}) }, 'DELIVERY');
+/** PDF 中附件超链接使用的外部系统地址；PUBLIC_BASE_URL 可临时覆盖配置。 */
+export const publicBaseUrl = String(process.env.PUBLIC_BASE_URL ?? interfaceConfig.public_base_url ?? '').trim().replace(/\/$/, '');
 
 // 上传文件（图片 / Excel 附件）存储根目录：storage.json + storage.local.json + STORAGE_UPLOADS_DIR 环境变量。
 //   - uploads_dir 留空 → 默认【项目目录的上一级】data（resolve(项目根, '../data')），在代码目录之外，整包覆盖代码不影响。
@@ -69,10 +83,13 @@ export const headerFooterConfig: Record<string, any> = {
 };
 
 export function printConfig() {
+  console.log('[config] 外部接口配置=%s (config/interfaces.%s.json)', integrationsProfile, integrationsProfile);
+  console.log('[config] 报告取号(1.2)页眉页脚=%s', integrationsProfile === 'server' ? '严格使用 POST /api/external/reports 推送值（不回退示例）' : 'mock 示例值');
   console.log('[config] DB host=%s database=%s', dbConfig.host, dbConfig.database);
   console.log('[config] Typst binary=%s', typstConfig.binary);
   console.log('[config] OA 登录=%s', authConfig.common_login_url ? `真实(${authConfig.common_login_url}, appId=${authConfig.app_id})` : 'mock(未配 common_login_url，任意账号登录)');
-  console.log('[config] 报告回传(1.4)=%s', deliveryConfig.soap_endpoint ? `SOAP(${deliveryConfig.soap_endpoint})` : 'mock(未配 soap_endpoint)');
+  console.log('[config] 业务系统 SOAP(1.4/1.5/1.6)=%s', deliveryConfig.soap_endpoint ? `SOAP(${deliveryConfig.soap_endpoint})` : 'mock(未配 soap_endpoint)');
+  console.log('[config] PDF 附件公开地址=%s', publicBaseUrl || '未配置（本机演示会使用当前服务地址）');
   console.log('[config] 上传目录=%s', uploadsDir);
   const hfKeys = Object.keys(headerFooterConfig.settings || {}).filter(k => !k.startsWith('_')).length;
   console.log('[config] 页眉页脚默认=%s（分割线 header_rule=%s）', hfKeys ? `header-footer.json(${hfKeys} 项)` : '未配(用主题默认)', headerFooterConfig.settings?.header_rule);

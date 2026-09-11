@@ -9,6 +9,8 @@
     "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
     "build": "cd client && pnpm build",
     "serve": "cd server && PORT=${PORT:-5173} pnpm start",
+    "serve:demo": "INTEGRATIONS_PROFILE=demo pnpm serve",
+    "serve:server": "INTEGRATIONS_PROFILE=server pnpm serve",
     "migrate": "tsx db/migrate.ts",
     "convert-xls": "bash scripts/convert-xls.sh"
   },

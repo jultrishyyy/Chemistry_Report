@@ -22,6 +22,8 @@
 
 /** 委托单【材料分单 / 测试项目】—— 接口 1.1 TaskList 的一项。name/standard 之外的字段供报告映射 binding(source='test') 拉取。 */
 export interface ExternalTestInfo {
+  /** 外部材料任务唯一标识 TaskId；审核完工后用接口 1.6 回传状态。 */
+  task_id?: string;
   /** 测试项目名 ProjectName，对应 record_data.test_item_name */
   name: string;
   /** 检测标准号 StandardNo */
@@ -166,6 +168,7 @@ export function parseSampleList(rawList: any): { samples: ExternalSample[]; warn
       }
       seen.add(tname);
       test_infos.push({
+        task_id: s(rt?.TaskId),
         name: tname,
         standard: s(rt?.StandardNo),
         main_engine_factory: s(rt?.MainEngineFactory),

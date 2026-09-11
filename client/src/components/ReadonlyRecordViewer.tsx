@@ -16,6 +16,7 @@ import { generateTypstWithData } from '../../../shared/typst-generator';
 import { collectDeviceCodes, fetchDeviceMap } from '../utils/deviceMap';
 import { createEmptyMatrixValue } from '../../../shared/matrix-flatten';
 import type { RecordTemplate } from '../../../shared/types';
+import { useAuth } from '../auth';
 
 const API = '/api';
 
@@ -30,22 +31,15 @@ function ensureDataMatrixDefaults(template: RecordTemplate, d: Record<string, an
   return next;
 }
 
-/** 日期统一 yyyy-mm-dd（本地时区，与出报告端口径一致）。 */
-function ymd(v: any): string {
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return '';
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
 /** 把 record_data 的 tester/reviewer 等权威列按 semantic_role 注入，供只读渲染显示签字。 */
 function injectAuditFields(tmpl: RecordTemplate, base: Record<string, any>, row: any): Record<string, any> {
   const out = { ...base };
   for (const f of tmpl.groups.flatMap(g => g.fields)) {
     if (!f.semantic_role) continue;
     if (f.semantic_role === 'inspector') out[f.code] = row?.tester_name || '';
-    else if (f.semantic_role === 'inspector_date') out[f.code] = row?.tested_at ? ymd(row.tested_at) : '';
+    else if (f.semantic_role === 'inspector_date') out[f.code] = row?.tested_at || '';
     else if (f.semantic_role === 'reviewer') out[f.code] = row?.reviewer_name || '';
-    else if (f.semantic_role === 'reviewer_date') out[f.code] = row?.reviewed_at ? ymd(row.reviewed_at) : '';
+    else if (f.semantic_role === 'reviewer_date') out[f.code] = row?.reviewed_at || '';
   }
   return out;
 }
@@ -78,6 +72,8 @@ interface Props {
 }
 
 export default function ReadonlyRecordViewer({ recordId, open, onClose, subtitle, onRejected, hideReject, snapshotData, versionLabel, reportId }: Props) {
+  const { has } = useAuth();
+  const canReject = has('report.generate');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [row, setRow] = useState<any>(null);
@@ -133,7 +129,7 @@ export default function ReadonlyRecordViewer({ recordId, open, onClose, subtitle
         // 历史版本：用传入的快照数据渲染；否则用记录当前数据。
         const merged = snapshotData
           ? { ...snapshotData }
-          : { ...(rd.raw_data || {}), ...(rd.derived_data || {}) };
+          : { ...(rd.batch_shared_data || {}), ...(rd.raw_data || {}), ...(rd.derived_data || {}) };
         const withDefaults = ensureDataMatrixDefaults(tmpl, merged);
         const data = injectAuditFields(tmpl, withDefaults, rd);
         // 「测试设备」反查设备名称 → 显示「设备名称：管理编号」（记录只存管理编号数组）。
@@ -164,7 +160,7 @@ export default function ReadonlyRecordViewer({ recordId, open, onClose, subtitle
         </Space>
       }
       extra={
-        row && !hideReject && !snapshotData && row.audit_status !== 'rejected' ? (
+        row && canReject && !hideReject && !snapshotData && row.audit_status !== 'rejected' ? (
           <Button danger icon={<RollbackOutlined />} onClick={() => setRejectOpen(true)}>
             退回原始记录
           </Button>
@@ -175,7 +171,9 @@ export default function ReadonlyRecordViewer({ recordId, open, onClose, subtitle
         type="info" showIcon banner style={{ marginBottom: 12 }}
         message={snapshotData
           ? '历史版本快照（只读）：按该版本提交/审核时的数据 + 当时锁定的模板版本渲染，仅供查看与追溯。'
-          : '只读视图：报告端无权修改原始记录。发现数据有误可「退回原始记录」，由主检在「实验室录入」修改并重走审核。'}
+          : canReject && !hideReject
+            ? '只读视图：报告端无权直接修改原始记录。发现数据有误可「退回原始记录」，由主检修改并重走审核。'
+            : '只读预览：当前账号仅可查看原始记录，不能修改或发起退回。'}
       />
       <Modal
         title="退回原始记录给主检"

@@ -17,7 +17,7 @@ export interface SectionPreset {
   hint: string;
   /**
    * 该预设在哪些编辑器可见（白名单）。缺省 = 三种编辑器都显示。
-   * 「什么编辑器就显示什么分区」：试验数据表/图片记录/溯源信息只属原始记录；
+   * 「什么编辑器就显示什么分区」：试验数据表/溯源信息只属原始记录；
    * 结论汇总/签字栏/样品照片只属首页；检测结果表/设备表/项目图片/说明只属项目报告。
    */
   editors?: EditorMode[];
@@ -38,7 +38,7 @@ export const SECTION_PRESETS: SectionPreset[] = [
     key: 'basic',
     label: '基本信息',
     icon: '📋',
-    hint: '服务编号、样品描述、检测方法、预处理等',
+    hint: '服务编号、样品编号、样品描述、检测方法、预处理等',
     editors: ['record', 'report-cover'],
     build: (id) => ({
       id: id(),
@@ -47,15 +47,16 @@ export const SECTION_PRESETS: SectionPreset[] = [
       section_role: 'basic' as SectionRole,
       fields: [
         { id: id(), code: 'service_no', label: '服务编号', type: 'text', required: true },
+        { id: id(), code: 'sample_no', label: '样品编号', type: 'text', required: true },
         { id: id(), code: 'sample_desc', label: '样品描述', type: 'text' },
       ],
     }),
   },
   {
     key: 'results',
-    label: '试验结果（数据表格）',
+    label: '试验结果',
     icon: '🧪',
-    hint: '试样×参数 数据表 + 平均/最大值等汇总行',
+    hint: '可自由设计行列、录入格和 Excel 式公式',
     editors: ['record'],
     build: (id) => ({
       id: id(),
@@ -65,18 +66,23 @@ export const SECTION_PRESETS: SectionPreset[] = [
       fields: [
         {
           id: id(),
-          code: 'result_matrix',
+          code: 'result_table',
           label: '试验数据表',
-          type: 'data_matrix',
-          matrix: {
-            default_sample_count: 3,
-            parameters: [
-              { id: 'p1', code: 'param_1', label: '参数1' },
-            ],
-            cell_type: 'number',
-            allow_add_remove_samples: true,
-            allow_add_remove_parameters: true,
-            summary_rows: [],
+          type: 'free_grid',
+          free_table: {
+            columns: [{ id: 'c1', label: '', width: 'auto' }, { id: 'c2', label: '' }],
+            rows: [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }, { id: 'r4' }],
+            cells: {
+              'r1::c1': '试样', 'r1::c2': '参数1',
+              'r2::c1': '1', 'r3::c1': '2', 'r4::c1': '3',
+            },
+            header_cells: {
+              'r1::c1': true, 'r1::c2': true,
+              'r2::c1': true, 'r3::c1': true, 'r4::c1': true,
+            },
+            input_cells: { 'r2::c2': true, 'r3::c2': true, 'r4::c2': true },
+            cell_types: { 'r2::c2': 'number', 'r3::c2': 'number', 'r4::c2': 'number' },
+            cell_inset_y: '5pt',
           },
         },
       ],
@@ -105,25 +111,19 @@ export const SECTION_PRESETS: SectionPreset[] = [
     key: 'conclusion',
     label: '结论',
     icon: '✅',
-    hint: '判定要求（选择）+ 要求数值（文本）+ 结论（选择）。多个实验各有结论时，把本预设添加多次、分区名改成"实验一结论 / 实验二结论"即可（字段编码自动防撞）',
+    hint: '结论模块：项目名称、判定要求、结论均为独立字段；可继续添加子项目',
     editors: ['record'],
     build: (id) => ({
       id: id(),
       label: '结论',
       layout: 'vertical',
       section_role: 'conclusion' as SectionRole,
+      conclusion_kind: 'project',
       fields: [
-        {
-          id: id(), code: 'judgment_req', label: '判定要求', type: 'select',
-          options: ['客户要求', '标准要求'], allow_custom: true,
-        },
-        {
-          id: id(), code: 'req_value', label: '要求数值', type: 'text',
-        },
-        {
-          id: id(), code: 'conclusion', label: '结论', type: 'select', required: true,
-          options: ['符合', '不符合'], allow_custom: true,
-        },
+        { id: id(), code: 'conclusion_project_name', label: '项目名称', type: 'text', required: true, conclusion_role: 'project_name' },
+        { id: id(), code: 'conclusion_judgment', label: '判定要求', type: 'textarea', required: true, conclusion_role: 'judgment_requirement' },
+        { id: id(), code: 'conclusion_result', label: '结论', type: 'select', required: true,
+          options: ['符合', '不符合'], allow_custom: true, conclusion_role: 'conclusion' },
       ] as FieldDefinition[],
     }),
   },
@@ -266,11 +266,11 @@ export const SECTION_PRESETS: SectionPreset[] = [
     editors: ['report-project'],
     build: (id) => ({
       id: id(),
-      label: '主要检测设备',
+      label: '设备信息',
       layout: 'vertical',
       section_role: 'other' as SectionRole,
       fields: [
-        { id: id(), code: 'equipment_table', label: '主要检测设备', type: 'report_equipment_table',
+        { id: id(), code: 'equipment_table', label: '设备信息', type: 'report_equipment_table',
           equipment_table: { columns: ['name', 'model', 'asset_code', 'trace_date', 'expire_date'] } },
       ] as FieldDefinition[],
     }),
@@ -279,7 +279,7 @@ export const SECTION_PRESETS: SectionPreset[] = [
     key: 'proj_images',
     label: '图片记录',
     icon: '🖼️',
-    hint: '【项目】每个图片字段绑定一个原始记录 image 来源；版式/标题/备注在分区「图片版式 / 格式(A)」里设（与原始记录一致）',
+    hint: '【项目】绑定原始记录图片分区，生成报告时整体拉取动态图片、名称和顺序；版式可在项目模板中独立调整',
     editors: ['report-project'],
     build: (id) => ({
       id: id(),

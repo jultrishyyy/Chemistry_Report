@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.local.json
+config/interfaces.server.json
 .env
 .DS_Store
 
@@ -30,3 +31,5 @@ fonts/*.otf
 fonts/*.TTF
 fonts/*.TTC
 fonts/*.OTF
+# Private generated database migration backups (never commit template snapshots).
+.local-migrations/

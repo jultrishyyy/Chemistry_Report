@@ -9,6 +9,11 @@ export default function UserSwitcher() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   if (!user) return null;
+  const signOut = () => {
+    logout();
+    // 先回到公共入口，避免下一位用户登录后仍停在上一位用户的管理页面。
+    navigate('/', { replace: true });
+  };
 
   const roleColor = user.roles.includes('admin' as Role) ? 'gold'
     : (user.roles.includes('test_supervisor' as Role) || user.roles.includes('report_reviewer' as Role)) ? 'green' : 'blue';
@@ -18,7 +23,7 @@ export default function UserSwitcher() {
       menu={{ items: [
         { key: 'roles', icon: <IdcardOutlined />, label: '我的角色 / 申请', onClick: () => navigate('/me/roles') },
         { type: 'divider' },
-        { key: 'out', icon: <LogoutOutlined />, label: '登出', onClick: logout },
+        { key: 'out', icon: <LogoutOutlined />, label: '登出', onClick: signOut },
       ] }}
       trigger={['click']}
     >

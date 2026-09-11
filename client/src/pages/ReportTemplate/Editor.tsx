@@ -1,18 +1,28 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Button, message, Spin } from 'antd';
-import { SaveOutlined } from '@ant-design/icons';
+import { message, Spin } from 'antd';
 import FieldMappingEditor, { type MappingItem } from '../../components/FieldMappingEditor';
+import EditorToolbar from '../../components/EditorToolbar';
 import TypstViewer from '../../components/TypstViewer';
 import { execute } from '../../../../shared/formula-engine';
 import axios from 'axios';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
+import { useAutoSave } from '../../hooks/useAutoSave';
+import { useExclusiveEditLease } from '../../hooks/useCollaboration';
+import DocumentCollaborationStatus from '../../components/DocumentCollaborationStatus';
+import { useAuth } from '../../auth';
+import EditAttemptGuard from '../../components/EditAttemptGuard';
 
 const API = '/api';
 
 export default function ReportTemplateEditor() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { has } = useAuth();
   const templateId = searchParams.get('id');
+  const permissionReadOnly = searchParams.get('readonly') === '1' || !has('report_template.edit');
+  const lease = useExclusiveEditLease({ resourceType: 'report_template', resourceId: templateId, enabled: !!templateId && !permissionReadOnly });
+  const readOnly = permissionReadOnly || lease.loading || !lease.acquired;
 
   const [template, setTemplate] = useState<any>(null);
   const [mappings, setMappings] = useState<MappingItem[]>([]);
@@ -20,9 +30,17 @@ export default function ReportTemplateEditor() {
   const [availableFields, setAvailableFields] = useState<{ code: string; label: string; group: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const savedMappingsRef = useRef('');
+  const baselineReadyRef = useRef(false);
+  const mappingsRef = useRef(mappings);
+  mappingsRef.current = mappings;
+  const isDirty = () => !readOnly && baselineReadyRef.current
+    && JSON.stringify(mappingsRef.current) !== savedMappingsRef.current;
+  const { confirmLeave } = useUnsavedGuard(isDirty);
 
   useEffect(() => {
     if (!templateId) return;
+    baselineReadyRef.current = false;
     setLoading(true);
     Promise.all([
       axios.get(`${API}/report-templates/${templateId}`),
@@ -31,14 +49,17 @@ export default function ReportTemplateEditor() {
       axios.get(`${API}/record-templates`),
     ]).then(([tRes, mRes, rdRes, rtRes]) => {
       setTemplate(tRes.data);
-      setMappings(mRes.data.map((m: any) => ({
+      const loadedMappings = mRes.data.map((m: any) => ({
         placeholder: m.placeholder,
         source_type: m.source_type,
         source_field_code: m.source_field_code,
         literal_value: m.literal_value,
         formula: m.formula,
         transform: m.transform,
-      })));
+      }));
+      setMappings(loadedMappings);
+      savedMappingsRef.current = JSON.stringify(loadedMappings);
+      baselineReadyRef.current = true;
 
       // Merge all record data for preview
       const merged: Record<string, any> = {};
@@ -81,17 +102,28 @@ export default function ReportTemplateEditor() {
       .finally(() => setLoading(false));
   }, [templateId]);
 
-  const handleSave = async () => {
+  const handleSave = async (options: { silent?: boolean } = {}): Promise<boolean> => {
+    if (!isDirty()) return true;
     setSaving(true);
     try {
-      await axios.post(`${API}/mappings/${templateId}/batch`, { mappings });
-      message.success('映射保存成功');
-    } catch {
-      message.error('保存失败');
+      const current = mappingsRef.current;
+      await axios.post(`${API}/mappings/${templateId}/batch`, { mappings: current }, { headers: lease.headers });
+      savedMappingsRef.current = JSON.stringify(current);
+      if (!options.silent) message.success('映射保存成功');
+      return true;
+    } catch (error: any) {
+      message.error(error.response?.data?.error || '保存失败');
+      return false;
     } finally {
       setSaving(false);
     }
   };
+
+  useAutoSave({
+    enabled: baselineReadyRef.current && !loading && !saving && !!templateId && !readOnly,
+    isDirty,
+    save: () => handleSave({ silent: true }),
+  });
 
   const resolvedData = resolveMappings(mappings, recordData);
   const typstSource = template ? injectDataIntoTypst(template.typst_source, resolvedData) : '';
@@ -101,20 +133,23 @@ export default function ReportTemplateEditor() {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '8px 16px', borderBottom: '1px solid #d9d9d9', display: 'flex', alignItems: 'center', gap: 12 }}>
-        <Button onClick={() => navigate('/report-templates')}>← 返回</Button>
-        <h3 style={{ margin: 0, flex: 1 }}>{template.name} — 字段映射</h3>
-        <Button type="primary" icon={<SaveOutlined />} onClick={handleSave} loading={saving}>保存映射</Button>
-      </div>
+      <EditorToolbar title={`${template.name} · 字段映射`}
+        onBack={() => confirmLeave(() => navigate('/report-templates'), () => handleSave())}>
+        <div style={{ flex: 1 }} />
+        <DocumentCollaborationStatus resourceType="report_template" resourceId={templateId}
+          canEdit={!permissionReadOnly} lease={lease} onSaveBeforeRelease={() => handleSave()}
+          changes={isDirty() ? ['字段映射（未保存）'] : []} saving={saving} />
+      </EditorToolbar>
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <div style={{ width: '45%', borderRight: '1px solid #d9d9d9', overflow: 'auto' }}>
+        <EditAttemptGuard active={!!templateId && !permissionReadOnly && !lease.loading && !lease.acquired && !lease.holderName}
+          style={{ width: '45%', borderRight: '1px solid #d9d9d9', overflow: 'auto' }}>
           <FieldMappingEditor
             placeholders={template.placeholders || []}
             mappings={mappings}
             availableFields={availableFields}
-            onChange={setMappings}
+            onChange={readOnly ? () => {} : setMappings}
           />
-        </div>
+        </EditAttemptGuard>
         <div style={{ flex: 1 }}>
           <TypstViewer source={typstSource} mode="view" height="calc(100vh - 50px)"
             downloadName={`${template?.name || '报告模板'}.pdf`} />

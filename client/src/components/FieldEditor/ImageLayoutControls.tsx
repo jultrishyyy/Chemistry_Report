@@ -22,7 +22,7 @@ export interface ImageLayoutValue {
 }
 
 export default function ImageLayoutControls({
-  value, onChange, onTitleModeChange, showTitleMode = true, showHeaderFollow = true,
+  value, onChange, onTitleModeChange, showTitleMode = true, showHeaderFollow = true, defaultInset = 6,
 }: {
   value: ImageLayoutValue;
   /** 版式项变更（cols/width/height/solo/seamless/header_follow） */
@@ -31,45 +31,69 @@ export default function ImageLayoutControls({
   onTitleModeChange: (mode: 'shared' | 'per') => void;
   showTitleMode?: boolean;
   showHeaderFollow?: boolean;
+  /** 兼容旧字段 image_table_style.inset_pt 的实际生效值。 */
+  defaultInset?: number;
 }) {
   const titleMode = value.title_mode || 'per';
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      gap: '10px 16px',
+      marginBottom: 10,
+      alignItems: 'center',
+    }}>
       {showTitleMode && (
-        <span style={{ fontSize: 12 }}>标题
+        <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>标题
           <Radio.Group size="small" optionType="button" style={{ marginLeft: 4 }} value={titleMode}
             onChange={(e) => onTitleModeChange(e.target.value)}
             options={[{ value: 'shared', label: '共用标题' }, { value: 'per', label: '每张一个标题' }]} /></span>
       )}
-      <Tooltip title="表内标题行的高度（标题格上下留白，pt）；留空＝默认（图片上下边距+6）">
-        <span style={{ fontSize: 12 }}>标题行高
-          <InputNumber size="small" min={0} max={40} style={{ width: 66, marginLeft: 4 }} value={value.title_inset_y}
-            placeholder="默认" addonAfter="pt" onChange={(v) => onChange({ title_inset_y: v ?? undefined })} /></span>
+      <Tooltip title="表内标题单元格的上下内边距；当前渲染缺省值为 10pt。">
+        <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>标题上下留白
+          <InputNumber size="small" min={0} max={40} style={{ width: 92, marginLeft: 4 }} value={value.title_inset_y ?? 10}
+            addonAfter="pt" onChange={(v) => onChange({ title_inset_y: v ?? 10 })} /></span>
       </Tooltip>
-      <span style={{ fontSize: 12 }}>每行
+      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>每行
         <InputNumber size="small" min={1} max={6} style={{ width: 56, marginLeft: 4 }} value={value.cols ?? 2}
           onChange={(v) => onChange({ cols: v && v > 0 ? v : undefined })} />张</span>
       <Tooltip title="粘连＝整组连成一张连续表格（边框共享、图之间无空隙）；独立框＝每行/每张各自独立边框、块间留白。缺省粘连。">
-        <span style={{ fontSize: 12 }}>边框
+        <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>边框
           <Radio.Group size="small" optionType="button" style={{ marginLeft: 4 }}
             value={value.seamless === false ? 'independent' : 'seamless'}
             onChange={(e) => onChange({ seamless: e.target.value === 'seamless' })}
             options={[{ value: 'seamless', label: '粘连' }, { value: 'independent', label: '独立框' }]} /></span>
       </Tooltip>
-      <span style={{ fontSize: 12 }}>尺寸
+      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>图片显示尺寸
         <InputNumber size="small" min={1} max={20} step={0.5} style={{ width: 60, marginLeft: 4 }} value={value.width_cm ?? 7}
           onChange={(v) => onChange({ width_cm: v ?? undefined })} />×
         <InputNumber size="small" min={1} max={25} step={0.5} style={{ width: 60 }} value={value.height_cm ?? 6}
           onChange={(v) => onChange({ height_cm: v ?? undefined })} />cm</span>
-      <Tooltip title="每张图片在表格里的左右/上下边距（单元格内边距，pt）；留空＝默认 6">
-        <span style={{ fontSize: 12 }}>图片边距
-          <InputNumber size="small" min={0} max={40} style={{ width: 62, marginLeft: 4 }} value={value.inset_x}
-            placeholder="左右" onChange={(v) => onChange({ inset_x: v ?? undefined })} />
-          <InputNumber size="small" min={0} max={40} style={{ width: 62 }} value={value.inset_y}
-            placeholder="上下" addonAfter="pt" onChange={(v) => onChange({ inset_y: v ?? undefined })} /></span>
+      <Tooltip title="图片单元格内部留白。左右和上下分开设置；当前渲染缺省值均为 6pt。">
+        <div style={{
+          gridColumn: '1 / -1',
+          fontSize: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexWrap: 'wrap',
+          maxWidth: '100%',
+        }}>
+          <span style={{ fontWeight: 600, color: '#555', whiteSpace: 'nowrap' }}>图片内边距</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+            <span style={{ color: '#777' }}>左右</span>
+            <InputNumber size="small" min={0} max={40} style={{ width: 82 }} value={value.inset_x ?? defaultInset}
+              addonAfter="pt" onChange={(v) => onChange({ inset_x: v ?? defaultInset })} />
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+            <span style={{ color: '#777' }}>上下</span>
+            <InputNumber size="small" min={0} max={40} style={{ width: 82 }} value={value.inset_y ?? defaultInset}
+              addonAfter="pt" onChange={(v) => onChange({ inset_y: v ?? defaultInset })} />
+          </span>
+        </div>
       </Tooltip>
       <Tooltip title="每行排满后剩 1 张时，该张独占整行——第一张独占（在最上）/ 最后一张独占（在最下）">
-        <span style={{ fontSize: 12 }}>单数独占
+        <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>单数独占
           <Radio.Group size="small" optionType="button" style={{ marginLeft: 4 }} value={value.solo === 'last' ? 'last' : 'first'}
             onChange={(e) => onChange({ solo: e.target.value })}
             options={[{ value: 'last', label: '最后一张' }, { value: 'first', label: '第一张' }]} /></span>

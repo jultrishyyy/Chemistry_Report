@@ -42,7 +42,8 @@ export default function FormulaEditor({ value, onChange, availableFields, onCanc
           value={formulaType}
           onChange={setFormulaType}
           style={{ width: '100%' }}
-          options={FORMULA_TYPES.map(f => ({ value: f.type, label: `${f.label} — ${f.description}` }))}
+          // “可视化自定义”依赖自由表格的点格选源和 Excel 坐标，只在 FreeGridCanvas 专用搭建器中提供。
+          options={FORMULA_TYPES.filter(f => f.type !== 'visual').map(f => ({ value: f.type, label: `${f.label} — ${f.description}` }))}
         />
       </div>
 

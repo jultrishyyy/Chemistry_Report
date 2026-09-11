@@ -40,6 +40,7 @@ export const FIELD_PROP_LABELS: Record<string, string> = {
   default_value: '默认值',
   options: '选项',
   allow_custom: '允许自定义输入',
+  device_ref_config: '测试设备选择配置',
   formula: '公式',
   matrix: '数据矩阵配置',
   description: '说明',

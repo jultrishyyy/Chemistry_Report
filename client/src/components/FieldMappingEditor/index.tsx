@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Card, Select, Button, Tag, Input, Space, Modal, Progress } from 'antd';
+import { Card, Select, Button, Tag, Space, Modal, Progress } from 'antd';
 import { LinkOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import FormulaEditor from '../FormulaEditor';
 import type { Formula } from '../../../../shared/formula-engine';
+import AutoGrowTextArea from '../AutoGrowTextArea';
 
 export interface MappingItem {
   placeholder: string;
@@ -28,6 +29,8 @@ const SOURCE_TYPES = [
   { value: 'literal', label: '固定值' },
   { value: 'computed', label: '计算公式' },
 ];
+const friendlyPlaceholder = (value: string) => /^(field|fld|item|cell)_[a-z0-9_-]+$/i.test(value)
+  ? '未命名报告数据项' : value;
 
 export default function FieldMappingEditor({ placeholders, mappings, availableFields, onChange }: FieldMappingEditorProps) {
   const [editingPlaceholder, setEditingPlaceholder] = useState<string | null>(null);
@@ -70,16 +73,18 @@ export default function FieldMappingEditor({ placeholders, mappings, availableFi
       {placeholders.map(ph => {
         const mapping = mappingMap.get(ph);
         const isConfigured = !!mapping?.source_type;
+        const sourceLabel = SOURCE_TYPES.find(item => item.value === mapping?.source_type)?.label || '已配置';
+        const fieldLabel = availableFields.find(field => field.code === mapping?.source_field_code)?.label;
 
         return (
           <Card key={ph} size="small" style={{ marginBottom: 6, borderLeft: isConfigured ? '3px solid #52c41a' : '3px solid #faad14' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Tag color={isConfigured ? 'green' : 'orange'}>{`{${ph}}`}</Tag>
+              <Tag color={isConfigured ? 'green' : 'orange'}>{friendlyPlaceholder(ph)}</Tag>
               <LinkOutlined />
               {isConfigured ? (
                 <Space>
-                  <Tag color="blue">{mapping!.source_type}</Tag>
-                  <span>{mapping!.source_field_code || mapping!.literal_value || '公式'}</span>
+                  <Tag color="blue">{sourceLabel}</Tag>
+                  <span>{fieldLabel || mapping!.literal_value || (mapping!.formula ? '计算结果' : '已选择数据项')}</span>
                 </Space>
               ) : (
                 <span style={{ color: '#999' }}>未配置</span>
@@ -92,7 +97,7 @@ export default function FieldMappingEditor({ placeholders, mappings, availableFi
       })}
 
       <Modal
-        title={`配置映射: {${editingPlaceholder}}`}
+        title={`配置数据来源 · ${friendlyPlaceholder(editingPlaceholder || '')}`}
         open={!!editingPlaceholder}
         onCancel={() => setEditingPlaceholder(null)}
         footer={null}
@@ -110,7 +115,7 @@ export default function FieldMappingEditor({ placeholders, mappings, availableFi
       </Modal>
 
       <Modal
-        title={`公式编辑: {${formulaPlaceholder}}`}
+        title={`编辑计算公式 · ${friendlyPlaceholder(formulaPlaceholder || '')}`}
         open={!!formulaPlaceholder}
         onCancel={() => setFormulaPlaceholder(null)}
         footer={null}
@@ -159,7 +164,7 @@ function MappingForm({ mapping, availableFields, onSave, onFormula }: {
             style={{ width: '100%', marginTop: 4 }}
             showSearch
             placeholder="搜索字段"
-            options={availableFields.map(f => ({ value: f.code, label: `${f.label} (${f.code}) [${f.group}]` }))}
+            options={availableFields.map(f => ({ value: f.code, label: `${f.label || '未命名字段'} [${f.group}]` }))}
           />
         </div>
       )}
@@ -167,7 +172,7 @@ function MappingForm({ mapping, availableFields, onSave, onFormula }: {
       {sourceType === 'literal' && (
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontWeight: 'bold' }}>固定值</label>
-          <Input value={literalValue} onChange={(e) => setLiteralValue(e.target.value)} style={{ marginTop: 4 }} />
+          <AutoGrowTextArea value={literalValue} onChange={(e) => setLiteralValue(e.target.value)} style={{ marginTop: 4 }} />
         </div>
       )}
 

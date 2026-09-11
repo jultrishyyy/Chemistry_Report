@@ -2,10 +2,11 @@
  * BlockConfigPanel — 报告模板编辑器右侧的块配置面板
  * 根据当前选中块的 kind 渲染对应配置 UI
  */
-import { Form, Input, InputNumber, Select, Button, Space, Alert } from 'antd';
+import { Form, InputNumber, Select, Button, Space, Alert } from 'antd';
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ReportBlock, CellBinding, RecordTemplate } from '../../../../shared/types';
 import BindingEditor from './BindingEditor';
+import AutoGrowTextArea from '../AutoGrowTextArea';
 
 interface Props {
   block: ReportBlock | null;
@@ -41,7 +42,7 @@ function RichTextConfig({ block, onChange }: { block: Extract<ReportBlock, { kin
   return (
     <Form layout="vertical" size="small">
       <Form.Item label="文本内容" extra="支持普通文字 + 换行；可用作标题或段落">
-        <Input.TextArea rows={8} value={block.html}
+        <AutoGrowTextArea autoSize={{ minRows: 3, maxRows: 8 }} value={block.html}
           onChange={(e) => onChange({ ...block, html: e.target.value })}
           placeholder="如：本报告依据 GB/T 1040.1-2025 标准对样品进行检测..." />
       </Form.Item>
@@ -70,7 +71,7 @@ function CoverMetaConfig({ block, onChange, linkedRecord }: {
       {block.fields.map((f, i) => (
         <div key={i} style={{ marginBottom: 12, padding: 8, border: '1px solid #e8e8e8', borderRadius: 4 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <Input style={{ flex: 1 }} value={f.label}
+            <AutoGrowTextArea style={{ flex: 1 }} value={f.label}
               onChange={(e) => updateField(i, { label: e.target.value })}
               placeholder="标签（如：报告编号）" />
             <Button danger size="small" icon={<DeleteOutlined />} onClick={() => removeField(i)} />
@@ -184,7 +185,7 @@ function ResultTableConfig({ block, onChange, linkedRecord }: {
             <th style={th}>行 \ 列</th>
             {cols.map(c => (
               <th key={c.id} style={th}>
-                <Input size="small" style={{ width: 120, marginBottom: 4 }} value={c.label}
+                <AutoGrowTextArea size="small" style={{ width: 120, marginBottom: 4 }} value={c.label}
                   onChange={(e) => renameColumn(c.id, e.target.value)} />
                 <Button size="small" type="link" danger icon={<DeleteOutlined />}
                   onClick={() => removeColumn(c.id)} />
@@ -199,7 +200,7 @@ function ResultTableConfig({ block, onChange, linkedRecord }: {
           {rows.map(r => (
             <tr key={r.id}>
               <td style={td}>
-                <Input size="small" placeholder="行标签" value={r.label || ''}
+                <AutoGrowTextArea size="small" placeholder="行标签" value={r.label || ''}
                   onChange={(e) => renameRow(r.id, e.target.value)} style={{ width: 100 }} />
                 <Button size="small" type="link" danger icon={<DeleteOutlined />}
                   onClick={() => removeRow(r.id)} />
@@ -247,7 +248,7 @@ function KvListConfig({ block, onChange, linkedRecord }: {
       {block.items.map((it, i) => (
         <div key={i} style={{ marginBottom: 12, padding: 8, border: '1px solid #e8e8e8', borderRadius: 4 }}>
           <Space style={{ width: '100%', marginBottom: 8 }}>
-            <Input value={it.label} onChange={(e) => updateItem(i, { label: e.target.value })}
+            <AutoGrowTextArea value={it.label} onChange={(e) => updateItem(i, { label: e.target.value })}
               placeholder="标签" style={{ width: 200 }} />
             <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(i)} />
           </Space>

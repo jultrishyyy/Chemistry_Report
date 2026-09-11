@@ -3,16 +3,16 @@
  *
  * 删除不再即点即删：
  *   - 无申请        → 红色删除图标 = 「申请删除」弹窗（原因可选）
- *   - 有申请·可审批 → 审核员（非申请人）见红色审批图标 = 批准（即归档）/ 驳回（必填备注）
- *   - 有申请·申请人 → 撤销申请图标
- *   - 有申请·其他人 → 只读提示
+ * 列表固定流程模式下始终占据“提交 / 撤回 / 审核 / 删除”四个位置：
+ * 删除待审时提交与删除禁用，撤回和审核按权限启用，按钮不会因状态切换而跳位。
  * record 模板批准时若有活跃报告模板引用会 409，弹确认后带 force:true 重批。
  */
 import { useState } from 'react';
 import { Button, Modal, Input, Tooltip, Radio, message } from 'antd';
-import { DeleteOutlined, UndoOutlined, AuditOutlined } from '@ant-design/icons';
+import { DeleteOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from '../auth';
+import { WorkflowActionButton } from './TemplateVersionPanel';
 
 const API = '/api';
 
@@ -24,13 +24,20 @@ export interface ArchiveRow {
   archive_request_note?: string | null;
 }
 
-export default function TemplateArchiveButton({ kind, row, onRefresh }: {
+export default function TemplateArchiveButton({ kind, row, onRefresh, fixedWorkflow = false, disabled = false, disabledReason }: {
   kind: 'record' | 'report';
   row: ArchiveRow;
   onRefresh: () => void;
+  /** 删除待审时占据固定的“提交 / 撤回 / 审核 / 删除”四个位置。 */
+  fixedWorkflow?: boolean;
+  /** 版本正在审核时保留删除按钮位置，但禁止再发起删除申请。 */
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const { user, has } = useAuth();
   const base = kind === 'record' ? `${API}/record-templates` : `${API}/report-templates`;
+  const canEditTemplate = has(kind === 'record' ? 'record_template.edit' : 'report_template.edit');
+  const canReviewTemplate = has(kind === 'record' ? 'record.review' : 'report.review');
 
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestNote, setRequestNote] = useState('');
@@ -40,6 +47,7 @@ export default function TemplateArchiveButton({ kind, row, onRefresh }: {
   const [busy, setBusy] = useState(false);
 
   const doRequest = async () => {
+    if (!canEditTemplate) { message.warning('当前账号无删除模板权限'); return; }
     setBusy(true);
     try {
       await axios.post(`${base}/${row.id}/archive-request`, { note: requestNote.trim() || undefined });
@@ -52,6 +60,7 @@ export default function TemplateArchiveButton({ kind, row, onRefresh }: {
   };
 
   const doCancel = () => {
+    if (!canEditTemplate) { message.warning('当前账号无撤销删除申请权限'); return; }
     Modal.confirm({
       title: '撤销删除申请？',
       content: `「${row.name}」的删除申请将被撤销。`,
@@ -69,6 +78,7 @@ export default function TemplateArchiveButton({ kind, row, onRefresh }: {
   };
 
   const doReview = async (force = false) => {
+    if (!canReviewTemplate) { message.warning('当前账号无审批模板删除权限'); return; }
     if (decision === 'reject' && !reviewNote.trim()) { message.warning('驳回必须填写备注'); return; }
     setBusy(true);
     try {
@@ -95,29 +105,57 @@ export default function TemplateArchiveButton({ kind, row, onRefresh }: {
 
   const requested = !!row.archive_requested_by;
   const isRequester = row.archive_requested_by === user?.display_name;
-  // 允许自审：申请人有审核权限时也可批准自己发起的删除申请
-  const canReview = requested && has(kind === 'record' ? 'record_template.edit' : 'report_template.edit');
+  const isAdministrator = !!user?.roles?.includes('admin');
+  // 普通申请人不可自审；管理员保留系统职责例外（与服务端 reviewArchiveRequest 一致）。
+  const canReview = requested && canReviewTemplate && (!isRequester || isAdministrator);
+  const canCancel = requested && canEditTemplate && (isRequester || canReviewTemplate);
+
+  const openReview = () => {
+    setDecision('approve');
+    setReviewNote('');
+    setReviewOpen(true);
+  };
+
+  const trigger = fixedWorkflow && requested ? (
+    <>
+      <WorkflowActionButton action="submit" title="删除申请审核中，不能提交模板版本" disabled onClick={() => undefined} />
+      <WorkflowActionButton action="withdraw"
+        title={canCancel ? '撤回删除申请' : !canEditTemplate ? '当前账号无撤回删除申请权限' : '只有申请人或审核员可以撤回删除申请'}
+        disabled={!canCancel} onClick={doCancel} />
+      <WorkflowActionButton action="review"
+        title={canReview ? `审核删除申请（${row.archive_requested_by} 发起）`
+          : isRequester && canReviewTemplate ? '申请人不能审核自己发起的删除申请' : '当前账号无模板删除审核权限'}
+        disabled={!canReview} onClick={openReview} />
+      <Tooltip title="删除申请已经提交，不能重复申请删除">
+        <Button size="small" danger disabled icon={<DeleteOutlined />} />
+      </Tooltip>
+    </>
+  ) : !canEditTemplate && !canReviewTemplate ? (
+    <Tooltip title="当前账号无删除模板权限">
+      <Button size="small" danger disabled icon={<DeleteOutlined />} />
+    </Tooltip>
+  ) : !requested ? (
+    <Tooltip title={disabled ? (disabledReason || '当前状态不能申请删除')
+      : !canEditTemplate ? '当前账号无删除模板权限' : '申请删除（需审核员批准后生效）'}>
+      <Button size="small" danger icon={<DeleteOutlined />} disabled={disabled || !canEditTemplate}
+        onClick={() => setRequestOpen(true)} />
+    </Tooltip>
+  ) : isRequester ? (
+    <WorkflowActionButton action="withdraw" title="撤回删除申请"
+      disabled={!canEditTemplate} onClick={doCancel} />
+  ) : canReview ? (
+    <WorkflowActionButton action="review"
+      title={`审核删除申请（${row.archive_requested_by} 发起${row.archive_request_note ? `：${row.archive_request_note}` : ''}）`}
+      onClick={openReview} />
+  ) : (
+    <Tooltip title={`删除申请审批中（${row.archive_requested_by} 发起）`}>
+      <Button size="small" disabled icon={<DeleteOutlined />} />
+    </Tooltip>
+  );
 
   return (
     <>
-      {!requested ? (
-        <Tooltip title="申请删除（需审核员批准后生效）">
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setRequestOpen(true)} />
-        </Tooltip>
-      ) : canReview ? (
-        <Tooltip title={`审批删除申请（${row.archive_requested_by} 发起${row.archive_request_note ? `：${row.archive_request_note}` : ''}）`}>
-          <Button size="small" danger type="primary" ghost icon={<AuditOutlined />}
-            onClick={() => { setDecision('approve'); setReviewNote(''); setReviewOpen(true); }} />
-        </Tooltip>
-      ) : isRequester ? (
-        <Tooltip title="你已申请删除，等待审核员批准；点击可撤销申请">
-          <Button size="small" icon={<UndoOutlined />} onClick={doCancel} />
-        </Tooltip>
-      ) : (
-        <Tooltip title={`删除申请审批中（${row.archive_requested_by} 发起）`}>
-          <Button size="small" disabled icon={<DeleteOutlined />} />
-        </Tooltip>
-      )}
+      {trigger}
 
       <Modal
         open={requestOpen} title={`申请删除 · ${row.name}`}

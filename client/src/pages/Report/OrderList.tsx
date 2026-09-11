@@ -9,14 +9,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Table, Tag, Space, Button, Empty, Modal, List, message } from 'antd';
-import { ThunderboltOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons';
+import { ThunderboltOutlined, EditOutlined, DownloadOutlined, EyeOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import PageHeader from '../../components/PageHeader';
 import FlowSteps from '../../components/FlowSteps';
 import OrderSearchBar from '../../components/OrderSearchBar';
 import { BRAND } from '../../theme';
-import { type OrderSearchCriteria } from '../../pages/Lab/order-shared';
+import { type OrderSearchCriteria, type OrderSortKey } from '../../pages/Lab/order-shared';
 import { downloadGeneratedReportPdf } from '../../utils/pdfDownload';
+import { getGeneratedReportPreviewPdf } from '../../utils/pdfDownload';
+import { useAuth } from '../../auth';
+import { isInteractiveRowTarget } from '../../utils/rowNavigation';
+import PdfPreviewModal from '../../components/PdfPreviewModal';
+import { ListPageSizeControl, useListPagination } from '../../hooks/useListPagination';
 
 const API = '/api';
 
@@ -42,6 +47,18 @@ const REPORT_STATUS_OPTIONS = [
   { value: 'delivered', label: '已送审' },
   { value: 'approved', label: '审核通过' },
 ];
+const ORDER_SORT_OPTIONS = [
+  { value: 'received_desc', label: '最近接收优先' },
+  { value: 'received_asc', label: '最早接收优先' },
+  { value: 'priority', label: '待处理优先' },
+  { value: 'progress_asc', label: '报告完成度低优先' },
+  { value: 'order_asc', label: '委托单号升序' },
+  { value: 'order_desc', label: '委托单号降序' },
+];
+const receivedTime = (value?: string | null) => {
+  const ts = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(ts) ? ts : 0;
+};
 
 interface TestInfo { name: string; standard?: string; linked_template_id?: number | null; linked_template_ids?: number[]; }
 const linkedIdsOf = (t: TestInfo): number[] =>
@@ -85,6 +102,13 @@ interface RowVm {
 
 export default function ReportOrderList() {
   const navigate = useNavigate();
+  const { has } = useAuth();
+  const canEditReports = has('report.generate');
+  const [previewReport, setPreviewReport] = useState<{ id: number; name: string } | null>(null);
+  const openReport = (id: number, name?: string) => {
+    if (canEditReports) navigate(`/report/edit?id=${id}`);
+    else setPreviewReport({ id, name: name || `报告 #${id}` });
+  };
   const [rows, setRows] = useState<RowVm[]>([]);
   const [loading, setLoading] = useState(true);
   // 保留记录用于按主检/审核人搜索
@@ -93,6 +117,8 @@ export default function ReportOrderList() {
   const [reportsModal, setReportsModal] = useState<{ order_no: string; list: any[] } | null>(null);
   // 高级搜索（含按状态）
   const [search, setSearch] = useState<OrderSearchCriteria>({});
+  const [sortKey, setSortKey] = useState<OrderSortKey>('received_desc');
+  const { pagination, pageSize, setPageSize } = useListPagination(`${sortKey}:${JSON.stringify(search)}`);
 
   const kpis = useMemo(() => {
     const acc = { total: rows.length, unrequisitioned: 0, pending_gen: 0, generated: 0, revision: 0, delivered: 0, approved: 0 };
@@ -124,7 +150,7 @@ export default function ReportOrderList() {
     const to = search.range?.[1] ? new Date(search.range[1]) : null;
     const tester = search.tester?.trim().toLowerCase();
     const reviewer = search.reviewer?.trim().toLowerCase();
-    return rows.filter(r => {
+    const result = rows.filter(r => {
       if (kw && !(r.order_no.toLowerCase().includes(kw)
         || (r.customer_name || '').toLowerCase().includes(kw)
         || (r.sample_summary || '').toLowerCase().includes(kw))) return false;
@@ -142,7 +168,37 @@ export default function ReportOrderList() {
       if (search.status && deriveReportStatus(r).key !== search.status) return false;
       return true;
     });
-  }, [rows, records, search]);
+    const latestFirst = (a: RowVm, b: RowVm) =>
+      receivedTime(b.received_at) - receivedTime(a.received_at)
+      || b.order_no.localeCompare(a.order_no, 'zh-CN');
+    const priority: Record<ReportStatusKey, number> = {
+      revision: 0,
+      pending_gen: 1,
+      unrequisitioned: 2,
+      generated: 3,
+      delivered: 4,
+      approved: 5,
+    };
+    result.sort((a, b) => {
+      if (sortKey === 'received_asc') {
+        return receivedTime(a.received_at) - receivedTime(b.received_at)
+          || a.order_no.localeCompare(b.order_no, 'zh-CN');
+      }
+      if (sortKey === 'order_asc') return a.order_no.localeCompare(b.order_no, 'zh-CN');
+      if (sortKey === 'order_desc') return b.order_no.localeCompare(a.order_no, 'zh-CN');
+      if (sortKey === 'priority') {
+        return priority[deriveReportStatus(a).key] - priority[deriveReportStatus(b).key]
+          || latestFirst(a, b);
+      }
+      if (sortKey === 'progress_asc') {
+        const ar = a.requisition_total > 0 ? a.requisition_generated / a.requisition_total : 0;
+        const br = b.requisition_total > 0 ? b.requisition_generated / b.requisition_total : 0;
+        return ar - br || latestFirst(a, b);
+      }
+      return latestFirst(a, b);
+    });
+    return result;
+  }, [rows, records, search, sortKey]);
 
   const openReportsModal = async (order_no: string) => {
     try {
@@ -234,13 +290,19 @@ export default function ReportOrderList() {
         statusOptions={REPORT_STATUS_OPTIONS}
         keywordPlaceholder="单号 / 客户 / 样品"
         showPeople={false}
+        sortValue={sortKey}
+        onSortChange={(value) => setSortKey(value as OrderSortKey)}
+        sortOptions={ORDER_SORT_OPTIONS}
       />
+      <div style={{ display: 'flex', marginBottom: 8 }}>
+        <ListPageSizeControl value={pageSize} onChange={setPageSize} />
+      </div>
 
       <Table
         dataSource={filteredRows}
         rowKey="order_no"
         loading={loading}
-        pagination={false}
+        pagination={pagination}
         locale={{ emptyText: <Empty description={rows.length ? '无匹配订单' : '暂无委托单'} /> }}
         onRow={(r) => ({ onClick: () => navigate(`/report/order/${r.order_no}`), style: { cursor: 'pointer' } })}
         columns={[
@@ -307,9 +369,14 @@ export default function ReportOrderList() {
           locale={{ emptyText: <Empty description="暂无报告" /> }}
           renderItem={(rp: any) => (
             <List.Item
+              className="clickable-report-entry"
+              style={{ cursor: 'pointer' }}
+              onClick={(event) => {
+                if (!isInteractiveRowTarget(event.target)) openReport(rp.id, rp.report_no);
+              }}
               actions={[
-                <Button key="edit" size="small" type="link" icon={<EditOutlined />}
-                  onClick={() => navigate(`/report/edit?id=${rp.id}`)}>结构化编辑</Button>,
+                <Button key="edit" size="small" type="link" icon={canEditReports ? <EditOutlined /> : <EyeOutlined />}
+                  onClick={() => openReport(rp.id, rp.report_no)}>{canEditReports ? '结构化编辑' : '预览'}</Button>,
                 <Button key="pdf" size="small" type="link" icon={<DownloadOutlined />}
                   onClick={() => downloadGeneratedReportPdf(rp.id, rp.report_no || `报告-${rp.id}`).catch((e: any) => message.error('下载失败：' + (e?.message || '')))}>下载 PDF</Button>,
               ]}
@@ -324,6 +391,14 @@ export default function ReportOrderList() {
           )}
         />
       </Modal>
+      <PdfPreviewModal
+        open={!!previewReport}
+        title={`预览 · ${previewReport?.name || ''}`}
+        reloadKey={previewReport?.id}
+        loadPdf={() => getGeneratedReportPreviewPdf(previewReport!.id)}
+        downloadName={`${previewReport?.name || '报告'}.pdf`}
+        onClose={() => setPreviewReport(null)}
+      />
     </div>
   );
 }

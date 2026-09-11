@@ -12,9 +12,10 @@ import type {
 } from '../../../../../shared/types';
 import { FORMULA_TYPES, execute, type Formula, type FormulaType } from '../../../../../shared/formula-engine';
 import { matrixDataKey, makeMatrixColumnSource, parseMatrixColumnSource, matrixSummaryColumnFlatKey } from '../../../../../shared/matrix-flatten';
+import AutoGrowTextArea from '../../AutoGrowTextArea';
 
 const ALLOWED_FORMULA_TYPES: FormulaType[] = [
-  'average', 'sum', 'max', 'min', 'range', 'threshold', 'round_format',
+  'average', 'sum', 'max', 'min', 'round_format',
   'percentage', 'unit_convert', 'custom',
 ];
 
@@ -81,7 +82,9 @@ export function CellFormulaPanel({
   };
 
   return (
-    <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: 12 }}>
+    <div style={{ position: 'relative', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: 12 }}>
+      <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭公式设置" title="关闭"
+        onClick={onCancel} style={{ position: 'absolute', top: 5, right: 5, zIndex: 2, color: '#8a94a6' }} />
       <Alert type="warning" showIcon style={{ marginBottom: 10 }}
         message={`列「${param.label}」的按行公式`}
         description="该列每行的值由本行其他列计算得出；录入时该列自动置灰显示结果。" />
@@ -106,7 +109,6 @@ export function CellFormulaPanel({
       <Space>
         <Button type="primary" size="small" icon={<CheckOutlined />}
           disabled={!expression.trim()} onClick={() => onSave(expression.trim(), decimals)}>保存</Button>
-        <Button size="small" onClick={onCancel}>取消</Button>
       </Space>
     </div>
   );
@@ -125,13 +127,15 @@ export function PerColumnPanel({
   const [decimals, setDecimals] = useState<number>(row.decimals ?? 2);
 
   return (
-    <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: 12 }}>
+    <div style={{ position: 'relative', background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: 12 }}>
+      <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭统计设置" title="关闭"
+        onClick={onCancel} style={{ position: 'absolute', top: 5, right: 5, zIndex: 2, color: '#8a94a6' }} />
       <Alert type="success" showIcon style={{ marginBottom: 10 }}
         message="每列统计行"
         description="每个参数列独立对所有试样行做聚合（平均/和/最值）。" />
       <Form layout="vertical" size="small">
         <Form.Item label="行标签（首列文字）">
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如：平均值" />
+          <AutoGrowTextArea value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如：平均值" />
         </Form.Item>
         <Form.Item label="聚合方式">
           <AntSelect value={aggregate} onChange={(v) => setAggregate(v as any)} style={{ width: 160 }}
@@ -149,7 +153,6 @@ export function PerColumnPanel({
       <Space>
         <Button type="primary" size="small" icon={<CheckOutlined />}
           onClick={() => onSave({ label, aggregate, decimals })}>保存</Button>
-        <Button size="small" onClick={onCancel}>取消</Button>
       </Space>
     </div>
   );
@@ -235,7 +238,9 @@ export function PerCellFormulaPanel({
   ];
 
   return (
-    <div style={{ background: '#e6fffb', border: '1px solid #87e8de', borderRadius: 6, padding: 12 }}>
+    <div style={{ position: 'relative', background: '#e6fffb', border: '1px solid #87e8de', borderRadius: 6, padding: 12 }}>
+      <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭单元格公式" title="关闭"
+        onClick={onCancel} style={{ position: 'absolute', top: 5, right: 5, zIndex: 2, color: '#8a94a6' }} />
       <Alert type="info" showIcon style={{ marginBottom: 10 }}
         message={title ?? `单元格公式 — 行${sampleIdx + 1} × ${param.label}`}
         description="为这一格配置独立公式，录入时该格变为只读。" />
@@ -253,7 +258,6 @@ export function PerCellFormulaPanel({
         <Button type="primary" size="small" icon={<CheckOutlined />} disabled={sources.length === 0}
           onClick={() => onSave({ type: formulaType, sources, decimals, params: extraParams, expression: formulaType === 'custom' ? expression : undefined })}>保存</Button>
         {existing && <Button size="small" danger onClick={onClear}>清除公式</Button>}
-        <Button size="small" onClick={onCancel}>取消</Button>
       </Space>
     </div>
   );
@@ -324,13 +328,15 @@ export function SummaryFormulaPanel({
   ];
 
   return (
-    <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: 12 }}>
+    <div style={{ position: 'relative', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: 12 }}>
+      <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭汇总公式" title="关闭"
+        onClick={onCancel} style={{ position: 'absolute', top: 5, right: 5, zIndex: 2, color: '#8a94a6' }} />
       <Alert type="warning" showIcon style={{ marginBottom: 10 }}
         message="跨列汇总公式行"
         description="整行一个公式值，横跨所有参数列；点击下方画布中的单元格选取数据源。" />
       <Form layout="vertical" size="small">
         <Form.Item label="行标签（首列文字）">
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如：平均值" />
+          <AutoGrowTextArea value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如：平均值" />
         </Form.Item>
       </Form>
       <FormulaForm formulaType={formulaType} setFormulaType={setFormulaType} decimals={decimals} setDecimals={setDecimals}
@@ -346,7 +352,6 @@ export function SummaryFormulaPanel({
       <Space>
         <Button type="primary" size="small" icon={<CheckOutlined />}
           onClick={() => onSave({ label, source_type: 'formula', formula: { type: formulaType, sources, decimals, params: extraParams, expression: formulaType === 'custom' ? expression : undefined } })}>保存</Button>
-        <Button size="small" onClick={onCancel}>取消</Button>
       </Space>
     </div>
   );
@@ -521,24 +526,6 @@ function FormulaForm({ formulaType, setFormulaType, decimals, setDecimals, extra
       <Form.Item label="保留小数位">
         <InputNumber min={0} max={10} value={decimals} onChange={(v) => setDecimals(Number(v ?? 2))} />
       </Form.Item>
-      {formulaType === 'threshold' && (
-        <Form.Item label="阈值判定">
-          <Space>
-            <AntSelect value={extraParams.operator || '>='} onChange={(v) => setExtraParams({ ...extraParams, operator: v })} style={{ width: 80 }}
-              options={['>=', '>', '<=', '<', '=='].map(o => ({ value: o }))} />
-            <InputNumber value={extraParams.threshold ?? 0} onChange={(v) => setExtraParams({ ...extraParams, threshold: v })} placeholder="阈值" />
-          </Space>
-        </Form.Item>
-      )}
-      {formulaType === 'range' && (
-        <Form.Item label="范围">
-          <Space>
-            <InputNumber value={extraParams.lower ?? 0} onChange={(v) => setExtraParams({ ...extraParams, lower: v })} placeholder="下限" />
-            <span>~</span>
-            <InputNumber value={extraParams.upper ?? 100} onChange={(v) => setExtraParams({ ...extraParams, upper: v })} placeholder="上限" />
-          </Space>
-        </Form.Item>
-      )}
       {formulaType === 'unit_convert' && (
         <Form.Item label="单位换算">
           <Space>

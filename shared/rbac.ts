@@ -1,31 +1,36 @@
 /**
- * rbac.ts — 本地角色权限（单一事实来源，前后端共用）。
- *
- * 背景：登录走外部认证系统（接口 5.1，只给身份 jobNo/姓名/部门，**不给角色**）。
- * 角色与权限在本系统**本地**管理：users 表存每个用户被分配的角色，角色→权限是这里的固定矩阵。
- * 新登录用户默认无角色（待管理员分配）；管理员在「用户管理」页派角色，或用户自助申请→管理员审核。
- *
- * 鉴权用【权限】而非角色名（permissionsForRoles(user.roles).includes(perm)），所以一个用户可拥有多个角色、
- * 权限自动并集——支持"自助申请叠加角色"。
+ * 本地 RBAC 的公共类型与内置默认值。
+ * 实际角色定义存于 role_definitions 表；这里的内置配置用于迁移、首次启动与兼容兜底。
  */
 
-/** 角色（固定集合，不在 UI 动态新增）。 */
-export type Role = 'admin' | 'test_engineer' | 'test_supervisor' | 'report_clerk' | 'report_reviewer';
+export type BuiltinRole = 'admin' | 'test_engineer' | 'test_supervisor' | 'report_clerk' | 'report_reviewer';
+/** 自定义角色使用服务端生成的字符串代码。 */
+export type Role = string;
 
-/** 能力点（路由/按钮按此校验）。 */
 export type Permission =
-  | 'record.entry'           // 选取原始记录 / 录入数据（主检）
-  | 'record.review'          // 审核原始记录与数据
-  | 'record_template.edit'   // 编辑原始记录模板（建草稿/改/审核版本）
-  | 'report.generate'        // 取号 / 生成报告
-  | 'report.edit'            // 编辑报告实例
-  | 'report.review'          // 审核系统合并的报告 + 报告模板版本
-  | 'report_template.edit'   // 编辑报告模板（建草稿/改）
-  | 'user.manage';           // 用户与角色管理
+  | 'record.entry'
+  | 'record.review'
+  | 'record_template.edit'
+  | 'report.generate'
+  | 'report.edit' // 旧权限兼容：运行时归并到 report.generate
+  | 'report.review'
+  | 'report_template.edit'
+  | 'user.manage';
 
-export const ALL_ROLES: Role[] = ['admin', 'test_engineer', 'test_supervisor', 'report_clerk', 'report_reviewer'];
+/** 管理界面可分配的权限；旧 report.edit 不再单独展示。 */
+export const ALL_PERMISSIONS: Permission[] = [
+  'record.entry',
+  'record.review',
+  'record_template.edit',
+  'report.generate',
+  'report.review',
+  'report_template.edit',
+  'user.manage',
+];
 
-export const ROLE_LABELS: Record<Role, string> = {
+export const ALL_ROLES: BuiltinRole[] = ['admin', 'test_engineer', 'test_supervisor', 'report_clerk', 'report_reviewer'];
+
+export const ROLE_LABELS: Record<string, string> = {
   admin: '管理员',
   test_engineer: '测试工程师',
   test_supervisor: '测试主管',
@@ -33,55 +38,80 @@ export const ROLE_LABELS: Record<Role, string> = {
   report_reviewer: '报告审核',
 };
 
-/** 角色一句话职责（UI 提示用）。 */
-export const ROLE_DESCRIPTIONS: Record<Role, string> = {
-  admin: '系统管理：用户与角色分配（拥有全部权限）',
-  test_engineer: '选取原始记录、填写数据（主检）',
-  test_supervisor: '编辑原始记录模板、审核测试工程师填写的原始记录与数据',
-  report_clerk: '生成报告并在生成时编辑',
-  report_reviewer: '编辑报告模板、审核系统合并的报告',
+export const ROLE_DESCRIPTIONS: Record<string, string> = {
+  admin: '系统管理：用户、角色与权限配置',
+  test_engineer: '录入原始记录数据',
+  test_supervisor: '包含测试工程师权限，并可编辑模板、审核原始记录',
+  report_clerk: '编辑和送审报告',
+  report_reviewer: '包含报告文员权限，并可编辑、审核报告模板',
 };
 
 export const PERMISSION_LABELS: Record<Permission, string> = {
-  'record.entry': '选取记录/录入数据',
+  'record.entry': '录入原始记录数据',
   'record.review': '审核原始记录数据',
   'record_template.edit': '编辑原始记录模板',
-  'report.generate': '生成报告',
-  'report.edit': '编辑报告',
-  'report.review': '审核报告/报告模板',
+  'report.generate': '编辑和送审报告',
+  'report.edit': '编辑和送审报告',
+  'report.review': '审核报告模板',
   'report_template.edit': '编辑报告模板',
   'user.manage': '用户与角色管理',
 };
 
-/** 角色 → 权限矩阵。admin 拥有全部。 */
-export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
-  admin: ['record.entry', 'record.review', 'record_template.edit', 'report.generate', 'report.edit', 'report.review', 'report_template.edit', 'user.manage'],
+/** 内置角色初始权限。主管/审核角色显式包含下级角色权限，之后管理员仍可调整。 */
+export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
+  admin: [...ALL_PERMISSIONS],
   test_engineer: ['record.entry'],
-  test_supervisor: ['record_template.edit', 'record.review'],
-  report_clerk: ['report.generate', 'report.edit'],
-  report_reviewer: ['report_template.edit', 'report.review'],
+  test_supervisor: ['record.entry', 'record_template.edit', 'record.review'],
+  report_clerk: ['report.generate'],
+  report_reviewer: ['report.generate', 'report_template.edit', 'report.review'],
 };
 
-/** 把角色集合并成权限集合（去重）。无效角色忽略。 */
-export function permissionsForRoles(roles: readonly string[] | null | undefined): Permission[] {
+export interface RoleDefinition {
+  code: string;
+  label: string;
+  description?: string | null;
+  permissions: Permission[];
+  builtin: boolean;
+}
+
+export function normalizePermissions(values: readonly string[] | null | undefined): Permission[] {
   const set = new Set<Permission>();
-  for (const r of roles || []) {
-    const perms = ROLE_PERMISSIONS[r as Role];
-    if (perms) perms.forEach((p) => set.add(p));
+  for (const value of values || []) {
+    const permission = value === 'report.edit' ? 'report.generate' : value;
+    if ((ALL_PERMISSIONS as string[]).includes(permission)) set.add(permission as Permission);
   }
   return [...set];
 }
 
-/** 角色集合是否拥有某权限。 */
-export function rolesHavePermission(roles: readonly string[] | null | undefined, perm: Permission): boolean {
-  return permissionsForRoles(roles).includes(perm);
+export function permissionsForRoles(
+  roles: readonly string[] | null | undefined,
+  matrix: Record<string, readonly string[]> = ROLE_PERMISSIONS,
+): Permission[] {
+  const set = new Set<Permission>();
+  for (const role of roles || []) {
+    normalizePermissions(matrix[role]).forEach(permission => set.add(permission));
+  }
+  return [...set];
 }
 
-export function isRole(x: string): x is Role {
-  return (ALL_ROLES as string[]).includes(x);
+export function rolesHavePermission(
+  roles: readonly string[] | null | undefined,
+  permission: Permission,
+  matrix: Record<string, readonly string[]> = ROLE_PERMISSIONS,
+): boolean {
+  const normalized = permission === 'report.edit' ? 'report.generate' : permission;
+  return permissionsForRoles(roles, matrix).includes(normalized as Permission);
 }
 
-/** 本系统用户（身份来自 5.1，角色本地分配）。 */
+export function isBuiltinRole(value: string): value is BuiltinRole {
+  return (ALL_ROLES as string[]).includes(value);
+}
+
+/** 仅作旧调用兼容；动态角色的有效性必须由服务端查询 role_definitions。 */
+export function isRole(value: string): value is Role {
+  return typeof value === 'string' && /^[a-z][a-z0-9_:-]{1,79}$/i.test(value);
+}
+
 export interface AppUser {
   job_no: string;
   user_name: string;

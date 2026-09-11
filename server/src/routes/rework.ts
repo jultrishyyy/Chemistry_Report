@@ -12,6 +12,7 @@
 import { Router, Request, Response } from 'express';
 import { readActor } from '../services/template-versions.js';
 import { rejectRecordForRework } from '../services/rework-ops.js';
+import { requirePermission } from './auth.js';
 
 import { pool } from '../db.js';
 
@@ -38,7 +39,7 @@ router.get('/rework', async (req: Request, res: Response) => {
  * scope=record + target=data_entry 时连带把该 record_data 置为退回态（复用现有 rejected 流），
  * 并写一条 record_audit_log，使其同时出现在主检的「待返工」与全订单时间线里。
  */
-router.post('/rework', async (req: Request, res: Response) => {
+router.post('/rework', requirePermission('report.generate'), async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
   const {
@@ -79,7 +80,7 @@ router.post('/rework', async (req: Request, res: Response) => {
 });
 
 /** 解决工单 */
-router.post('/rework/:id/resolve', async (req: Request, res: Response) => {
+router.post('/rework/:id/resolve', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
   const { resolution_note } = req.body || {};

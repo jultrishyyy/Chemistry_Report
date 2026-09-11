@@ -13,8 +13,10 @@ import { BRAND } from '../../theme';
 import PageHeader from '../../components/PageHeader';
 import FlowSteps from '../../components/FlowSteps';
 import OrderSearchBar from '../../components/OrderSearchBar';
+import { ListPageSizeControl, useListPagination } from '../../hooks/useListPagination';
 import {
   type WorkOrder, type TemplateItem, type RecordRow, type OrderSearchCriteria,
+  type OrderSortKey,
   orderProgress, filterOrders, deriveOrderStatus,
 } from './order-shared';
 
@@ -24,15 +26,30 @@ const SOURCE_TAG: Record<string, { color: string; label: string }> = {
   external: { color: 'blue', label: '接口' },
   manual: { color: 'gold', label: '手动' },
 };
+const ORDER_SORT_OPTIONS = [
+  { value: 'received_desc', label: '最近接收优先' },
+  { value: 'received_asc', label: '最早接收优先' },
+  { value: 'priority', label: '待处理优先' },
+  { value: 'progress_asc', label: '录入完成度低优先' },
+  { value: 'order_asc', label: '委托单号升序' },
+  { value: 'order_desc', label: '委托单号降序' },
+];
+const receivedTime = (value?: string | null) => {
+  const ts = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(ts) ? ts : 0;
+};
 
 export default function LabTaskList() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, has } = useAuth();
+  const canEnterData = has('record.entry');
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [templates, setTemplates] = useState<TemplateItem[]>([]);
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [search, setSearch] = useState<OrderSearchCriteria>({});
+  const [sortKey, setSortKey] = useState<OrderSortKey>('received_desc');
   const [loading, setLoading] = useState(true);
+  const { pagination, pageSize, setPageSize } = useListPagination(`${sortKey}:${JSON.stringify(search)}`);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -62,10 +79,37 @@ export default function LabTaskList() {
     return m;
   }, [templates]);
 
-  const filteredOrders = useMemo(
-    () => filterOrders(orders, records, templateById, search),
-    [orders, records, templateById, search]
-  );
+  const filteredOrders = useMemo(() => {
+    const result = [...filterOrders(orders, records, templateById, search)];
+    const latestFirst = (a: WorkOrder, b: WorkOrder) =>
+      receivedTime(b.received_at) - receivedTime(a.received_at)
+      || b.order_no.localeCompare(a.order_no, 'zh-CN');
+    const priority: Record<string, number> = {
+      rejected: 0, pending: 1, recording: 2, unlinked: 3, empty: 4, reviewed: 5,
+    };
+    result.sort((a, b) => {
+      if (sortKey === 'received_asc') {
+        return receivedTime(a.received_at) - receivedTime(b.received_at)
+          || a.order_no.localeCompare(b.order_no, 'zh-CN');
+      }
+      if (sortKey === 'order_asc') return a.order_no.localeCompare(b.order_no, 'zh-CN');
+      if (sortKey === 'order_desc') return b.order_no.localeCompare(a.order_no, 'zh-CN');
+      if (sortKey === 'priority') {
+        const pa = priority[deriveOrderStatus(a, records, templateById).key] ?? 99;
+        const pb = priority[deriveOrderStatus(b, records, templateById).key] ?? 99;
+        return pa - pb || latestFirst(a, b);
+      }
+      if (sortKey === 'progress_asc') {
+        const ap = orderProgress(a, records, templateById);
+        const bp = orderProgress(b, records, templateById);
+        const ar = ap.testTotal > 0 ? ap.recorded / ap.testTotal : 1;
+        const br = bp.testTotal > 0 ? bp.recorded / bp.testTotal : 1;
+        return ar - br || latestFirst(a, b);
+      }
+      return latestFirst(a, b);
+    });
+    return result;
+  }, [orders, records, templateById, search, sortKey]);
 
   // 顶部 KPI 概览（也作为状态快捷筛选）
   const kpis = useMemo(() => {
@@ -147,7 +191,8 @@ export default function LabTaskList() {
         title="实验室录入工作台"
         subtitle="按委托单录入实验数据并送审。点订单进入详情页关联原始记录 / 录入 / 审核。接口未对接前可「新建订单」手动建单。"
         extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建订单</Button>
+          <Button type="primary" icon={<PlusOutlined />} disabled={!canEnterData}
+            title={canEnterData ? '新建订单' : '当前账号没有录入权限'} onClick={openCreate}>新建订单</Button>
         }
       />
 
@@ -171,13 +216,24 @@ export default function LabTaskList() {
         })}
       </div>
 
-      <OrderSearchBar value={search} onChange={setSearch} total={orders.length} shown={filteredOrders.length} />
+      <OrderSearchBar
+        value={search}
+        onChange={setSearch}
+        total={orders.length}
+        shown={filteredOrders.length}
+        sortValue={sortKey}
+        onSortChange={(value) => setSortKey(value as OrderSortKey)}
+        sortOptions={ORDER_SORT_OPTIONS}
+      />
+      <div style={{ display: 'flex', marginBottom: 8 }}>
+        <ListPageSizeControl value={pageSize} onChange={setPageSize} />
+      </div>
 
       <Table
         dataSource={filteredOrders}
         rowKey="order_no"
         loading={loading}
-        pagination={false}
+        pagination={pagination}
         locale={{ emptyText: <Empty description={orders.length ? '无匹配订单' : '暂无委托单，点「新建订单」手动建单'} /> }}
         onRow={(o) => ({ onClick: () => navigate(`/lab/order/${encodeURIComponent(o.order_no)}`), style: { cursor: 'pointer' } })}
         columns={[
@@ -237,9 +293,11 @@ export default function LabTaskList() {
                   title="删除该订单？"
                   description="将连同其录入记录 / 报告 / 审核记录一并删除，不可恢复。"
                   okText="删除" okButtonProps={{ danger: true }} cancelText="取消"
+                  disabled={!canEnterData}
                   onConfirm={() => deleteOrder(o.order_no)}
                 >
-                  <Button size="small" danger icon={<DeleteOutlined />} />
+                  <Button size="small" danger icon={<DeleteOutlined />} disabled={!canEnterData}
+                    title={canEnterData ? '删除订单' : '当前账号没有录入权限'} />
                 </Popconfirm>
               </Space>
             ),

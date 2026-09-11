@@ -19,7 +19,7 @@
 macOS 一键安装：
 
 ```bash
-brew install node pnpm postgresql@16 typst
+brew install node pnpm postgresql@16 typst ghostscript
 brew install --cask libreoffice
 ```
 
@@ -39,8 +39,8 @@ cd server && pnpm install && cd ..
 
 # 2. 配置（DB 密码等）
 cp config/database.local.json.example config/database.local.json   # 本地 PG 可留空
-# 接外部 OA 登录（不配=mock 模式，任意账号密码登录，仅本机演示）
-cp config/auth.local.json.example config/auth.local.json   # 填 common_login_url + app_id
+# 本机演示默认使用 config/interfaces.demo.json（OA、报告回传均为 mock，无需额外配置）
+# 服务器真实接口：cp config/interfaces.server.json.example config/interfaces.server.json
 
 # 3. 创建数据库 + 跑全部 migration（自动按序应用所有未执行的，当前到 033）
 createdb cdr_demo
@@ -128,6 +128,10 @@ typst compile samples/typst/manual-record.typ samples/typst/out.pdf
 | `TYPST_MAX_CONCURRENCY` | `4` | 同时在跑的 typst 编译子进程数上限（`services/typst-compiler.ts`）。每个编译是 CPU 密集型，建议设为 CPU 核数的一半左右，过大反而拖慢。 |
 | `TYPST_CACHE_DIR` | `<tmpdir>/cdr-typst-pdf-cache` | 编译产物磁盘缓存目录（按 source sha256 落盘，报告 PDF 编译一次后读盘、重启仍命中）。可指向独立磁盘/共享卷；设 `off` 关闭磁盘缓存（只留进程内 LRU）。可随时清空。 |
 | `TYPST_CACHE_MAX_FILES` | `2000` | 磁盘缓存最多保留多少个 PDF，超出按 mtime 删最旧的（每 50 次写触发一次清理）。 |
+| `PUBLIC_BASE_URL` | 覆盖 `interfaces.*.json` | PDF 内“模板资料附件”下载链接的公开系统地址；通常直接填写统一接口配置的 `public_base_url`。 |
+| `PDF_OPTIMIZE_MIN_BYTES` | `1048576` | PDF 达到该体积后才用 Ghostscript 检查重复图片、字体流并把彩色/灰度图规范为 180 dpi；只有结果至少缩小 2% 才采用。 |
+| `PDF_OPTIMIZER_BINARY` | `gs` | Ghostscript 可执行文件路径。 |
+| `PDF_OPTIMIZE_DISABLED` | 空 | 设为 `1`/`true` 可关闭 PDF 后处理；Ghostscript 缺失时系统也会自动回退到 Typst 原文件。 |
 
 示例：`DB_POOL_MAX=40 TYPST_MAX_CONCURRENCY=6 PORT=5173 pnpm serve`
 
@@ -148,12 +152,29 @@ typst compile samples/typst/manual-record.typ samples/typst/out.pdf
 }
 ```
 
-### 外部 OA 登录 (`config/auth.json` + `config/auth.local.json`)
+### 外部接口统一配置（OA 登录 + 报告回传 + PDF 附件链接）
+
+本机使用 [`config/interfaces.demo.json`](./config/interfaces.demo.json)，服务器使用 `config/interfaces.server.json`（由 `interfaces.server.json.example` 复制）。完整字段、切换方式和命令见 [`config/README.md`](./config/README.md)。
+
+```bash
+# 本机演示（默认，也是 pnpm dev 的默认行为）
+pnpm serve:demo
+
+# 服务器真实接口
+cp config/interfaces.server.json.example config/interfaces.server.json
+# 编辑 OA、SOAP 以及 public_base_url 后：
+pnpm build
+pnpm serve:server
+```
+
+`public_base_url` 必须是浏览器实际访问系统的地址（如 `https://reports.example.com` 或 `http://172.18.0.158:5173`），否则 PDF 中附件链接会写成服务器自身的 `127.0.0.1`，外部用户无法下载。
+
+### 外部 OA 登录（统一配置中的 `auth`）
 
 身份认证走外部 OA 的 `/commonLogin/login`（接口 5.1，GET，参数 `loginName`/`pwd`/`appId`）。**认证系统只校验身份，不给角色——角色/权限在本系统本地分配。** 完整对接规范+排错见根目录 **《外部OA登录对接.md》**。
 
 ```json
-// config/auth.local.json（部署到内网时填，已被 .gitignore 忽略；不存在=mock 模式）
+// config/interfaces.server.json 的 auth 节（部署到内网时填）
 {
   "common_login_url": "http://172.19.0.27/grgtapi/common-api",  // OA 地址，含路径前缀！不是裸 :80
   "app_id": "chemistry",                                         // 接入方应用标识（现场值）
@@ -169,30 +190,39 @@ typst compile samples/typst/manual-record.typ samples/typst/out.pdf
 - 首次用某 OA 工号登录会在本地 `users` 表自动建档（**无角色**，待 `admin` 在「用户管理」分配，或用户自助申请→审核）。
 - 排错：地址/前缀错(404)→检查 `common_login_url` 带 `/grgtapi/common-api`；OA 不可达→「无法连接 OA 认证服务」，在服务器 `curl` 直测连通性；真实账号明文登录失败→可能密码加密非 SHA-1，见《外部OA登录对接.md》§5 自检。**内网联调确认服务器能访问 `172.19.0.27`**。
 
-### 报告回传 1.4 (`config/report-delivery.json` + `config/report-delivery.local.json`)
+### 业务系统 SOAP 1.4 / 1.5 / 1.6（统一配置中的 `report_delivery`）
 
-接口 1.4 报告 PDF 回传（**SOAP**，本系统作客户端调业务系统 WCF）。**实际方法（据 WSDL `http://172.18.0.97:8003/lab/chemistry`）= `PushReportFile(string sysNumber, string file, string jobNo)`**——**三个**平铺字符串参数；规范文档里写的 `AcceptReportFromDiGui` 在该服务不存在，已按 WSDL 校正。⚠️ **少 `jobNo`（委托单业务员工号）对方会拒收**。
+接口 1.4 报告 PDF 回传（**SOAP**，本系统作客户端调业务系统 WCF）。**方法 = `AcceptReportFromDiGui(string sysNumber, string file, string jobNo)`**（业务系统现服务，WSDL `http://172.18.0.97:8003/Lab/Chemistry`）——**三个**平铺字符串参数；参数名须与对方 WSDL 元素名一致。⚠️ **少 `jobNo`（操作人登录账号工号）对方会拒收**。
 
 ```json
-// config/report-delivery.local.json（部署填；不存在或 soap_endpoint 空 = mock，不真发 → 对方收不到）。值已按 WSDL 填好。
+// config/interfaces.server.json 的 report_delivery 节（soap_endpoint 空 = mock，不真发 → 对方收不到）。
 {
-  "soap_endpoint": "http://172.18.0.97:8003/lab/chemistry",         // 业务系统 SOAP 端点（空=mock）
+  "soap_endpoint": "http://172.18.0.97:8003/Lab/Chemistry",         // 业务系统 SOAP 端点（空=mock）
   "target_namespace": "http://tempuri.org/",
-  "method": "PushReportFile",                                       // 回传报告文件方法
+  "method": "AcceptReportFromDiGui",                                       // 回传报告文件方法
   "param_id_name": "sysNumber",                                     // 第1入参标签（报告 SysNumber）
   "param_file_name": "file",                                        // 第2入参标签（PDF Base64）
-  "param_jobno_name": "jobNo",                                      // 第3入参标签（委托单业务员工号 JobNo）
-  "soap_action": "http://tempuri.org/IChemistryService/PushReportFile",
+  "param_jobno_name": "jobNo",                                      // 第3入参标签（操作人登录账号工号 JobNo）
+  "soap_action": "http://tempuri.org/IChemistryService/AcceptReportFromDiGui",
+  "cancel_method": "CancelFlowFromDiGui",
+  "cancel_param_id_name": "sysNumber",
+  "cancel_param_jobno_name": "jobNo",
+  "cancel_soap_action": "http://tempuri.org/IChemistryService/CancelFlowFromDiGui",
+  "task_state_method": "UpdateMaterialTaskState",
+  "task_state_param_id_name": "taskId",
+  "task_state_param_state_name": "testState",
+  "task_state_soap_action": "http://tempuri.org/IChemistryService/UpdateMaterialTaskState",
   "soap_version": "1.1",
   "timeout_ms": 30000
 }
 ```
 
-- 出口：报告工作台「送审/全部送审」→ `POST /api/external/requisitions/:id/deliver` → 编译 PDF→Base64→取委托单 `JobNo`→`submitReportToDiGui(sysNumber, base64, jobNo)`→构 `PushReportFile` SOAP 信封发 `soap_endpoint`。
-- `jobNo` 取自委托单（1.1）`work_orders.payload.meta.job_no`（业务员工号）；委托单没带工号则为空并打 warning。
+- 出口：报告工作台「送审/全部送审」→ `POST /api/external/requisitions/:id/deliver` → 编译 PDF→Base64→取**操作人登录工号**→`submitReportToDiGui(sysNumber, base64, jobNo)`→构 `AcceptReportFromDiGui` SOAP 信封发 `soap_endpoint`。
+- `jobNo` 取自**当前登录账号工号**（前端 `X-User-Job` 头，即谁点的回传，与 RBAC 鉴权同源）；未登录/缺该头则为空并打 warning。
 - 环境变量可覆盖：`DELIVERY_SOAP_ENDPOINT` / `DELIVERY_METHOD` / `DELIVERY_PARAM_ID_NAME` / `DELIVERY_PARAM_FILE_NAME` / `DELIVERY_PARAM_JOBNO_NAME` / `DELIVERY_SOAP_ACTION` / `DELIVERY_TARGET_NAMESPACE`。
-- 启动日志：`[config] 报告回传(1.4)=SOAP(...)` 或 `mock(...)`。
-- ⚠️ **soap_endpoint 为空＝mock，只返回成功不真发，对方收不到** —— 生产务必配成 `http://172.18.0.97:8003/lab/chemistry`。方法名/三个参数标签名以对方 WSDL 为准，改本配置即可、无需改码。
+- 启动日志：`[config] 业务系统 SOAP(1.4/1.5/1.6)=SOAP(...)` 或 `mock(...)`。
+- ⚠️ **soap_endpoint 为空＝mock，只返回成功不真发，对方收不到** —— 生产务必配成 `http://172.18.0.97:8003/Lab/Chemistry`。方法名/三个参数标签名以对方 WSDL 为准，改本配置即可、无需改码。
+- 1.6 的 `taskId` 来自 1.1 `TaskList[].TaskId`；部署更新必须先执行 `pnpm migrate`，失败通知保存在 `external_task_state_deliveries` 并由后台重试。
 
 ### 报告页眉页脚默认 (`config/header-footer.json`)
 

@@ -3,12 +3,17 @@
  * 复用 FieldEditor，editorMode='report-cover'；公共外壳走 useReportTemplateEditor。
  */
 import { useMemo } from 'react';
-import { Button, Spin, Switch, Tooltip, Tag } from 'antd';
-import { SaveOutlined, EyeOutlined, RollbackOutlined } from '@ant-design/icons';
+import { Button, Spin, Segmented, Tooltip, Tag } from 'antd';
+import { EyeOutlined, RollbackOutlined } from '@ant-design/icons';
 import FieldEditor from '../../components/FieldEditor';
 import EditorSplit from '../../components/EditorSplit';
 import TemplateVersionPanel from '../../components/TemplateVersionPanel';
-import TypstViewer, { type PosMarker } from '../../components/TypstViewer';
+import EditorToolbar from '../../components/EditorToolbar';
+import DocumentCollaborationStatus from '../../components/DocumentCollaborationStatus';
+import EditAttemptGuard from '../../components/EditAttemptGuard';
+import EditorHistoryControls from '../../components/EditorHistoryControls';
+import ReportTemplateGroupActions from '../../components/ReportTemplateGroupActions';
+import TypstViewer, { markerHighlightForField, type PosMarker } from '../../components/TypstViewer';
 import { generateTypst, injectReportFieldsIntoTypst, type ReportRenderCtx } from '../../../../shared/typst-generator';
 import { withMockPhotoTables, mockPhotoItem } from '../../../../shared/mock-data';
 import type { RecordTemplate } from '../../../../shared/types';
@@ -22,8 +27,17 @@ const MOCK_CTX: ReportRenderCtx = {
     sample_name: '车门内饰板 / PP+EPDM',
     received_at: '2025-05-12',
   },
-  // 订单级扩展字段预览值（绑定「委托单字段 → 检测周期/检测开始/结束 等」时有内容；真实值出报告时由委托单 1.1 派生）
-  order_meta: { test_period: '2025-12-11 ~ 2025-12-29', test_start: '2025-12-11', test_end: '2025-12-29' },
+  // 订单级接口字段预览值；真实报告从委托单 1.1 的 work_orders.payload.meta 读取。
+  order_meta: {
+    company_address: '安徽省芜湖市经济技术开发区', send_date: '2025-05-12T09:30:00',
+    time_required: '2025-12-31T23:59:59', test_time_required: '2025-12-29T23:59:59', report_deadline: '2026-01-05T23:59:59',
+    authorites: '奇瑞汽车股份有限公司', english_authorites: 'Chery Automobile Co., Ltd.',
+    authorites_address: '安徽省芜湖市经济技术开发区', english_authorites_address: 'Wuhu, Anhui, China',
+    sale_name: '王树雪', job_no: 'GDJL02859', buyer: '采购部门', status: '正常', remark: '优先安排',
+    is_chinese_report: true, is_english_report: false, is_paper_report: true,
+    report_count: '按委托单出报告', other_report_count: '', complete_way: '报告签发，自动完工',
+    test_period: '2025-12-11 ~ 2025-12-29', test_start: '2025-12-11', test_end: '2025-12-29',
+  },
   // 样品信息预览值（绑定「样品信息 → 样品名称/样品编号/零件号」时有内容；真实值出报告时按报告样品填）
   report_sample: { name: '车门内饰板 / PP+EPDM', sort_no: '1#', model: 'PP-T20' },
   // 样品清单示例（binding source='order_samples' 预览用；真实值出报告时按订单样品自动填）
@@ -47,6 +61,10 @@ const MOCK_CTX: ReportRenderCtx = {
     customer_name: '奇瑞汽车股份有限公司', customer_address: '安徽省芜湖市经济技术开发区',
     report_note: '本报告检测结果仅对受检样品负责，报告无批准人签字、检验检测专用章及报告骑缝章无效，未经本公司书面同意，不得部分复制本报告。对报告若有异议，应于收到报告之日起十五天内向检测单位提出。扫描报告首页二维码，或登陆官方网站 http://www.grgtmall.com，输入报告编号和校验码，即可查询报告真伪，如有疑问，请联系邮箱 grgtest@grgtest.com.请妥善管理二维码和校验码，由此所致的信息泄露本公司概不负责',
     qualification_note: '',  // 资质备注示例留空 → 预览时不显示
+  },
+  record_meta: {
+    tester_name: '张三', tested_at: '2026-06-08T09:35:00',
+    reviewer_name: '李四', reviewed_at: '2026-06-08T16:20:00',
   },
   // 图片预览：给「报告·图片表(report_image_gallery)」自动模式一份示例原始记录（含一个 image 字段）+ 示例照片，
   // 这样首页编辑器预览也能看到样图（report_photo_table 走 withMockPhotoTables 注入，二者预览都有图）。真实报告不经此 mock。
@@ -82,9 +100,9 @@ const EMPTY: RecordTemplate = {
 export default function CoverEditor() {
   const ed = useReportTemplateEditor({ emptyTemplate: EMPTY });
   const {
-    id, navigate, readonly, pendingReview, reload, rollbackTo, template, setTemplate, meta, viewingVersion, versionMeta,
+    id, navigate, readonly, permissionPreview, pendingReview, lease, reload, rollbackTo, template, setTemplate, meta, viewingVersion, versionMeta,
     loading, saving, mockPreview, setMockPreview, viewerRef, selectRequest, setSelectRequest,
-    handleSave, confirmLeave,
+    handleSave, confirmLeave, undo, redo, reset, canUndo, canRedo, canReset, collaborationChanges,
   } = ed;
 
   const typstPreview = useMemo(() => {
@@ -104,14 +122,14 @@ export default function CoverEditor() {
   if (loading) return <Spin style={{ margin: '100px auto', display: 'block' }} />;
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '8px 16px', borderBottom: '1px solid #d9d9d9', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'nowrap', overflowX: 'auto' }}>
-        <Button size="small" onClick={() => viewingVersion ? navigate(-1) : confirmLeave(() => navigate('/report-templates?tab=cover'), handleSave)}>← 返回</Button>
-        <h3 style={{ margin: 0, fontSize: 15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 1, minWidth: 40 }}>{meta?.name || '首页模板'}</h3>
+    <div {...ed.historyEvents} style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <EditorToolbar title={meta?.name || '首页模板'}
+        onBack={() => viewingVersion ? navigate(-1) : confirmLeave(() => navigate('/report-templates?tab=cover'), handleSave)}>
+        {permissionPreview && !viewingVersion && <Tag icon={<EyeOutlined />}>只读预览</Tag>}
         {viewingVersion && (
           <>
             <Tag color="gold">正在查看历史版本 v{viewingVersion.version_no} · 只读</Tag>
-            {(viewingVersion.status === 'superseded' || (viewingVersion.status === 'approved' && (versionMeta?.open_draft?.status === 'draft' || versionMeta?.open_draft?.status === 'pending'))) && (
+            {!permissionPreview && (viewingVersion.status === 'superseded' || (viewingVersion.status === 'approved' && (versionMeta?.open_draft?.status === 'draft' || versionMeta?.open_draft?.status === 'pending'))) && (
               <Tooltip title={
                 versionMeta?.open_draft?.status === 'pending' ? '撤回正在审核的版本，并把内容恢复为此版本（仍是草稿，无需审核）'
                 : versionMeta?.open_draft?.status === 'draft' ? '把当前草稿内容重置为此版本（仍是草稿，无需审核）'
@@ -133,7 +151,27 @@ export default function CoverEditor() {
             )}
           </>
         )}
-        {!viewingVersion && id && (
+        {!readonly && (
+          <EditorHistoryControls disabled={saving} canUndo={canUndo} canRedo={canRedo} canReset={canReset}
+            onUndo={undo} onRedo={redo} onReset={reset} />
+        )}
+        {!viewingVersion && !pendingReview && id && (
+          <ReportTemplateGroupActions templateId={Number(id)} templateKind="cover"
+            groupId={meta?.report_project_family_id} disabled={readonly} onChanged={reload} />
+        )}
+        <Tooltip title="开启后右侧 PDF 预览自动填充 mock 委托单数据">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+            <EyeOutlined />
+            <Segmented size="small" value={mockPreview ? 'mock' : 'blank'}
+              onChange={(value) => setMockPreview(value === 'mock')}
+              options={[{ label: '示例数据', value: 'mock' }, { label: '空白', value: 'blank' }]} />
+          </span>
+        </Tooltip>
+        <div style={{ flex: 1 }} />
+        <DocumentCollaborationStatus resourceType="report_template" resourceId={id}
+          canEdit={!permissionPreview && !viewingVersion && !pendingReview} lease={lease}
+          onSaveBeforeRelease={() => handleSave()} changes={collaborationChanges} saving={saving} />
+        {!viewingVersion && id && !permissionPreview && (
           <TemplateVersionPanel
             kind="report"
             templateId={Number(id)}
@@ -142,30 +180,35 @@ export default function CoverEditor() {
             openDraft={versionMeta?.open_draft}
             onRefresh={reload}
             editorPathBase="/report-templates/cover/editor"
+            iconOnly
+            familySyncShortcut={!!meta?.report_project_family_id}
+            disabled={!pendingReview && (lease.loading || !!lease.holderName || lease.acquired)}
+            disabledReason="当前模板正在编辑，请先结束编辑，再执行提交审核或派生操作"
           />
         )}
-        <div style={{ flex: 1 }} />
-        <Tooltip title="开启后右侧 PDF 预览自动填充 mock 委托单数据">
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-            <EyeOutlined />
-            <Switch size="small" checked={mockPreview} onChange={setMockPreview}
-              checkedChildren="示例数据" unCheckedChildren="空白" />
-          </span>
-        </Tooltip>
         {viewingVersion
           ? <Button size="small" onClick={() => navigate(`/report-templates/cover/editor?id=${id}`)}>
               {versionMeta?.open_draft?.status === 'pending' ? '返回审核中的版本' : '回到当前版本编辑'}
             </Button>
-          : !pendingReview && <Button size="small" type="primary" icon={<SaveOutlined />} onClick={handleSave} loading={saving}>保存</Button>}
-      </div>
+          : null}
+      </EditorToolbar>
 
       <EditorSplit
         left={
-          <div style={readonly ? { pointerEvents: 'none', opacity: 0.75, height: '100%' } : { height: '100%' }}>
-            <FieldEditor template={template} onChange={setTemplate} editorMode="report-cover"
-              onFieldFocus={(code, groupId) => viewerRef.current?.scrollToMarker(code, groupId)}
+          <EditAttemptGuard active={!!id && !permissionPreview && !viewingVersion && !pendingReview && !lease.loading && !lease.acquired && !lease.holderName}
+            style={readonly ? { opacity: 0.75, height: '100%', minHeight: 0 } : { height: '100%', minHeight: 0 }}>
+            <FieldEditor template={template} onChange={readonly ? () => {} : setTemplate} editorMode="report-cover" readOnly={readonly}
+              onFieldFocus={(code, groupId, field) => viewerRef.current?.scrollToMarker(
+                code,
+                groupId,
+                (code.includes('::__detail__:') || code.startsWith('__image_item__:')) ? { label: field?.label ? `当前：${field.label}` : '当前编辑位置', mode: 'text' } : field ? markerHighlightForField(field) : {
+                  label: `当前分区：${template.groups.find(group => group.id === groupId)?.label || ''}`,
+                  mode: 'group',
+                },
+              )}
+              onFieldBlur={() => viewerRef.current?.clearMarkerHighlight()}
               selectRequest={selectRequest} />
-          </div>
+          </EditAttemptGuard>
         }
         right={
           <TypstViewer ref={viewerRef} source={typstPreview} mode="view" height="calc(100vh - 50px)"

@@ -50,41 +50,95 @@ function injectAuditFields(tmpl: RecordTemplate, base: Record<string, any>, row:
   for (const f of tmpl.groups.flatMap(g => g.fields)) {
     if (!f.semantic_role) continue;
     if (f.semantic_role === 'inspector') out[f.code] = row?.tester_name || '';
-    else if (f.semantic_role === 'inspector_date') out[f.code] = row?.tested_at ? new Date(row.tested_at).toLocaleDateString() : '';
+    else if (f.semantic_role === 'inspector_date') out[f.code] = row?.tested_at || '';
     else if (f.semantic_role === 'reviewer') out[f.code] = row?.reviewer_name || '';
-    else if (f.semantic_role === 'reviewer_date') out[f.code] = row?.reviewed_at ? new Date(row.reviewed_at).toLocaleDateString() : '';
+    else if (f.semantic_role === 'reviewer_date') out[f.code] = row?.reviewed_at || '';
   }
   return out;
 }
 
+/** 默认读取当前生效版本；显式 versionId 可读取任意版本（仅用于只读 PDF 预览）。 */
+async function resolveTemplateContent(
+  base: any,
+  apiBase: string,
+  versionId?: number | string,
+  allowWorkVersionFallback = false,
+) {
+  if (versionId != null) {
+    const historical = (await axios.get(`${apiBase}/${base.id}/versions/${versionId}`)).data;
+    if (!Array.isArray(historical.field_definitions)) throw new Error('该历史版本没有可预览的字段内容');
+    return {
+      groups: historical.field_definitions,
+      layoutOptions: historical.layout_options || {},
+      version: historical.version_no ?? base.version ?? 1,
+    };
+  }
+  if (!Array.isArray(base.field_definitions) || base.current_version_id == null) {
+    if (allowWorkVersionFallback) {
+      const versions = ((await axios.get(`${apiBase}/${base.id}/versions`)).data || [])
+        .sort((a: any, b: any) => Number(b.version_no) - Number(a.version_no));
+      const work = versions.find((v: any) =>
+        v.status === 'draft' || v.status === 'pending' || v.status === 'rejected') || versions[0];
+      if (work) return resolveTemplateContent(base, apiBase, work.id, false);
+    }
+    throw new Error('该模板尚无已生效版本，暂时无法预览');
+  }
+  return {
+    groups: base.field_definitions,
+    layoutOptions: base.layout_options || {},
+    version: base.current_version_no ?? base.version ?? 1,
+  };
+}
+
+/** 原始记录模板预览 PDF blob URL（关闭预览时由调用方释放）。 */
+export async function getRecordTemplatePreviewPdf(templateId: number | string, versionId?: number | string) {
+  const base = (await axios.get(`${API}/record-templates/${templateId}`)).data;
+  const resolved = await resolveTemplateContent(base, `${API}/record-templates`, versionId, true);
+  const tmpl: RecordTemplate = {
+    id: base.id, name: base.name, version: resolved.version,
+    groups: resolved.groups, layout_options: resolved.layoutOptions,
+  };
+  return compileTypst(generateTypstWithData(tmpl, generateMockData(tmpl)));
+}
+
 /** 原始记录模板：mock 数据预览 PDF */
 export async function downloadRecordTemplatePdf(templateId: number | string, filename: string) {
-  const base = (await axios.get(`${API}/record-templates/${templateId}`)).data;
-  const tmpl: RecordTemplate = {
-    id: base.id, name: base.name, version: base.version,
-    groups: base.field_definitions, layout_options: base.layout_options || {},
-  };
-  await downloadCompiledPdf(generateTypstWithData(tmpl, generateMockData(tmpl)), filename);
+  triggerDownload(await getRecordTemplatePreviewPdf(templateId), `${safe(filename)}.pdf`);
+}
+
+/** 已录原始记录预览 PDF blob URL。 */
+export async function getFilledRecordPreviewPdf(recordId: number | string) {
+  const rd = (await axios.get(`${API}/record-data/${recordId}`)).data;
+  const base = (await axios.get(`${API}/record-templates/${rd.template_id}`)).data;
+  let groups: any[] = [];
+  let layout: Record<string, any> = {};
+  let version = base.version ?? 1;
+  if (rd.template_version_id) {
+    try {
+      const v = (await axios.get(`${API}/record-templates/${rd.template_id}/versions/${rd.template_version_id}`)).data;
+      if (v?.field_definitions) {
+        groups = v.field_definitions;
+        layout = v.layout_options || {};
+        version = v.version_no ?? version;
+      }
+    } catch { /* 版本拉取失败再尝试当前生效版本 */ }
+  }
+  if (!groups.length) {
+    const resolved = await resolveTemplateContent(base, `${API}/record-templates`);
+    groups = resolved.groups;
+    layout = resolved.layoutOptions;
+    version = resolved.version;
+  }
+  const tmpl: RecordTemplate = { id: base.id, name: base.name, version, groups, layout_options: layout };
+  const merged = { ...(rd.batch_shared_data || {}), ...(rd.raw_data || {}), ...(rd.derived_data || {}) };
+  const data = injectAuditFields(tmpl, ensureDataMatrixDefaults(tmpl, merged), rd);
+  const deviceMap = await fetchDeviceMap(collectDeviceCodes(tmpl, data));
+  return compileTypst(generateTypstWithData(tmpl, data, { deviceMap }));
 }
 
 /** 录入记录（填好数据的原始记录）：按锁定版本渲染 PDF（与 ReadonlyRecordViewer 同口径） */
 export async function downloadFilledRecordPdf(recordId: number | string, filename: string) {
-  const rd = (await axios.get(`${API}/record-data/${recordId}`)).data;
-  const base = (await axios.get(`${API}/record-templates/${rd.template_id}`)).data;
-  let groups = base.field_definitions;
-  let layout = base.layout_options || {};
-  if (rd.template_version_id) {
-    try {
-      const v = (await axios.get(`${API}/record-templates/${rd.template_id}/versions/${rd.template_version_id}`)).data;
-      if (v?.field_definitions) { groups = v.field_definitions; layout = v.layout_options || {}; }
-    } catch { /* 版本拉取失败用 base 兜底 */ }
-  }
-  const tmpl: RecordTemplate = { id: base.id, name: base.name, version: base.version, groups, layout_options: layout };
-  const merged = { ...(rd.raw_data || {}), ...(rd.derived_data || {}) };
-  const data = injectAuditFields(tmpl, ensureDataMatrixDefaults(tmpl, merged), rd);
-  // 「测试设备」反查设备名称 → 显示「设备名称：管理编号」（记录只存管理编号数组）。
-  const deviceMap = await fetchDeviceMap(collectDeviceCodes(tmpl, data));
-  await downloadCompiledPdf(generateTypstWithData(tmpl, data, { deviceMap }), filename);
+  triggerDownload(await getFilledRecordPreviewPdf(recordId), `${safe(filename)}.pdf`);
 }
 
 // 报告模板预览用的最小 mock 上下文（结构预览，非真实数据；真实值出报告时按订单注入）
@@ -94,19 +148,27 @@ const REPORT_MOCK_CTX = {
 } as unknown as ReportRenderCtx;
 
 /** 报告模板（首页/项目）：mock 上下文结构预览 PDF */
-export async function downloadReportTemplatePdf(templateId: number | string, filename: string) {
+export async function getReportTemplatePreviewPdf(templateId: number | string, versionId?: number | string) {
   const base = (await axios.get(`${API}/report-templates/${templateId}`)).data;
+  const resolved = await resolveTemplateContent(base, `${API}/report-templates`, versionId, true);
   const tpl: RecordTemplate = {
-    id: base.id, name: base.name, version: base.version,
-    groups: base.field_definitions, layout_options: base.layout_options || {},
+    id: base.id, name: base.name, version: resolved.version,
+    groups: resolved.groups, layout_options: resolved.layoutOptions,
   };
   const src = injectReportFieldsIntoTypst(generateTypst(tpl), tpl, REPORT_MOCK_CTX);
-  await downloadCompiledPdf(src, filename);
+  return compileTypst(src);
+}
+
+export async function downloadReportTemplatePdf(templateId: number | string, filename: string) {
+  triggerDownload(await getReportTemplatePreviewPdf(templateId), `${safe(filename)}.pdf`);
+}
+
+export async function getGeneratedReportPreviewPdf(reportId: number | string) {
+  const res = await axios.get(`${API}/reports/${reportId}/pdf`, { responseType: 'blob' });
+  return URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
 }
 
 /** 生成的报告：服务端已编译 PDF，直接取 blob 下载 */
 export async function downloadGeneratedReportPdf(reportId: number | string, filename: string) {
-  const res = await axios.get(`${API}/reports/${reportId}/pdf`, { responseType: 'blob' });
-  const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
-  triggerDownload(url, `${safe(filename)}.pdf`);
+  triggerDownload(await getGeneratedReportPreviewPdf(reportId), `${safe(filename)}.pdf`);
 }

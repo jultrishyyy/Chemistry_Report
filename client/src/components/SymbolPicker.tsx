@@ -9,7 +9,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Popover, Tabs, Button, Tooltip, message } from 'antd';
-import { FunctionOutlined } from '@ant-design/icons';
+import { CloseOutlined, FunctionOutlined } from '@ant-design/icons';
 
 const GROUPS: { key: string; label: string; items: string[] }[] = [
   {
@@ -147,7 +147,15 @@ export default function SymbolPicker() {
       trigger={[]}
       placement="topRight"
       content={content}
-      title="单位 / 符号"
+      title={
+        <div style={{ minWidth: 180, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ flex: 1, fontWeight: 600 }}>单位 / 符号</span>
+          <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭单位与符号选择器" title="关闭"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => { e.stopPropagation(); setOpen(false); }}
+            style={{ marginRight: -6, color: '#8a94a6' }} />
+        </div>
+      }
     >
       <Tooltip title="单位 / 符号选择器（点 fx 固定/收起）" placement="left">
         <Button

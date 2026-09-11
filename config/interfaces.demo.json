@@ -1,0 +1,29 @@
+{
+  "_说明": "【本机演示配置】默认使用。所有外部接口均为 mock：不调用 OA，不向业务系统回传报告。开发时无需修改本文件。",
+  "public_base_url": "http://127.0.0.1:5173",
+  "auth": {
+    "common_login_url": "",
+    "app_id": "chemistry",
+    "pwd_hash": "sha1",
+    "timeout_ms": 10000
+  },
+  "report_delivery": {
+    "soap_endpoint": "",
+    "target_namespace": "http://tempuri.org/",
+    "method": "AcceptReportFromDiGui",
+    "param_id_name": "sysNumber",
+    "param_file_name": "file",
+    "param_jobno_name": "jobNo",
+    "soap_action": "http://tempuri.org/IChemistryService/AcceptReportFromDiGui",
+    "cancel_method": "CancelFlowFromDiGui",
+    "cancel_param_id_name": "sysNumber",
+    "cancel_param_jobno_name": "jobNo",
+    "cancel_soap_action": "http://tempuri.org/IChemistryService/CancelFlowFromDiGui",
+    "task_state_method": "UpdateMaterialTaskState",
+    "task_state_param_id_name": "taskId",
+    "task_state_param_state_name": "testState",
+    "task_state_soap_action": "http://tempuri.org/IChemistryService/UpdateMaterialTaskState",
+    "soap_version": "1.1",
+    "timeout_ms": 30000
+  }
+}

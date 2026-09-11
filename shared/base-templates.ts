@@ -62,13 +62,22 @@ export const BASE_TEMPLATES: BaseTemplateEntry[] = [
   {
     key: 'blank',
     label: '空白模板',
-    hint: '只有标题，分区自己加',
+    hint: '默认含服务编号和样品编号，其余分区自行添加',
     seed: false,
     build: () => ({
       name: '新模板',
       version: 1,
       layout_options: {},
-      groups: [],
+      groups: [{
+        id: 'g1',
+        label: '基本信息',
+        layout: 'vertical',
+        section_role: 'basic',
+        fields: [
+          { id: 'f_service_no', code: 'service_no', label: '服务编号', type: 'text', required: true },
+          { id: 'f_sample_no', code: 'sample_no', label: '样品编号', type: 'text', required: true },
+        ],
+      }],
     }),
   },
 ];

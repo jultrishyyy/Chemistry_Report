@@ -9,21 +9,26 @@
  *   - 取号后：每个报告编号一条目（显示样品/项目）；在条目内补齐对应样品·项目·原始记录 → 生成
  *     → 进实例编辑器（预览 + 换样品/项目 + 改字段/排版）。
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  Card, Select, Button, Tag, message, Alert, Space, Empty, Tooltip,
+  Card, Select, Button, Tag, message, Alert, Space, Empty, Tooltip, Popconfirm, Checkbox, Input,
   Drawer, Timeline, Descriptions,
 } from 'antd';
 import {
   FileTextOutlined,
   DownloadOutlined, ReloadOutlined, ArrowLeftOutlined,
   HistoryOutlined, EditOutlined, SendOutlined, EyeOutlined,
-  DownOutlined, RightOutlined, SettingOutlined,
+  DownOutlined, RightOutlined, SettingOutlined, RollbackOutlined,
 } from '@ant-design/icons';
 import axios from 'axios';
 import ReadonlyRecordViewer from '../../components/ReadonlyRecordViewer';
 import RecordProgressPanel from '../../components/RecordProgressPanel';
+import PdfPreviewModal from '../../components/PdfPreviewModal';
+import TemplatePdfPreviewModal from '../../components/TemplatePdfPreviewModal';
+import { getGeneratedReportPreviewPdf } from '../../utils/pdfDownload';
+import { useAuth } from '../../auth';
+import { isInteractiveRowTarget } from '../../utils/rowNavigation';
 
 const API = '/api';
 
@@ -58,17 +63,37 @@ interface ReportTemplateRow {
   current_status?: string | null;
   /** 当前生效版本的字段分区数；0＝空/旧版模板（无结构化 content_doc），选用时禁选（否则生成出无法编辑的报告） */
   current_field_group_count?: number;
+  host_manufacturer_id?: number | null;
+  host_manufacturer_name?: string | null;
 }
 
 
 /** 取号报告匹配结果（接口 1.2，后端 external-report-info 算出） */
 interface ReqMatchEntry {
+  scope_key: string;
   sample_name: string;
   project_name: string;
   sample_external_id?: string | null;
+  /** 由报告编号接口给出的默认勾选；整单候选中未标记的项目默认不纳入。 */
+  default_enabled?: boolean;
   status: 'matched' | 'needs_record' | 'unmatched';
   note?: string;
-  assignments: { record_data_id: number; record_data_status?: string; record_template_id?: number; project_template_id?: number | null }[];
+  assignments: {
+    record_data_id: number;
+    record_data_status?: string;
+    record_template_id?: number;
+    project_template_id?: number | null;
+    project_template_version_id?: number | null;
+    project_template_candidates?: {
+      id: number;
+      name: string;
+      version_id: number;
+      version_no: number;
+      project_name?: string | null;
+      host_manufacturer_id?: number | null;
+      updated_at?: string | null;
+    }[];
+  }[];
 }
 interface ReportRequisitionRow {
   id: number;
@@ -91,6 +116,12 @@ interface ReportRequisitionRow {
   data_rework_open?: boolean;
   /** 报告退回(scope=report)：在原报告上编辑修改（非重生成）。有值＝该报告处于退回修改态，退回意见展示在本条目下方 */
   report_rework?: { id: number; reason?: string | null; suggestion?: string | null } | null;
+  template_selections?: Array<{
+    scope_key: string; enabled?: boolean; record_data_id?: number; project_template_id?: number;
+    project_template_version_id?: number | null;
+  }>;
+  generation_configured_at?: string | null;
+  generation_configured_by?: string | null;
 }
 
 /** 报告历史版本（GET /api/reports/:id/versions） */
@@ -132,6 +163,8 @@ const ORDER_META_LABELS: { key: string; label: string; long?: boolean; date?: bo
 
 export default function ReportWorkbench() {
   const navigate = useNavigate();
+  const { has } = useAuth();
+  const canEditReports = has('report.generate');
   const { orderNo } = useParams<{ orderNo: string }>();
   const [order, setOrder] = useState<WorkOrder | null>(null);
   const orderHeader = order
@@ -141,11 +174,26 @@ export default function ReportWorkbench() {
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [coverId, setCoverId] = useState<number | undefined>();
   const [openingCover, setOpeningCover] = useState(false);
+  const [previewCover, setPreviewCover] = useState<{ id: number; name: string } | null>(null);
+  const [previewReport, setPreviewReport] = useState<{ id: number; name: string } | null>(null);
   // 报告端只读查看原始记录
   const [viewerRec, setViewerRec] = useState<{ id: number; subtitle: string } | null>(null);
 
+  const openGeneratedReport = (req: ReportRequisitionRow) => {
+    if (!req.report_id) return;
+    const editable = canEditReports && canSend(req);
+    if (editable) navigate(`/report/edit?id=${req.report_id}`);
+    else setPreviewReport({ id: req.report_id, name: req.report_number || `报告 #${req.report_id}` });
+  };
+
   // ── 取号报告（接口 1.2 PushReportInfos）：报告编号 + 范围由外部决定，本系统只补齐每格的样品/项目/原始记录 ──
   const [requisitions, setRequisitions] = useState<ReportRequisitionRow[]>([]);
+  const [selectingTemplate, setSelectingTemplate] = useState('');
+  const [configuringReq, setConfiguringReq] = useState<number | null>(null);
+  const [rescopingReq, setRescopingReq] = useState<number | null>(null);
+  const [scopeEnabled, setScopeEnabled] = useState<Record<string, boolean>>({});
+  const [scopeSearch, setScopeSearch] = useState<Record<number, string>>({});
+  const [collapsedSamples, setCollapsedSamples] = useState<Set<string>>(new Set());
   const [expandedReqs, setExpandedReqs] = useState<Set<number>>(new Set());
   const toggleReq = (id: number) => setExpandedReqs(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
@@ -258,13 +306,129 @@ export default function ReportWorkbench() {
     records.filter(r => r.audit_status === 'rejected' && r.reject_note).map(r => r.reject_note as string),
   ));
 
-  /** 取号单 → 可生成的 assignments（已匹配 + 数据已审核 + 有项目模板），与后端 autoGenerateRequisition 同口径。 */
-  const buildAssignments = (req: ReportRequisitionRow) =>
-    (req.match_result || [])
-      .filter(m => m.status === 'matched')
-      .map(m => (m.assignments || []).find(a => a.record_data_status === 'reviewed' && a.project_template_id))
-      .filter((a): a is NonNullable<typeof a> => !!a && !!a.record_data_id && !!a.project_template_id)
-      .map(a => ({ record_data_id: a.record_data_id, project_template_id: a.project_template_id as number }));
+  const selectionFor = (req: ReportRequisitionRow, scopeKey: string) =>
+    (req.template_selections || []).find(s => String(s.scope_key) === String(scopeKey));
+
+  const scopeIsEnabled = (req: ReportRequisitionRow, scopeKey: string) => {
+    const local = scopeEnabled[`${req.id}:${scopeKey}`];
+    if (local !== undefined) return local;
+    const saved = selectionFor(req, scopeKey);
+    if (saved) return saved.enabled !== false;
+    return (req.match_result || []).find(m => String(m.scope_key) === String(scopeKey))?.default_enabled !== false;
+  };
+
+  /** 仅使用已确认的配置，不能从匹配结果静默生成。 */
+  const buildAssignments = (req: ReportRequisitionRow) => {
+    if (!req.generation_configured_at) return [];
+    const byScope = new Map((req.template_selections || []).filter(s => s.enabled !== false)
+      .map(s => [String(s.scope_key), s]));
+    return (req.match_result || []).flatMap(m => {
+      const selected = byScope.get(String(m.scope_key));
+      if (!selected?.record_data_id || !selected.project_template_id) return [];
+      const a = m.assignments.find(x => x.record_data_id === selected.record_data_id && x.record_data_status === 'reviewed');
+      return a ? [{ scope_key: m.scope_key, record_data_id: a.record_data_id,
+        project_template_id: selected.project_template_id, project_template_version_id: selected.project_template_version_id }] : [];
+    });
+  };
+
+  const needsTemplateChoice = (req: ReportRequisitionRow) => (req.match_result || []).some(m => {
+      if (!scopeIsEnabled(req, m.scope_key)) return false;
+      const a = m.assignments.find(x => x.record_data_status === 'reviewed');
+      return a && (a.project_template_candidates?.length || 0) > 0 && !a.project_template_id;
+    });
+  const needsConfiguration = (req: ReportRequisitionRow) => !req.generation_configured_at
+    && (req.match_result || []).some(m => m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed'));
+
+  const saveTemplateSelection = async (
+    req: ReportRequisitionRow,
+    entry: ReqMatchEntry,
+    recordDataId: number,
+    projectTemplateId: number,
+  ) => {
+    const key = `${req.id}:${entry.scope_key}:${recordDataId}`;
+    setSelectingTemplate(key);
+    try {
+      const { data } = await axios.put(`${API}/external/requisitions/${req.id}/template-selection`, {
+        scope_key: entry.scope_key,
+        record_data_id: recordDataId,
+        project_template_id: projectTemplateId,
+      });
+      setRequisitions(prev => prev.map(r =>
+        r.id === req.id ? { ...r, match_result: data.match_result, template_selections: data.template_selections,
+          generation_configured_at: null, generation_configured_by: null } : r));
+      message.success('项目模板已确认，将按该模板拉取原始记录数据');
+    } catch (e: any) {
+      message.error('模板选择保存失败：' + (e.response?.data?.error || e.message));
+    } finally {
+      setSelectingTemplate('');
+    }
+  };
+
+  /** 首页模板有主机厂时，同一原始记录的同主机厂项目模板作为首选；用户仍可在下拉中改选。 */
+  const preferredCandidate = (assignment: ReqMatchEntry['assignments'][number]) => {
+    const candidates = assignment?.project_template_candidates || [];
+    const factoryId = coverTemplates.find(t => t.id === usableCoverId())?.host_manufacturer_id;
+    return factoryId ? candidates.find(c => Number(c.host_manufacturer_id) === Number(factoryId)) : undefined;
+  };
+
+  /** 确认范围配置后生成本报告，并立即进入编辑。 */
+  const confirmConfigAndGenerate = async (req: ReportRequisitionRow) => {
+    const cover = usableCoverId();
+    if (!cover) { message.warning('请先选择已生效的首页模板'); return; }
+    // 首次确认时写入同主机厂推荐模板；已由用户选过的项目模板绝不覆盖。
+    const configurable = (req.match_result || []).filter(m =>
+      m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed'));
+    const assignments = configurable.map(m => {
+      const enabled = scopeIsEnabled(req, m.scope_key);
+      const saved = selectionFor(req, m.scope_key);
+      const a = m.assignments.find(x => x.record_data_status === 'reviewed'
+        && (!saved?.record_data_id || x.record_data_id === saved.record_data_id))
+        || m.assignments.find(x => x.record_data_status === 'reviewed');
+      return { scope_key: m.scope_key, enabled, record_data_id: a?.record_data_id,
+        project_template_id: a?.project_template_id || (a ? preferredCandidate(a)?.id : undefined) };
+    });
+    if (!assignments.some(a => a.enabled)) { message.warning('请至少纳入一个已审核项目'); return; }
+    setConfiguringReq(req.id);
+    try {
+      const configured = await axios.put(`${API}/external/requisitions/${req.id}/generation-config`, { assignments });
+      const selected = configured.data?.template_selections || [];
+      const generated = await axios.post(`${API}/external/requisitions/generate`, {
+        order_no: orderHeader.order_no, cover_template_id: cover,
+        items: [{ requisition_id: req.id, assignments: selected.filter((s: any) => s.enabled !== false) }],
+      });
+      const result = generated.data?.reports?.find((x: any) => x.requisition_id === req.id);
+      if (!result?.ok || !result?.report_id) throw new Error(result?.error || '报告生成失败');
+      message.success('报告配置已确认并生成');
+      loadRequisitions(); loadReports();
+      navigate(`/report/edit?id=${result.report_id}`);
+    } catch (e: any) {
+      message.error('配置或生成失败：' + (e.response?.data?.error || e.message));
+    } finally { setConfiguringReq(null); }
+  };
+
+  /** 已生成报告在工作台改选范围后，与编辑器“调整样品/项目”走同一 rescope 接口。 */
+  const applyGeneratedScope = async (req: ReportRequisitionRow) => {
+    if (!req.report_id) return;
+    const assignments = (req.match_result || []).flatMap(entry => {
+      const source = entry.assignments.find(a => a.record_data_status === 'reviewed');
+      if (!source) return [];
+      return [{
+        record_data_id: source.record_data_id,
+        // 尚无生效项目模板的已审核记录也可先纳入范围（0 = 待配置模板）。
+        project_template_id: source.project_template_id || 0,
+        enabled: scopeIsEnabled(req, entry.scope_key),
+      }];
+    });
+    if (!assignments.some(item => item.enabled)) { message.warning('请至少勾选一个已审核项目'); return; }
+    setRescopingReq(req.id);
+    try {
+      await axios.post(`${API}/reports/${req.report_id}/rescope`, { assignments });
+      message.success('已将工作台选择同步到本报告');
+      loadRequisitions(); loadReports();
+    } catch (e: any) {
+      message.error('应用范围失败：' + (e.response?.data?.error || e.message));
+    } finally { setRescopingReq(null); }
+  };
 
   /** 取号单收起行展示的样品名（去重，「；」拼接） */
   const reqSampleSummary = (req: ReportRequisitionRow) => {
@@ -295,51 +459,15 @@ export default function ReportWorkbench() {
     if (req.delivery_status === 'sent') return { label: '已送审', color: 'cyan' };
     if (req.delivery_status === 'failed') return { label: '送审失败', color: 'red' };
     if (req.status === 'generated' && req.report_id) return { label: '待送审', color: 'green' };
-    return { label: buildAssignments(req).length ? '生成中…' : '待数据录入', color: 'default' };
+    if (needsConfiguration(req)) return { label: '待配置报告', color: 'orange' };
+    if (needsTemplateChoice(req)) return { label: '配置待补充', color: 'orange' };
+    return { label: buildAssignments(req).length ? '已配置待生成' : '待数据录入', color: 'default' };
   };
 
   /** 生成可用的首页模板：选中的（下拉只允许选 approved 且非空）或第一个已审核通过且有内容的。 */
   const usableCoverId = () => coverId ?? coverTemplates.find(t => t.current_status === 'approved' && (t.current_field_group_count ?? 0) > 0)?.id;
 
-  /** （重新）生成一份取号报告：assignments 取自当前已匹配已审核数据。 */
-  const generateReqs = async (reqs: ReportRequisitionRow[], silent = false) => {
-    const cover = usableCoverId();
-    if (!cover) return;
-    const items = reqs
-      .map(req => ({ requisition_id: req.id, assignments: buildAssignments(req) }))
-      .filter(it => it.assignments.length);
-    if (!items.length) { if (!silent) message.warning('暂无可生成的数据（原始记录需先审核通过）'); return; }
-    try {
-      const res = await axios.post(`${API}/external/requisitions/generate`, {
-        order_no: orderHeader.order_no, cover_template_id: cover, items,
-      });
-      const reports = res.data?.reports || [];
-      const ok = reports.filter((r: any) => r.ok).length;
-      if (!silent && ok) message.success(`已生成 ${ok} 份报告`);
-      loadRequisitions(); loadReports();
-    } catch (e: any) {
-      if (!silent) message.error('生成失败：' + (e.response?.data?.error || e.message));
-    }
-  };
-
-  // 自动生成 / 按新数据自动重生成（文员无需手点「生成」）。仅两种情况自动（重）生成：
-  //  - 未生成(report_id 空)且有可生成数据 → 生成。
-  //  - 已生成但 stale（改号 / 数据退回(data_entry)重审后）且未被数据锁、且**非报告退回** → 按最新数据重生成
-  //    （旧版入历史，新版未送审，文员审阅后重新送审）。
-  // **报告退回(report_rework)不重生成**——退回的意义是「在原报告上修改」，文员进编辑器改后重新送审。
-  // ref 按 `id:report_id:stale` 去重：每阶段只尝试一次，避免循环；新阶段(report_id 变)会再触发。
-  const autoGenAttempted = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!usableCoverId()) return;
-    const keyOf = (r: ReportRequisitionRow) => `${r.id}:${r.report_id ?? 'new'}:${r.stale ? 's' : ''}`;
-    const todo = requisitions.filter(r =>
-      !r.data_rework_open && !r.report_rework && (!r.report_id || r.stale)
-      && !autoGenAttempted.current.has(keyOf(r)) && buildAssignments(r).length > 0);
-    if (!todo.length) return;
-    todo.forEach(r => autoGenAttempted.current.add(keyOf(r)));
-    generateReqs(todo, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requisitions, coverId, coverTemplates]);
+  // 自动生成已停用：每份报告均须先由文员确认范围和项目模板。
 
   // 报告历史版本（退回修改→重新生成会保留旧版）
   const [historyFor, setHistoryFor] = useState<ReportRequisitionRow | null>(null);
@@ -358,6 +486,7 @@ export default function ReportWorkbench() {
 
   // 回传递归智能（接口 1.4）
   const [delivering, setDelivering] = useState<number | null>(null);
+  const [withdrawing, setWithdrawing] = useState<number | null>(null);
   const deliverRequisition = async (req: ReportRequisitionRow) => {
     setDelivering(req.id);
     try {
@@ -378,6 +507,26 @@ export default function ReportWorkbench() {
       message.success(`已送审 ${todo.length} 份报告`);
       loadRequisitions();
     } finally { setDelivering(null); }
+  };
+  const canWithdrawDelivery = (req: ReportRequisitionRow) =>
+    canEditReports
+    && req.delivery_status === 'sent'
+    && req.external_status !== 'external_approved'
+    && req.external_status !== 'external_revision'
+    && !!req.report_id;
+  const withdrawDelivery = async (req: ReportRequisitionRow) => {
+    setWithdrawing(req.id);
+    try {
+      const { data } = await axios.post(`${API}/external/requisitions/${req.id}/withdraw-delivery`);
+      message.success(`报告 ${req.report_number} 已撤回送审`);
+      if (data?.warning) message.info(data.warning, 6);
+      loadRequisitions();
+      loadReports();
+    } catch (e: any) {
+      message.error('撤回失败：' + (e.response?.data?.error || e.message));
+    } finally {
+      setWithdrawing(null);
+    }
   };
 
   // 订单信息面板：payload.meta（接口 1.1 扩展字段）有值的才显示；日期截断、长文本整行
@@ -471,13 +620,19 @@ export default function ReportWorkbench() {
                 </div>
               </div>
               <Space wrap>
-                <Button type="primary" icon={<FileTextOutlined />} loading={openingCover}
-                  disabled={!coverId || coverLocked} onClick={openCoverDraft}>
-                  编辑首页
+                <Button type="primary" ghost={!canEditReports} icon={canEditReports ? <FileTextOutlined /> : <EyeOutlined />} loading={openingCover}
+                  disabled={!coverId || (canEditReports && coverLocked)}
+                  onClick={canEditReports
+                    ? openCoverDraft
+                    : () => {
+                        const template = coverTemplates.find(t => t.id === coverId);
+                        if (coverId) setPreviewCover({ id: coverId, name: template?.name || `首页模板 #${coverId}` });
+                      }}>
+                  {canEditReports ? '编辑首页' : '预览首页模板'}
                 </Button>
                 <Tooltip title="不打开编辑器，直接把当前首页应用到本单已取号的报告：已生成的立即套用，尚未生成的会在生成时自动套用当前首页。">
                   <Button icon={<SettingOutlined />} loading={applyingCover}
-                    disabled={!coverId || coverLocked || requisitions.length === 0} onClick={applyCoverToRequisitions}>
+                    disabled={!canEditReports || !coverId || coverLocked || requisitions.length === 0} onClick={applyCoverToRequisitions}>
                     应用到已取号报告
                   </Button>
                 </Tooltip>
@@ -499,29 +654,50 @@ export default function ReportWorkbench() {
                 <Space size={6}>
                   <Button size="small" icon={<ReloadOutlined />} onClick={loadRequisitions}>刷新</Button>
                   <Button size="small" type="primary" icon={<SendOutlined />} loading={delivering === -1}
-                    disabled={!requisitions.some(canSend)}
+                    disabled={!canEditReports || !requisitions.some(canSend)}
                     onClick={() => deliverAll(requisitions)}>全部送审</Button>
                 </Space>
               }>
               <div style={{ fontSize: 12, color: '#999', marginBottom: 10 }}>
-                报告由系统在收到报告编号后自动生成。每条＝一份报告，点行可展开看包含的样品×测试项目。文员审阅后「送审」即把 PDF 回传外部系统。改样品/测试项目请进「编辑」。
+                请先展开每个报告编号，确认要纳入的样品和项目，并为每个纳入项目选择一份已生效项目模板；确认后才会生成并进入编辑。外部下发范围仅作为默认勾选，可改选本订单内任意已审核项目。
               </div>
               {requisitions.map(req => {
                 const generated = req.status === 'generated' && !!req.report_id;
                 const locked = !!req.data_rework_open;
+                const editable = canEditReports && canSend(req);
                 const st = reqStatus(req);
                 const expanded = expandedReqs.has(req.id);
                 // 展开内容：按样品分组列出 样品·测试项目（来自 match_result，只读）
-                const bySample = new Map<string, { project: string; matched: boolean }[]>();
+                const bySample = new Map<string, { label: string; entries: ReqMatchEntry[] }>();
                 for (const m of (req.match_result || [])) {
-                  const arr = bySample.get(m.sample_name) || [];
-                  arr.push({ project: m.project_name, matched: m.status === 'matched' });
-                  bySample.set(m.sample_name, arr);
+                  // 名称可能重复，优先按外部样品 id 分组，避免勾选一个样品误影响同名样品。
+                  const key = m.sample_external_id || m.sample_name;
+                  const group = bySample.get(key) || { label: m.sample_name, entries: [] };
+                  group.entries.push(m);
+                  bySample.set(key, group);
                 }
+                const query = (scopeSearch[req.id] || '').trim().toLowerCase();
+                const visibleGroups = Array.from(bySample.entries()).map(([sampleKey, group]) => {
+                  const sampleHit = group.label.toLowerCase().includes(query);
+                  const entries = !query || sampleHit ? group.entries : group.entries.filter(entry =>
+                    entry.project_name.toLowerCase().includes(query));
+                  return { sampleKey, group: { ...group, entries } };
+                }).filter(({ group }) => group.entries.length);
                 return (
-                  <div key={req.id} style={{ border: '1px solid #eef1f6', borderRadius: 8, marginBottom: 10, overflow: 'hidden' }}>
+                  <div
+                    key={req.id}
+                    style={{ border: '1px solid #eef1f6', borderRadius: 8, marginBottom: 10, overflow: 'hidden' }}
+                  >
                     {/* 收起行：编号 + 状态 + 样品（；） + 操作 */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#fafcff', flexWrap: 'wrap' }}>
+                    <div
+                      className={generated ? 'clickable-report-entry' : undefined}
+                      onClick={(event) => {
+                        if (generated && !isInteractiveRowTarget(event.target)) {
+                          openGeneratedReport(req);
+                        }
+                      }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#fafcff', flexWrap: 'wrap' }}
+                    >
                       <Button type="text" size="small" style={{ padding: '0 4px' }} onClick={() => toggleReq(req.id)}>
                         {expanded ? <DownOutlined /> : <RightOutlined />}
                       </Button>
@@ -531,19 +707,16 @@ export default function ReportWorkbench() {
                         样品：{reqSampleSummary(req)}
                       </span>
                       {generated ? (
-                        <Space size={4}>
+                        <div className="row-action-strip">
                           {req.delivery_status === 'sent' && !req.report_rework && !req.stale && !locked &&
                             <Tag color="cyan" style={{ margin: '0 2px 0 0', fontSize: 11 }}>已送外部·待回执</Tag>}
-                          {/* 主操作：可送审→编辑+送审；否则（已送审/锁定 等终态）→ 只读「查看」 */}
-                          {canSend(req) ? (
-                            <>
-                              <Button size="small" icon={<EditOutlined />} onClick={() => navigate(`/report/edit?id=${req.report_id}`)}>编辑</Button>
-                              <Button size="small" type="primary" icon={<SendOutlined />} loading={delivering === req.id}
-                                onClick={() => deliverRequisition(req)}>送审</Button>
-                            </>
+                          <span className="row-action-cluster">
+                          {/* 内容操作：编辑/查看、历史、下载始终归为一组。 */}
+                          {editable ? (
+                            <Button size="small" icon={<EditOutlined />} onClick={() => navigate(`/report/edit?id=${req.report_id}`)}>编辑</Button>
                           ) : (
                             <Button size="small" type="primary" ghost icon={<EyeOutlined />}
-                              onClick={() => navigate(`/report/edit?id=${req.report_id}&readonly=1`)}>查看</Button>
+                              onClick={() => openGeneratedReport(req)}>查看</Button>
                           )}
                           {/* 次操作：历史 / PDF —— 收敛成低调的图标按钮，避免一排大按钮太挤 */}
                           <Tooltip title="历史版本（各版本只读查看/下载 PDF）">
@@ -551,11 +724,36 @@ export default function ReportWorkbench() {
                           <Tooltip title="下载本报告 PDF">
                             <Button size="small" type="text" icon={<DownloadOutlined />}
                               onClick={() => window.open(`${API}/reports/${req.report_id}/pdf`, '_blank')} /></Tooltip>
-                        </Space>
+                          </span>
+                          {/* 流程操作独立在右侧，视觉上与内容编辑区分。 */}
+                          {(editable || canWithdrawDelivery(req)) && (
+                            <span className="row-workflow-cluster">
+                              {editable && (
+                                <Button size="small" type="primary" icon={<SendOutlined />} loading={delivering === req.id}
+                                  onClick={() => deliverRequisition(req)}>送审</Button>
+                              )}
+                              {canWithdrawDelivery(req) && (
+                                <Popconfirm
+                                  title="确认撤回送审？"
+                                  description="撤回后报告将恢复为待送审，可继续编辑、重新生成或再次送审。"
+                                  okText="撤回"
+                                  cancelText="取消"
+                                  onConfirm={() => withdrawDelivery(req)}
+                                >
+                                  <Button size="small" icon={<RollbackOutlined />}
+                                    loading={withdrawing === req.id}>撤回送审</Button>
+                                </Popconfirm>
+                              )}
+                            </span>
+                          )}
+                        </div>
                       ) : (
-                        <span style={{ fontSize: 12, color: '#d48806' }}>
-                          {buildAssignments(req).length ? '生成中…' : '待原始记录审核通过后自动生成'}
-                        </span>
+                        <Button size="small" type="primary" icon={<SettingOutlined />}
+                          disabled={!canEditReports || locked || !((req.match_result || []).some(m => m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed')))}
+                          loading={configuringReq === req.id}
+                          onClick={() => { if (!expanded) toggleReq(req.id); else confirmConfigAndGenerate(req); }}>
+                          {expanded ? '确认配置并生成' : '配置报告'}
+                        </Button>
                       )}
                     </div>
                     {locked && (
@@ -577,20 +775,149 @@ export default function ReportWorkbench() {
                     {expanded && (
                       <div style={{ padding: '6px 12px 8px', borderTop: '1px solid #eef2f8' }}>
                         {req.check_code && <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>检验码 {req.check_code}{req.record_state ? ` · 外部状态：${req.record_state}` : ''}</div>}
-                        {bySample.size === 0 && <div style={{ fontSize: 12, color: '#999' }}>该报告范围为空</div>}
-                        {Array.from(bySample.entries()).map(([sample, projs]) => (
-                          <div key={sample} style={{ marginBottom: 4 }}>
-                            <div style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>{sample}</div>
-                            {projs.map((p, i) => (
-                              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0 3px 8px', fontSize: 12, borderBottom: '1px solid #f5f6f8' }}>
-                                <span style={{ flex: 1, color: '#333' }}>{p.project}</span>
-                                {p.matched
-                                  ? <Tag color="green" style={{ margin: 0 }}>已包含</Tag>
-                                  : <Tag color="orange" style={{ margin: 0 }}>未匹配，待编辑补充</Tag>}
-                              </div>
-                            ))}
+                        <Input.Search
+                          allowClear
+                          value={scopeSearch[req.id] || ''}
+                          onChange={event => setScopeSearch(prev => ({ ...prev, [req.id]: event.target.value }))}
+                          placeholder="搜索样品或测试项目"
+                          style={{ maxWidth: 420, margin: '2px 0 8px' }}
+                        />
+                        {bySample.size === 0 && <div style={{ fontSize: 12, color: '#999' }}>本订单暂无样品或测试项目</div>}
+                        {bySample.size > 0 && visibleGroups.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未找到匹配的样品或测试项目" />}
+                        <div style={{
+                          // 大订单只滚动候选列表，避免整张报告卡片被样品/项目撑得过高。
+                          maxHeight: 'min(50vh, 420px)', overflowY: 'auto', overscrollBehavior: 'contain',
+                          scrollbarGutter: 'stable', paddingRight: 4,
+                        }}>
+                        {visibleGroups.map(({ sampleKey, group }) => {
+                          const entries = group.entries;
+                          const collapseKey = `${req.id}:${sampleKey}`;
+                          const collapsed = collapsedSamples.has(collapseKey);
+                          const selectable = entries.filter(entry => entry.status === 'matched'
+                            && entry.assignments.some(a => a.record_data_status === 'reviewed'));
+                          const selectedCount = selectable.filter(entry => scopeIsEnabled(req, entry.scope_key)).length;
+                          const allSelected = selectable.length > 0 && selectedCount === selectable.length;
+                          const partiallySelected = selectedCount > 0 && !allSelected;
+                          const setSampleEnabled = (enabled: boolean) => {
+                            setScopeEnabled(prev => {
+                              const next = { ...prev };
+                              selectable.forEach(entry => { next[`${req.id}:${entry.scope_key}`] = enabled; });
+                              return next;
+                            });
+                            setRequisitions(prev => prev.map(row => row.id === req.id
+                              ? { ...row, generation_configured_at: null, generation_configured_by: null }
+                              : row));
+                          };
+                          return (
+                          <div key={sampleKey} style={{ marginBottom: 4 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#555', fontWeight: 500, padding: '2px 0' }}>
+                              <Tooltip title={selectable.length ? `选择样品“${group.label}”的全部可用项目` : '该样品暂无可纳入的已审核项目'}>
+                                <Checkbox
+                                  aria-label={`选择样品 ${group.label}`}
+                                  checked={allSelected}
+                                  indeterminate={partiallySelected}
+                                  disabled={!canEditReports || !selectable.length}
+                                  onChange={(event) => setSampleEnabled(event.target.checked)}
+                                />
+                              </Tooltip>
+                              <span onClick={() => setCollapsedSamples(prev => {
+                                const next = new Set(prev); if (next.has(collapseKey)) next.delete(collapseKey); else next.add(collapseKey); return next;
+                              })} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                                {collapsed ? '▸' : '▾'}　{group.label}
+                              </span>
+                              <span style={{ color: '#999', fontWeight: 400 }}>（{selectedCount}/{selectable.length || entries.length}）</span>
+                            </div>
+                            {!collapsed && entries.map(entry => {
+                              const assignment = entry.assignments.find(a => a.record_data_status === 'reviewed')
+                                || entry.assignments[0];
+                              const candidates = assignment?.project_template_candidates || [];
+                              const savingKey = `${req.id}:${entry.scope_key}:${assignment?.record_data_id}`;
+                              const selectedCandidate = candidates.find(c => c.id === assignment?.project_template_id);
+                              const recommendedCandidate = assignment ? preferredCandidate(assignment) : undefined;
+                              const enabled = scopeIsEnabled(req, entry.scope_key);
+                              return (
+                                <div key={entry.scope_key} style={{
+                                  display: 'grid', opacity: enabled ? 1 : 0.55,
+                                  gridTemplateColumns: '28px minmax(130px, 1fr) minmax(260px, 420px) auto',
+                                  alignItems: 'center', gap: 8, padding: '6px 0 6px 8px',
+                                  fontSize: 12, borderBottom: '1px solid #f5f6f8',
+                                }}>
+                                  <Checkbox
+                                    aria-label={`选择项目 ${entry.project_name}`}
+                                    checked={enabled}
+                                    disabled={!canEditReports || entry.status !== 'matched' || !entry.assignments.some(a => a.record_data_status === 'reviewed')}
+                                    onChange={(event) => {
+                                      setScopeEnabled(prev => ({ ...prev, [`${req.id}:${entry.scope_key}`]: event.target.checked }));
+                                      setRequisitions(prev => prev.map(row => row.id === req.id
+                                        ? { ...row, generation_configured_at: null, generation_configured_by: null }
+                                        : row));
+                                    }}
+                                  />
+                                  <span style={{ color: '#333' }}>{entry.project_name}</span>
+                                  {entry.status === 'matched' && assignment ? (
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      optionFilterProp="label"
+                                      value={assignment.project_template_id ?? recommendedCandidate?.id}
+                                      placeholder={recommendedCandidate ? `推荐：${recommendedCandidate.name}` : (candidates.length ? '请选择项目模板' : '没有已生效的关联模板')}
+                                      // 已生成报告也允许先调整项目模板；点击「应用范围到本报告」后再统一重算明细页。
+                                      // 先前把 generated 且非 stale 的条目禁用，导致“调整范围”能勾选、模板却无法选择。
+                                      disabled={!canEditReports || !enabled || !candidates.length}
+                                      loading={selectingTemplate === savingKey}
+                                      onChange={(value) => saveTemplateSelection(req, entry, assignment.record_data_id, value)}
+                                      options={candidates.map(c => ({
+                                        value: c.id,
+                                        label: `${c.name} · v${c.version_no}${c.project_name ? ` · ${c.project_name}` : ''}${recommendedCandidate?.id === c.id ? '（同主机厂推荐）' : ''}`,
+                                      }))}
+                                    />
+                                  ) : (
+                                    <span style={{ color: '#d48806' }}>{entry.note || '未匹配原始记录'}</span>
+                                  )}
+                                  <Space size={4}>
+                                    {selectedCandidate && (
+                                      <Tooltip title="预览所选项目模板">
+                                        <Button size="small" type="text" icon={<EyeOutlined />}
+                                          onClick={() => setPreviewCover({ id: selectedCandidate.id, name: selectedCandidate.name })} />
+                                      </Tooltip>
+                                    )}
+                                    {entry.status === 'matched'
+                                      ? <Tag color={assignment?.project_template_id ? 'green' : 'orange'} style={{ margin: 0 }}>
+                                          {assignment?.project_template_id ? '已确认' : '待选择'}
+                                        </Tag>
+                                      : <Tag color="orange" style={{ margin: 0 }}>待补充</Tag>}
+                                  </Space>
+                                </div>
+                              );
+                            })}
                           </div>
-                        ))}
+                          );
+                        })}
+                        </div>
+                        {!generated && (
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 10 }}>
+                            <Button type="primary" icon={<SettingOutlined />} loading={configuringReq === req.id}
+                              disabled={!canEditReports || locked}
+                              onClick={() => confirmConfigAndGenerate(req)}>
+                              确认配置并生成报告
+                            </Button>
+                          </div>
+                        )}
+                        {generated && (
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 10 }}>
+                            <Popconfirm
+                              title="应用新的样品/项目范围？"
+                              description="会按新范围重算报告；项目明细页的手动文字修改将重置，首页结构、图片和样式保留。"
+                              okText="应用"
+                              cancelText="取消"
+                              onConfirm={() => applyGeneratedScope(req)}
+                            >
+                              <Button type="primary" icon={<SettingOutlined />} loading={rescopingReq === req.id} disabled={!canEditReports || locked}>
+                                应用范围到本报告
+                              </Button>
+                            </Popconfirm>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -600,7 +927,7 @@ export default function ReportWorkbench() {
           ) : (
             <Alert type="info" showIcon style={{ marginBottom: 12 }}
               message="尚未收到报告编号"
-              description="报告编号与范围由外部系统下发。收到后系统会按已审核通过的原始记录自动生成报告，这里列出每份报告，文员直接「编辑」「送审」。在此之前可先编辑首页、查看录入进度与只读原始记录。" />
+              description="报告编号与范围由外部系统下发。收到后系统会匹配已审核通过的原始记录；唯一项目模板可直接采用，多模板时由文员确认后生成。在此之前可先编辑首页、查看录入进度与只读原始记录。" />
           )}
 
           {/* 报告退回(scope=report)的退回意见与处理已就近在每份报告条目内；不再单设底部「外部返工」面板。 */}
@@ -674,7 +1001,10 @@ export default function ReportWorkbench() {
                         {v.edited && <Tag color="blue" style={{ margin: 0 }}>已编辑</Tag>}
                         <div style={{ flex: 1 }} />
                         <Button size="small" type="primary" ghost icon={<DownloadOutlined />}
-                          onClick={() => window.open(`${API}/reports/${v.id}/pdf`, '_blank')}>查看此版本 PDF</Button>
+                          onClick={() => setPreviewReport({
+                            id: v.id,
+                            name: `${v.report_no || historyFor?.report_number || `报告 #${v.id}`} · v${v.version}`,
+                          })}>查看此版本 PDF</Button>
                       </div>
                       <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '5px 12px', fontSize: 12, alignItems: 'baseline' }}>
                         <span style={{ color: '#8a93a3' }}>报告编号</span><span style={{ fontFamily: 'monospace', color: '#1f2733' }}>{v.report_no || `#${v.id}`}</span>
@@ -687,6 +1017,21 @@ export default function ReportWorkbench() {
               </div>
             )}
       </Drawer>
+      <TemplatePdfPreviewModal
+        open={!!previewCover}
+        kind="report"
+        templateId={previewCover?.id ?? 0}
+        templateName={previewCover?.name || ''}
+        onClose={() => setPreviewCover(null)}
+      />
+      <PdfPreviewModal
+        open={!!previewReport}
+        title={`预览 · ${previewReport?.name || ''}`}
+        reloadKey={previewReport?.id}
+        loadPdf={() => getGeneratedReportPreviewPdf(previewReport!.id)}
+        downloadName={`${previewReport?.name || '报告'}.pdf`}
+        onClose={() => setPreviewReport(null)}
+      />
     </div>
   );
 }

@@ -5,6 +5,20 @@
 export interface TestInfo {
   name: string;
   standard?: string;
+  main_engine_factory?: string;
+  test_method?: string;
+  test_condition?: string;
+  sampling_mode?: string;
+  sampling_requirement?: string;
+  limit_name?: string;
+  limit_content?: string;
+  leader?: string;
+  start_date?: string;
+  end_date?: string;
+  remark?: string;
+  sample_description?: string;
+  test_remark?: string;
+  material_uploader?: string;
   /** 旧单值字段（兼容存量数据）；新数据统一用 linked_template_ids */
   linked_template_id?: number | null;
   /** 一个测试项目可关联一个或多个原始记录模板 */
@@ -19,14 +33,42 @@ export function normalizeLinkedIds(t: TestInfo): number[] {
 export interface Sample {
   id: string;
   name: string;
+  /** 接口 SampleSortNo：业务上展示为“样品编号”。 */
+  sort_no?: string;
+  barcode?: string;
+  model?: string;
   test_infos: TestInfo[];
+}
+
+/** 接口委托单的订单级信息，保存在 work_orders.payload.meta。 */
+export interface OrderMeta {
+  company_address?: string;
+  send_date?: string;
+  time_required?: string;
+  test_time_required?: string;
+  report_deadline?: string;
+  authorites?: string;
+  english_authorites?: string;
+  authorites_address?: string;
+  english_authorites_address?: string;
+  remark?: string;
+  sale_name?: string;
+  job_no?: string;
+  buyer?: string;
+  status?: string;
+  is_chinese_report?: boolean;
+  is_english_report?: boolean;
+  is_paper_report?: boolean;
+  report_count?: string;
+  other_report_count?: string;
+  complete_way?: string;
 }
 export interface WorkOrder {
   order_no: string;
   customer_name: string;
   received_at: string;
   source?: string;
-  payload: { samples: Sample[] };
+  payload: { samples: Sample[]; meta?: OrderMeta };
 }
 export interface TemplateItem {
   id: number; name: string; version: number;
@@ -35,6 +77,11 @@ export interface TemplateItem {
 }
 export interface RecordRow {
   id: number;
+  /** 多测试方法联合录入批次；存在时提交、撤回和审核必须按整个批次执行。 */
+  record_batch_id?: number | null;
+  cancelled_by_name?: string | null;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
   template_id: number;
   order_no?: string | null;
   sample_external_id?: string | null;
@@ -46,6 +93,8 @@ export interface RecordRow {
   audit_status?: 'draft' | 'pending' | 'reviewed' | 'rejected' | null;
   current_version?: number;
   reject_note?: string | null;
+  submitted_by_name?: string | null;
+  submitted_by_job_no?: string | null;
   updated_at?: string;
   submitted_at: string;
 }
@@ -70,7 +119,11 @@ export interface RowVm {
   order_no: string;
   sample_id: string;
   sample_name: string;
+  sample_sort_no?: string;
+  sample_barcode?: string;
+  sample_model?: string;
   test_name: string;
+  test_info: TestInfo;
   /** 同一测试项目的所有关联行共享的分组键（sample_id + test_name），用于表格 rowSpan */
   test_key: string;
   standard?: string;
@@ -122,7 +175,11 @@ export function buildOrderRows(
         order_no: order.order_no,
         sample_id: s.id,
         sample_name: s.name,
+        sample_sort_no: s.sort_no,
+        sample_barcode: s.barcode,
+        sample_model: s.model,
         test_name: t.name,
+        test_info: t,
         test_key,
         standard: t.standard,
         test_linked_ids: ids,
@@ -204,6 +261,15 @@ export interface OrderSearchCriteria {
   tester?: string;                          // 主检人
   reviewer?: string;                        // 审核人
 }
+
+/** 录入与报告订单列表共用的排序口径。 */
+export type OrderSortKey =
+  | 'received_desc'
+  | 'received_asc'
+  | 'priority'
+  | 'progress_asc'
+  | 'order_asc'
+  | 'order_desc';
 
 export function isOrderSearchActive(c: OrderSearchCriteria): boolean {
   return !!(c.keyword?.trim() || c.status || c.tester?.trim() || c.reviewer?.trim()

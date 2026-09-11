@@ -24,8 +24,9 @@ export default function EditorSplit({ left, right }: { left: React.ReactNode; ri
   };
 
   return (
-    <div ref={wrapRef} style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-      <div style={{ width: `${pct}%`, minWidth: 0, overflow: 'auto' }}>{left}</div>
+    <div ref={wrapRef} data-editor-split-root="true" style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      {/* 左栏保留自身滚动作为兜底；字段编辑器内部主栏也有滚动，均以 minHeight:0 保证不被内容撑开。 */}
+      <div style={{ width: `${pct}%`, minWidth: 0, minHeight: 0, overflow: 'auto' }}>{left}</div>
       <div
         title="拖动调整左右宽度，双击复位"
         onPointerDown={(e) => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); setDragging(true); }}
@@ -41,7 +42,7 @@ export default function EditorSplit({ left, right }: { left: React.ReactNode; ri
         onMouseEnter={(e) => { if (!dragging) (e.currentTarget as HTMLElement).style.background = 'rgba(19,102,217,0.18)'; }}
         onMouseLeave={(e) => { if (!dragging) (e.currentTarget as HTMLElement).style.background = '#e8ecf3'; }}
       />
-      <div style={{ flex: 1, minWidth: 0 }}>{right}</div>
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>{right}</div>
     </div>
   );
 }

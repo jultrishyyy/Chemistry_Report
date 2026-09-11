@@ -51,6 +51,8 @@ async function main() {
         cover_template_id: r.cover_template_id,
         project_assignments: assignments,
         mock_context: mockContext,
+        // 保留生成时由接口 1.2 冻结的页眉页脚；生产环境绝不能在刷新时改用示例值。
+        report_meta: r.content_doc?.cover?.ctx?.report_meta || null,
         cover_groups_override: coverGroups,
       });
       const docJson = built.contentDoc ? JSON.stringify(built.contentDoc) : null;

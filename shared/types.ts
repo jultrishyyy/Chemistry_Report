@@ -14,6 +14,13 @@ export type FieldSemanticRole =
   | 'reviewer'
   | 'reviewer_date';
 
+export type NumericRoundingRule = {
+  /** half_even＝四舍六入五成双；multiple_2/5＝修约到最接近的对应倍数。 */
+  mode: 'none' | 'half_up' | 'half_even' | 'truncate' | 'ceil' | 'floor' | 'multiple_2' | 'multiple_5';
+  /** 除倍数修约外，修约保留的小数位数。 */
+  digits?: number;
+};
+
 /** data_matrix 录入值 */
 export interface DataMatrixValue {
   sample_ids: string[];
@@ -34,6 +41,12 @@ export interface DataMatrixValue {
   summary_row_inputs?: Record<string, any>;
   /** 录入型汇总列的值（每个样品行一格）：key = `${summary col id}__${sample id}`。聚合/公式型不经过这里。 */
   sumcol_inputs?: Record<string, any>;
+  /** 公式结果的人工修正；模板公式保留，修正值作为本条记录的最终值参与后续公式和 PDF。 */
+  formula_overrides?: Record<string, {
+    value: string | number;
+    calculated_value?: string | number | null;
+    confirmed_at?: string;
+  }>;
 }
 
 export interface MatrixParameterDef {
@@ -192,11 +205,15 @@ export interface MatrixSummaryColDef {
 export interface ExcelImportMapping {
   enabled: boolean;
   sheet_name: string;
+  /** 新向导只要求可选Sheet；旧来源坐标保留用于兼容预览建议。 */
+  mode?: 'auto';
   /** 跳过的表头行数（0-based 起始索引）：2 = 数据从第 3 行开始 */
   data_start_row?: number;
   /** 数据从第几列开始（0=A 列）。数据块模式：从 (data_start_row, data_start_col) 起整块导入，
    *  行名/列头不读 Excel（由模板配置）。 */
   data_start_col?: number;
+  /** free_grid：Excel 左上角数据对应的目标自由表格格子，键 = `${rowId}::${colId}`。 */
+  target_cell?: string;
   /** @deprecated 旧"逐列映射"模式遗留，UI 已不再暴露 */
   column_mapping?: Record<number, string>;
   /** @deprecated 旧"行名列"模式遗留，UI 已不再暴露 */
@@ -329,19 +346,47 @@ export interface FieldDefinition {
     | 'data_matrix'
     | 'free_grid'                 // F0 统一自由网格：所有格子平等、任意合并（含表头）；每格可标 header(表头)/input(录入格)；录入值存 raw_data[code] 的 `${rowId}::${colId}` 键。结构复用 free_table
     | 'spacer'                    // 版式·间隔：纯排版的空白块（在字段/分区之间留白，无数据），渲染成 #v(高度)
+    | 'static_content'            // 模板静态说明：文字 / 图片 / 表格，原位只读显示，不写入 record_data
+    | 'record_conclusion'         // 原始记录：结构化报告结论（整体项目或多个子项目）
     | 'report_conclusion_table'   // 报告首页：检测结论汇总表（行 = 项目，自动展开）
     | 'report_result_table'       // 项目报告：检测结果表（画布 + 每格 binding）
     | 'report_equipment_table'    // 项目报告：设备信息表（自动从原始记录 device_ref 抓）
     | 'report_image_gallery'      // 项目报告：图片表（自动从原始记录 image_phase 抓）
     | 'report_photo_table'        // 报告首页：原样照片表（文员直接上传、无记录绑定；加粗标签+说明行 + 带表头图片表）
-    | 'report_sample_table';      // 报告首页：样品信息表（多样品时自动从委托单样品 SampleSortNo/SampleName/Model 列出）
+    | 'report_sample_table'       // 报告首页：样品信息表（多样品时自动从委托单样品 SampleSortNo/SampleName/Model 列出）
+    | 'report_sample_description_table'; // 报告首页：唯一性编号 + 样品描述两列表，可在实例中转为自由表格修改
   unit?: string;
   required?: boolean;
   default_value?: any;
+  /** 日期/时间显示精度；date、系统审计日期及 daterange 共用。缺省 day。 */
+  date_precision?: 'day' | 'hour' | 'minute';
+  /** 日期年月日分隔符；缺省 '-'，可改为 '/'。 */
+  date_separator?: '-' | '/';
   options?: string[];
   allow_custom?: boolean;      // select/checkbox 允许工程师自定义输入"其他"
+  /**
+   * 测试设备字段配置。设备选项始终引用设备库，不能退化为自由文本：
+   * - preset_asset_codes 只是模板推荐的常用设备，不会自动写入检测数据；
+   * - allow_library_search=true 时，录入人可从完整设备库选择常用项之外的设备；
+   * - 最终 raw_data 仍保存 asset_code 字符串数组，兼容全部存量数据与报告逻辑。
+   */
+  device_ref_config?: {
+    preset_asset_codes?: string[];
+    selection_mode?: 'single' | 'multiple';
+    allow_library_search?: boolean;
+  };
   variants?: VariantDef[];     // variant_list 字段的变体定义
   matrix?: DataMatrixConfig;   // data_matrix
+  /** 存量矩阵迁移的只读兼容索引；编辑与录入均使用 free_table，不再使用旧矩阵结构。 */
+  legacy_matrix?: {
+    version: 1;
+    config: DataMatrixConfig;
+    /** 旧展平键（不含字段编码前缀）→ 自由表格稳定格子键。 */
+    keys: Record<string, string>;
+    sample_refs: string[];
+    parameter_headers: Record<string, string>;
+    sample_headers: Record<string, string>;
+  };
   formula?: Formula;
   allow_override?: boolean;
   store_in_record?: boolean;
@@ -353,6 +398,13 @@ export interface FieldDefinition {
   hide_label?: boolean;
   /** 主检/审核等语义，供 UI 与报告映射 */
   semantic_role?: FieldSemanticRole;
+  /**
+   * 结论模块中的字段职责。字段本身仍是普通 text/textarea/select 等类型，因而可独立配置
+   * 必填、默认值、选项和版式；本标记只负责把值稳定地传给报告。
+   */
+  conclusion_role?: 'project_name' | 'item_name' | 'judgment_requirement' | 'conclusion';
+  /** 数据归属：record=本方法记录（缺省）；batch_shared=同一项目录入批次的公共数据，只保存一份并供多份记录共用。 */
+  data_scope?: 'record' | 'batch_shared';
   /** 图片字段：拍摄阶段（用于"图片记录"分区按阶段分组渲染） */
   image_phase?: 'before' | 'during' | 'after' | 'other';
   /** 图片字段：是否允许上传多张（默认 true） */
@@ -375,7 +427,8 @@ export interface FieldDefinition {
   image_photos?: any[];
   /**
    * 【项目报告模板】图片字段的绑定来源：关联原始记录里某个 image 字段的 code；报告渲染期照此从
-   * ctx.record_raw_data 取照片（一个图片字段＝一个图位＝绑定一个原始记录图片来源）。未设＝回退按本字段 code 取。
+   * ctx.record_raw_data 取照片。新记录会用该 code 定位来源图片分区并整体读取动态集合；
+   * 旧记录仍按“一个字段＝一个图位”读取。未设＝回退按本字段 code 取。
    * 原始记录模板的 image 字段不用它（照片直接来自 record_data[code]）。
    */
   image_source_code?: string;
@@ -395,6 +448,18 @@ export interface FieldDefinition {
   style?: StyleOverride;
   /** spacer 字段：空白高度（cm/pt/mm/em，裸数字按 pt）。缺省 0.5cm。固定值——页内留白用。 */
   spacer_height?: string;
+  /** 模板静态说明内容；随模板版本快照冻结，不属于本次录入数据。 */
+  static_content?: Array<{ id: string; kind: 'text' | 'image'; text?: string; name?: string; url?: string; rel_path?: string; mime_type?: string; size_bytes?: number; /** both=PDF+录入页，form=仅录入页，pdf=仅PDF */ display?: 'both' | 'form' | 'pdf'; width_cm?: number; height_cm?: number }>;
+  /** 静态说明内部各内容块的上下距离（pt）；字段整体的段前后仍由字段/分区格式控制。 */
+  static_content_gap_pt?: number;
+  /** 新版静态说明：一个字段只承载一种内容；static_content 仅保留作旧模板兼容。 */
+  static_kind?: 'text' | 'images' | 'table';
+  static_display?: 'both' | 'form' | 'pdf';
+  static_text?: string;
+  static_images?: Array<{ id: string; title?: string; name?: string; url?: string; rel_path?: string; mime_type?: string; size_bytes?: number; display_width_cm?: number; display_height_cm?: number; display_rotation?: number }>;
+  /** 模板固定说明表格：结构与自由表格相同，但所有单元格均直接保存模板文字，不写入 record_data。 */
+  static_table?: FieldDefinition['free_table'];
+  static_layout?: { font?: string; font_size?: number; line_gap_pt?: number; paragraph_gap_pt?: number; first_line_indent_em?: number; before_pt?: number; after_pt?: number; image_gap_pt?: number; /** 下列图片尺寸字段仅兼容已保存旧模板；新版统一按页面宽度等比显示。 */ image_size_mode?: 'fit_width' | 'fixed'; image_width_cm?: number; image_height_cm?: number; image_cols?: number };
   /** 强制分页：该字段前插 #pagebreak()，使本字段从新的一页开始（报告编辑器「强制分页」按钮）。 */
   page_break_before?: boolean;
   /** 签名栏：渲染成「标签 ＿＿＿＿」下划线签名格（编制/审核/批准/签发）。同组多个并排成等分行。值（签名）在线上居中。 */
@@ -409,6 +474,8 @@ export interface FieldDefinition {
    * 缺省＝继承上层（区块/文档默认）。内联/矩阵/结果表单元格待后续期。
    */
   label_style?: StyleOverride;
+  /** Generated report only: common style override for titles inside an image grid. */
+  report_image_title_style?: StyleOverride;
   /**
    * 字段值的独立文字样式：字体/字号/加粗/斜体/颜色（P14·14.2）。
    * 仅普通 `#field` 生效，渲染为 #field 的 value_args。缺省＝继承上层。
@@ -420,7 +487,7 @@ export interface FieldDefinition {
   /**
    * 图/表的【备注信息】：填入后紧贴图片或表格【下方】以小字显示（如"注：试样取自批次 A"）。
    * 用于 data_matrix / image / report_result_table / report_equipment_table / report_image_gallery。
-   * 模板期填默认值；报告生成后文员可在实例编辑器（InstanceEditor）改本份报告的备注。空＝不显示。
+   * 模板期填默认值；原始记录录入和报告生成后均可在各自实例中覆盖。空＝不显示。
    */
   caption?: string;
   /**
@@ -439,10 +506,18 @@ export interface FieldDefinition {
    * 缺省（未设）＝表头加粗、内容常规、字体字号继承——与历史渲染一致。
    */
   table_style?: {
+    color?: string;
+    italic?: boolean;
     font?: string;
     font_size?: string;
     header_bold?: boolean;
     body_bold?: boolean;
+    /** 表头【单独】字体/字号（覆盖 font/font_size，仅作用于表头单元格）。未设＝跟随 font/font_size。 */
+    header_font?: string;
+    header_font_size?: string;
+    /** 表格内容【单独】字体/字号（覆盖 font/font_size，仅作用于内容单元格）。未设＝跟随 font/font_size。 */
+    body_font?: string;
+    body_font_size?: string;
     /** 表格内容水平对齐（left/center/right）。缺省＝center。目前样品信息表 / 检测结论表的「版式」用它统一整表对齐。 */
     cell_align?: 'left' | 'center' | 'right';
   };
@@ -451,6 +526,18 @@ export interface FieldDefinition {
    * 报告自动表（wrapFigure）与数据矩阵（embedDataMatrixTypst）的标题块 `below` 间距；缺省走各自默认。
    */
   label_gap?: string;
+  /**
+   * 表格【标题】文字（显示在表格左上方）——与「字段名」(`label`) 解耦：`label` 仅作编辑器里的字段显示名、不进渲染；
+   * 表格是否/显示什么标题由本字段决定：非空＝显示该标题、留空/undefined＝不显示。适用于走「标签」Tab 的表格类型
+   * （data_matrix / free_grid / report_result/equipment/sample/conclusion_table）。图片表/组仍用 label+hide_label。
+   */
+  table_title?: string;
+  /**
+   * 字段级【字段名↔字段值 距离】＝ #field 的 label_width（标签固定列宽/值起始位置）覆盖。
+   * 优先级：字段 label_width ＞ 分区 group.label_width ＞ 文档 theme_config.label_width ＞ none(紧贴)。
+   * undefined＝跟随分区/文档；'none'＝紧贴；长度(如 '8em')＝标签占该列宽、值右移对齐。仅竖排 #field 有效。
+   */
+  label_width?: string;
   /**
    * 字段级【字段间距】（pt/em/cm，普通文字字段的 #field 块上下间距）。缺省＝跟随【文档样式·字段间距】(line_gap)。
    * 仅对普通文字字段生效；图/表/图片不读此项（它们间距随文档字段间距）。
@@ -464,6 +551,50 @@ export interface FieldDefinition {
    * 渲染＝`${start}${separator}${end}`（separator 缺省 ' ~ '；缺一端只显另一端、都缺为空）。
    */
   date_range?: { start?: CellBinding; end?: CellBinding; separator?: string };
+  /**
+   * 原始记录专用的结构化结论分区。项目名称与结论项定义属于模板；录入值保存在
+   * raw_data[field.code]，可在单次录入中受控修改显示名称、判定要求、结论和实施状态。
+   * - overall：一条整体结论，结论项名称继承项目名称；
+   * - children：一个报告项目包含一到多个子项目结论，首页结论表按子项目展开。
+   */
+  record_conclusion?: {
+    mode: 'overall' | 'children';
+    project_code?: string;
+    project_name: string;
+    allow_project_name_override?: boolean;
+    /**
+     * 子项目模式下的总项目判定。总项目名称始终保留；判定要求和总结论可分别关闭。
+     * 首页检测结论表始终展开 items，不使用这里的总结论；这里主要用于原始记录留档和项目报告。
+     */
+    project_summary?: {
+      judgment_enabled?: boolean;
+      conclusion_enabled?: boolean;
+      judgment_requirement?: string;
+      judgment_options?: string[];
+      conclusion_options?: string[];
+      judgment_required?: boolean;
+      conclusion_required?: boolean;
+    };
+    /** true 时允许所有结论项均为未检测/不适用/无法检测，并完成审核归档；报告中不生成本项目。 */
+    allow_no_completed_items?: boolean;
+    items: Array<{
+      id: string;
+      code: string;
+      name_mode?: 'inherit_project' | 'custom';
+      name?: string;
+      allow_name_override?: boolean;
+      judgment_requirement?: string;
+      judgment_options?: string[];
+      conclusion_options?: string[];
+      /** 判定要求是否必填；缺省时兼容旧 required。 */
+      judgment_required?: boolean;
+      /** 结论是否必填；缺省时兼容旧 required。 */
+      conclusion_required?: boolean;
+      /** @deprecated 兼容旧模板；新模板分别使用 judgment_required / conclusion_required。 */
+      required?: boolean;
+      default_report_enabled?: boolean;
+    }>;
+  };
   /** report_conclusion_table 字段配置 */
   conclusion_table?: {
     /** P-Map-7：可含 'sample'（样品列，按样品 rowspan 分组）。 */
@@ -505,8 +636,11 @@ export interface FieldDefinition {
    * 置位后该字段忽略其类型专属渲染（绑定 / 自动展开 / 自动汇总），统一走 renderFreeTableTypst。
    */
   free_table?: {
-    columns: Array<{ id: string; label: string; width?: string }>;
-    rows: Array<{ id: string; height?: string }>;
+    /** Report-only height of the separate column-label row. */
+    header_height?: string;
+    row_height_mode?: 'track';
+    columns: Array<{ id: string; label: string; width?: string; style?: StyleOverride; /** 仅当前数据录入记录新增，不属于模板骨架。 */ entry_added?: true }>;
+    rows: Array<{ id: string; height?: string; /** 仅当前数据录入记录新增，不属于模板骨架。 */ entry_added?: true }>;
     /** 单元格值：键 = `${rowId}::${colId}`（仅主格；被合并覆盖的格不存键、渲染时跳过）。 */
     cells: Record<string, string>;
     /**
@@ -514,17 +648,43 @@ export interface FieldDefinition {
      * 让"自由编辑"也保留合并外观（如结果表汇总列跨所有数据行、汇总行跨整行）。被覆盖的格不渲染、可由
      * 调整跨度恢复成独立格。空/缺＝该格不合并。 */
     spans?: Record<string, { colspan?: number; rowspan?: number }>;
-    /** F0 free_grid：标记为「表头」的格（加粗 + 语义上跨页 repeat）。键 = `${rowId}::${colId}`。表头也是普通格、可自由合并。 */
+    /** F0 free_grid：标记为「表头」的格（加粗 + 语义上跨页 repeat）。键 = `${rowId}::${colId}`。录入时可按同一键覆盖显示名称；报告映射仍按稳定 cell_key。 */
     header_cells?: Record<string, true>;
-    /** F0 free_grid：标记为「录入格」的格（数据录入时可填）。值不写模板，存进 record_data.raw_data[字段code] 的 `${rowId}::${colId}` 键。未标记的格＝固定文字（模板 cells）。 */
+    /** 跨页时重复的顶部行数（1～N）。仅顶部连续行可重复，且合并格不得跨越表头与正文的边界。 */
+    repeat_header_rows?: number;
+    /** F0 free_grid：标记为「录入格」的格。未标为表头/录入/公式/绑定的普通格统一视为固定文字：模板 cells 是默认值，录入时可覆盖。 */
     input_cells?: Record<string, true>;
+    /** 记录侧样品带中的自动序号格。报告继承时绑定 record_sample_index，不复制模板或录入值里的“1”。 */
+    sample_index_cells?: Record<string, true>;
     /** F1 free_grid（报告侧）：每格绑定原始记录/接口取值。键 = `${rowId}::${colId}`。渲染时 `resolveBinding(ctx)` 优先于录入值/固定文字。 */
     cell_bindings?: Record<string, CellBinding>;
-    /** free_grid 样品带——把某一行/列按样品数自动展开成 N 份。`ref`＝作模板的行/列 id。
-     *  - 报告侧：`matrix_code`＝驱动样品数的原始记录矩阵，带内 `record_cell_sample`/`record_sample_label`/`record_sample_index` 绑定逐样品落地；
-     *  - 记录侧（`matrix_code` 缺省 = 自引用）：录入时工程师增减样品，带内格逐样品录入，值存 raw_data[code] 的 `${rowId}::${colId}::s${i}`、样品数存 `__sample_count__`。 */
+    /** 报告侧自由表格单位来源。与 cell_bindings 分离，避免表头文字映射覆盖括号单位。 */
+    cell_unit_bindings?: Record<string, CellBinding>;
+    /** 从原始记录自由表格拉取时记录来源字段，供后续映射直接定位原表格。 */
+    source_field_code?: string;
+    /** free_grid 样品带（旧·单带）——把某一行/列按样品数自动展开成 N 份。`ref`＝作模板的行/列 id。
+     *  ⚠️ 已被 `sample_bands`（多带）取代；仅保留供旧模板兼容读取（normalizeBands 会迁移成单元素 sample_bands）。新代码写 `sample_bands`。 */
     sample_band?: { axis: 'row' | 'col'; matrix_code?: string; ref: string };
-    /** F3 free_grid：每格公式（替代统计/汇总）。键 = `${rowId}::${colId}`；`Formula.sources` 用其它格的 `${rowId}::${colId}` 键引用（渲染时 execute）。样品带展开时：带内公式的 sources 逐样品落地、带外聚合公式的 sources 展开到全部样品。 */
+    /** free_grid 样品带（新·多带）——一张表可标多处试样区，每区把其成员行/列（`refs`，一个试样单元，通常 1 行/列，也可多行/列）按样品数展开成 N 份。
+     *  - 同一表内所有记录侧带须**同轴**（编辑器约束）；`axis` = 试样堆叠方向（row=各试样一行往下、col=各试样一列往右）。
+     *  - 报告侧：`matrix_code`＝驱动样品数的原始记录矩阵，带内 `record_cell_sample`/`record_sample_label`/`record_sample_index` 绑定逐样品落地；
+     *  - 记录侧（`matrix_code` 缺省 = 自引用）：录入时工程师逐带增减样品，值存 raw_data[code] 的 `${rowId}::${colId}::s${i}`、每带样品数存 `__sample_count__::${band.id}`（旧单带回退 `__sample_count__`）。
+     *  - 报告侧·由记录 free_grid 驱动（`source_field` 存在，项目模板从原始记录拉取时生成）：样品数从记录 free_grid 字段
+     *    `record_raw_data[source_field]['__sample_count__::${source_band_id}']` 派生；带内 `record_free_cell_sample` 绑定逐样品落地。
+     *    与 `matrix_code`（由 data_matrix 驱动）互斥——一条带只用其中一种来源。 */
+    sample_bands?: Array<{
+      id: string;
+      axis: 'row' | 'col';
+      refs: string[];
+      /** 试样区在另一轴上的精确范围。row 带时为列 id，col 带时为行 id；缺省代表旧模板的整行/整列带。 */
+      cross_refs?: string[];
+      matrix_code?: string;
+      source_field?: string;
+      source_band_id?: string;
+      /** 报告侧样品投影：缺省/all=全部试样；indices=仅展开指定试样序号（0-based，按录入顺序）。 */
+      sample_filter?: { mode: 'all' | 'indices'; indices?: number[] };
+    }>;
+    /** F3 free_grid：每格公式（替代统计/汇总）。键 = `${rowId}::${colId}`；同表来源沿用该键，跨表来源使用 `@free-grid:<fieldCode>:<cellKey>` 稳定引用（界面显示为“表名!A1”）。样品带展开时：带内公式的 sources 逐样品落地、带外聚合公式的 sources 展开到全部样品。 */
     cell_formulas?: Record<string, Formula>;
     /** 每格单位（表头/数值格显示为 `值（单位）`）。键 = `${rowId}::${colId}`。 */
     cell_units?: Record<string, string>;
@@ -532,11 +692,29 @@ export interface FieldDefinition {
     cell_types?: Record<string, 'text' | 'number' | 'choice'>;
     /** 每格「选择框」：录入时该格从这些选项里选（含表头做成可选项）。键 = `${rowId}::${colId}`。 */
     cell_options?: Record<string, string[]>;
+    /** 每格选择框是否允许录入“其他”自定义内容；自定义值以 `{ custom: string }` 保存到记录数据。 */
+    cell_option_allow_custom?: Record<string, true>;
+    /** 固定文字的显式标记（旧模板没有标记时，普通格也按固定文字兼容处理）：模板 cells 为默认值，录入时允许覆盖，并可被项目模板映射。 */
+    fixed_text_cells?: Record<string, true>;
     /** 每格单位「录入时可选」：录入时从这些选项里选单位（chosen 存 raw_data[code] 的 `${key}::__unit__`）。与固定 cell_units 二选一。 */
     cell_unit_options?: Record<string, string[]>;
-    /** 每格数字格式：`decimals`=保留 N 位小数；`scientific`=科学计数法（尾数 N 位小数，渲染 9.4×10¹）；`significant`=有效数字 N 位。键 = `${rowId}::${colId}`。 */
-    cell_number_fmt?: Record<string, { mode: 'decimals' | 'scientific' | 'significant'; digits: number }>;
+    /** 每格数字格式：`none`=明确不格式化（可覆盖整表默认）；`decimals`=保留 N 位小数；`scientific`=科学计数法；`significant`=有效数字。 */
+    cell_number_fmt?: Record<string, { mode: 'none' | 'decimals' | 'scientific' | 'significant'; digits: number }>;
+    /** 每格数值修约。修约改变实际数值并可参与下游公式；数字格式只控制显示，两者可同时配置。 */
+    cell_rounding?: Record<string, NumericRoundingRule>;
+    /** 每格文字格式覆盖。缺省继承 table_style 的表头/内容默认值；键 = `${rowId}::${colId}`。 */
+    cell_styles?: Record<string, Pick<StyleOverride, 'font' | 'size' | 'weight' | 'italic' | 'color' | 'align' | 'line_height'>>;
+    /** 整表数字格式：对所有数字格生效的默认格式（各格 cell_number_fmt 优先覆盖）。 */
+    default_number_fmt?: { mode: 'decimals' | 'scientific' | 'significant'; digits: number };
+    /** 整表默认修约规则；各格 cell_rounding 优先覆盖。 */
+    default_rounding?: NumericRoundingRule;
+    /** 原始记录自由表格的 Excel 文件导入配置。报告项目模板不使用此配置。 */
+    excel_import?: ExcelImportMapping;
+    /** 行高＝单元格上下留白（如 '5pt'）。空＝默认 10pt。与数据矩阵/结果表 cell_inset_y 同口径（数据矩阵不设时用 Typst 默认 5pt）。 */
+    cell_inset_y?: string;
   };
+  /** 仅报告实例编辑器使用：free_grid 解锁成当前值快照前保存的自动映射结构，供“恢复自动”还原。 */
+  instance_auto_free_table?: FieldDefinition['free_table'];
   /** report_result_table 字段配置（静态行列网格 + 可选试样带按试样自动展开） */
   result_table?: {
     /**
@@ -757,6 +935,15 @@ export interface FieldDefinition {
     /** 行高＝单元格上下留白（如 '10pt'）。空＝默认（6pt）。 */
     cell_inset_y?: string;
   };
+  /** 首页样品描述表：按本报告实际样品生成“唯一性编号 / 样品描述”两列。 */
+  sample_description_table?: {
+    unique_label?: string;
+    description_label?: string;
+    default_description?: string;
+    unique_width?: string;
+    description_width?: string;
+    cell_inset_y?: string;
+  };
 }
 
 export interface VariantDef {
@@ -808,6 +995,20 @@ export interface StyleOverride {
 export interface FieldGroup {
   id: string;
   label: string;
+  /** 已生成报告的连续正文覆盖；fields 保留原绑定快照，不用于公共首页草稿。 */
+  report_document?: { version: 1; value: string };
+  /** 连续正文插入图表后的原字段快照；当前混合内容仍使用 fields 保存。 */
+  report_source_fields?: FieldDefinition[];
+  /** 旧项目组公共组件来源。分区仍完整保存在模板版本快照中，编辑器/PDF 可直接显示。 */
+  common_component_id?: number;
+  common_component_code?: string;
+  common_component_name?: string;
+  common_component_version_id?: number;
+  common_component_version_no?: number;
+  /** 旧项目组基础模板继承标识。继承分区仍以完整快照保存，历史版本不受后续同步影响。 */
+  family_inherited?: boolean;
+  inheritance_source_template_id?: number;
+  inheritance_source_group_id?: string;
   /**
    * 嵌套分区（限一层）：指向同模板内某「顶级」分区的 id ⇒ 本分区是它的子分区。
    * 存储仍是平铺 groups[] 数组——顶级分区按数组顺序、同父子分区之间按数组顺序，
@@ -842,9 +1043,11 @@ export interface FieldGroup {
   label_width?: string;
   /** 原始记录分区语义（可选，用于编辑导航与规范对齐） */
   section_role?: SectionRole;
+  /** 结论模块层级：project=总项目；item=该总项目下的一个子项目。 */
+  conclusion_kind?: 'project' | 'item';
   /**
-   * 图片分区【分区级版式】（section_role='images'）：统一管本分区所有图片字段（图位）的版式——
-   * 每个图片字段=一个图位，cols=每行几图位、尺寸、单数独占、独立框/粘连、标题模式（共用＝用分区标题作表内标题 / 每张＝各图位 label）。
+   * 图片分区【分区级版式】（section_role='images'）：统一管本分区所有图片项的版式——
+   * 模板图片字段提供初始图位；录入态可动态增删、改名和排序。cols=每行几张、尺寸、单数独占、独立框/粘连、标题模式。
    * 缺省(undefined)＝按旧逐字段属性渲染（向后兼容、零回退）；设了即走分区级模型（不再用逐字段 image_layout 宽松/紧凑）。
    */
   image_layout?: {
@@ -908,6 +1111,10 @@ export interface RecordTemplate {
 }
 
 export interface Formula {
+  /** 汇总引用：all（缺省）随试样展开；selected 仅引用模板选中的原试样。 */
+  sample_scope?: 'all' | 'selected';
+  /** 存量矩阵迁移后保留旧公式计算精度，不改变已有数值语义。 */
+  preserve_legacy_precision?: true;
   type: FormulaType;
   sources?: string[];
   params?: Record<string, any>;
@@ -929,6 +1136,7 @@ export type FormulaType =
   | 'nd_sum'
   | 'multi_conclusion'
   | 'round_format'
+  | 'visual'
   | 'custom';
 
 // ─── 报告模板（v2：拆为首页 + 项目两类） ─────────────────────────────
@@ -983,8 +1191,11 @@ export type ReportBlock =
 export type OrderMetaKey =
   | 'order_no' | 'customer_name' | 'sample_name' | 'received_at'
   | 'company_address' | 'send_date' | 'time_required' | 'test_time_required'
-  | 'report_deadline' | 'authorites' | 'authorites_address'
-  | 'sale_name' | 'buyer' | 'status' | 'remark'
+  | 'report_deadline' | 'authorites' | 'english_authorites'
+  | 'authorites_address' | 'english_authorites_address'
+  | 'sale_name' | 'job_no' | 'buyer' | 'status' | 'remark'
+  | 'is_chinese_report' | 'is_english_report' | 'is_paper_report'
+  | 'report_count' | 'other_report_count' | 'complete_way'
   // 检测周期（订单级派生）：跨全单材料分单 最早 StartDate ~ 最晚 EndDate。test_period=合成范围串；test_start/test_end=两端单值。
   | 'test_period' | 'test_start' | 'test_end';
 
@@ -1031,8 +1242,28 @@ export type CellBinding =
    *  用于让报告结果表的表头（单位、「客户要求/标准要求」等）跟随录入选择，而不是模板写死。
    *  无 override 时回退矩阵参数列的静态 unit；仍为空 ⇒ 返回 ''（表头渲染据此省略该括号备注）。 */
   | { source: 'record_header'; matrix_code: string; param_code: string }
+  /** F1（项目模板继承·free_grid）：取原始记录某个 free_grid 字段【某一固定格】的值。
+   *  `field_code`＝记录 free_grid 字段 code；`cell_key`＝该格模板键 `${rowId}::${colId}`。
+   *  渲染时读 `record_raw_data[field_code][cell_key]`（记录侧录入格值）。带外（非样品带）格用它。 */
+  | { source: 'record_free_cell'; field_code: string; cell_key: string }
+  /** F1：取原始记录自由表格表头；按稳定 cell_key 映射，优先读取本次录入的名称覆盖，缺省回退模板文字。 */
+  | { source: 'record_free_template_cell'; field_code: string; cell_key: string }
+  /** F1：计算原始记录自由表格某个公式格的结果。 */
+  | { source: 'record_free_formula_cell'; field_code: string; cell_key: string }
+  /** F2：计算原始记录自由表格样品带中当前试样的公式格结果。 */
+  | { source: 'record_free_formula_cell_sample'; field_code: string; cell_key: string }
+  /** F1：取原始记录自由表格格子的单位；录入选择值优先，回退模板固定单位/首个单位选项。 */
+  | { source: 'record_free_cell_unit'; field_code: string; cell_key: string }
+  /** F2：取自由表格样品带当前试样格的单位，由 expandFreeGridBand 按样品序号落地。 */
+  | { source: 'record_free_cell_unit_sample'; field_code: string; cell_key: string }
+  /** F2（项目模板继承·free_grid 样品带）：取原始记录某 free_grid 字段样品带里【当前样品】某格的值。
+   *  仅用于报告 free_grid 被标记为 source_field 样品带的行/列内单元格；由 expandFreeGridBand 按实际样品逐个解析
+   *  （读 `record_raw_data[field_code][${cell_key}::s${i}]`，缺则回退记录模板固定文字）。裸调用回退 '—'。 */
+  | { source: 'record_free_cell_sample'; field_code: string; cell_key: string }
   | { source: 'record_formula'; formula: Formula }
-  | { source: 'record_meta'; key: 'tester_name' | 'tested_at' | 'reviewer_name' | 'reviewed_at' }
+  | { source: 'record_meta'; key: 'tester_name' | 'tested_at' | 'reviewer_name' | 'reviewed_at'; precision?: 'day' | 'hour' | 'minute'; date_separator?: '-' | '/' }
+  /** 取原始记录普通字段模板配置的单位，不取该字段的录入值。 */
+  | { source: 'record_field_unit'; field_code: string }
   | { source: 'order'; key: OrderMetaKey }
   /** 样品清单（报告范围，带编号）：把委托单全部样品拼成 "1#：名称、2#：名称…"。
    *  numbered 缺省 true（单样品自动不显编号）；layout='inline' 顿号一行 / 'lines' 每样品一行；separator 覆盖 inline 分隔符。 */
@@ -1044,15 +1275,15 @@ export type CellBinding =
   | { source: 'system'; key: 'today' | 'now' };
 
 /**
- * 项目报告模板的「检测结论声明」（6.7）。一条 = 检测结论表里一个结论框/一行。
+ * 项目报告模板的「检测结论声明」（6.7）。每个项目只使用一条结论绑定。
  * 声明放在**项目报告模板**的 `layout_options.conclusions[]`；结论**值**生成时由 `binding`
- * 从关联原始记录解析（值本质是数据、只能来自原始记录）。子项目↔结论框一对一显式映射。
- * - `sub_name` 空＝项目级单结论（显示用 `layout_options.project_name`）；
- * - 多子项目＝多条，各带 `sub_name` + 指向原始记录该子项目判定值的 `binding`。
+ * 从关联原始记录解析（值本质是数据、只能来自原始记录）。数组外层及 `sub_name` 仅为存量兼容；
+ * 编辑、校验和报告生成只使用第一条，并以委托单当前分单项目名称显示。
  * binding 来源限 record_*（record_field / record_cell / record_summary / record_formula）。
  */
 export interface ProjectConclusionDecl {
   id: string;
+  /** @deprecated 子项目已取消，仅保留以兼容存量模板。 */
   sub_name?: string;
   binding: CellBinding;
 }
@@ -1064,6 +1295,9 @@ export interface ReportTemplate {
   version?: number;
   /** project 类型必填：关联的原始记录模板 */
   linked_record_template_id?: number;
+  /** 仅 project 类型可用；族内项目模板的主机厂由族统一提供。 */
+  report_project_family_id?: number;
+  host_manufacturer_id?: number | null;
   /** project 类型可选：关联的测试项目 code 列表 */
   test_project_codes?: string[];
   /** v3 模型：复用 RecordTemplate 的 groups 结构 */
@@ -1103,7 +1337,7 @@ export interface ReportContentDoc {
 
 /**
  * 报告页眉页脚"机构级元数据"——由外部系统按订单号生成回传（接口⑥/⑦ 见《待实现内容.md》第 6 节）。
- * 当前为 mock（services/external-report-meta.ts）。生成报告时注入首页主题 config 并快照进 content_doc。
+ * server 来自接口 1.2，demo 使用 services/external-report-meta.ts 示例。生成报告时注入首页主题 config 并快照进 content_doc。
  */
 export interface ReportMeta {
   verify_code: string;       // 检验码
@@ -1136,14 +1370,26 @@ export interface ReportMeta {
 // 本系统按 样品名+项目名 回查 record_data/关联报告模板。见《待实现内容.md》第 6 节。
 
 /** 匹配引擎为报告范围里一个"样品×项目"格子算出的一条关联 */
+export interface ReportProjectTemplateCandidate {
+  id: number;
+  name: string;
+  version_id: number;
+  version_no: number;
+  project_name?: string | null;
+  updated_at?: string | null;
+}
 export interface ReportReqMatchAssignment {
   record_data_id: number;
   record_data_status?: string;        // record_data.audit_status
   record_template_id?: number;
-  project_template_id?: number | null; // 反查的项目报告模板（null=需文员手选）
+  project_template_id?: number | null; // 已确认/唯一候选的项目报告模板（null=需文员手选）
+  project_template_version_id?: number | null;
+  project_template_candidates?: ReportProjectTemplateCandidate[];
 }
 /** 报告范围里一个"样品×项目"格子的匹配结果 */
 export interface ReportReqMatchEntry {
+  /** 报告范围内稳定定位键；模板选择必须绑定到格子，不能只绑定 record_data_id。 */
+  scope_key: string;
   sample_name: string;
   project_name: string;
   sample_external_id?: string | null;
@@ -1163,6 +1409,14 @@ export interface ReportRequisition {
   header_footer?: Partial<ReportMeta> | null;
   scope?: { samples: any[] } | null;
   match_result?: ReportReqMatchEntry[] | null;
+  template_selections?: Array<{
+    scope_key: string;
+    record_data_id: number;
+    project_template_id: number;
+    project_template_version_id?: number | null;
+    selected_at?: string;
+    selected_by?: string | null;
+  }> | null;
   report_id?: number | null;
   status: 'pending' | 'generated';
   stale?: boolean;
@@ -1227,6 +1481,8 @@ export interface ReworkTicket {
 export interface TemplateFieldMapping {
   groups: Record<string, string>;
   fields: Record<string, string>;
+  /** 仅同步这些母模板分区；缺省表示旧版 fork 的全模板继承。 */
+  inherited_group_ids?: string[];
 }
 
 /** 模板操作审计日志行（template_audit_log） */

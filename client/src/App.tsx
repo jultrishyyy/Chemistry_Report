@@ -28,13 +28,16 @@ import { appTheme, APP_BG } from './theme';
 function AppLayout() {
   const location = useLocation();
   const hideNav = location.pathname.includes('/editor') || location.pathname === '/lab/record' || location.pathname.startsWith('/m/');
+  // 编辑器各自管理左右栏及 PDF 的内部滚动。禁止外层再生成一条页面滚动条，
+  // 避免 macOS/部分浏览器的叠加式滚动条与右侧 PDF 滚动条重叠。
+  const selfScrollingEditor = hideNav || location.pathname === '/report/edit';
   // 编辑器类页面是全幅自带布局，保持白底；列表/工作台类页面用浅灰底，白卡片更有层次
   const fullBleed = hideNav || location.pathname.startsWith('/report/');
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {!hideNav && <AppNav />}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', background: fullBleed ? '#fff' : APP_BG }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: selfScrollingEditor ? 'hidden' : 'auto', background: fullBleed ? '#fff' : APP_BG }}>
         <Routes>
           <Route path="/" element={<Navigate to="/record-templates" replace />} />
           <Route path="/record-templates" element={<RecordTemplateList />} />

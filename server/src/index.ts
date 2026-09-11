@@ -3,7 +3,7 @@ import cors from 'cors';
 import { resolve, dirname } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { printConfig } from '../../config/index.js';
+import { integrationsProfile, printConfig } from '../../config/index.js';
 import { pool } from './db.js';
 import { log } from './logger.js';
 import { requestLogger, apiNotFound, errorHandler } from './middleware.js';
@@ -11,6 +11,7 @@ import typstRouter from './routes/typst.js';
 import recordTemplatesRouter from './routes/record-templates.js';
 import recordDataRouter from './routes/record-data.js';
 import reportTemplatesRouter from './routes/report-templates.js';
+import hostManufacturersRouter from './routes/host-manufacturers.js';
 import mappingsRouter from './routes/mappings.js';
 import reportsRouter from './routes/reports.js';
 import proposalsRouter from './routes/proposals.js';
@@ -22,10 +23,16 @@ import auditLogRouter from './routes/audit-log.js';
 import reworkRouter from './routes/rework.js';
 import externalRouter from './routes/external.js';
 import authRouter from './routes/auth.js';
+import templateAssetsRouter from './routes/template-assets.js';
+import collaborationRouter from './routes/collaboration.js';
+import testMethodsRouter from './routes/test-methods.js';
+import reportProjectFamiliesRouter from './routes/report-project-families.js';
+import recordBatchesRouter from './routes/record-batches.js';
 import { seedBaseTemplates } from './services/seed-base-templates.js';
 import { seedReportTemplates } from './services/seed-report-templates.js';
 import { seedWorkOrders } from './services/seed-work-orders.js';
 import { seedMockBySample } from './services/seed-mock-by-sample.js';
+import { startTaskStateDeliveryRetryWorker } from './services/external-task-state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -36,8 +43,21 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(requestLogger);  // 请求日志（结构化，健康检查除外）
 
+// Fixed, bundled font assets only; never expose arbitrary filesystem paths.
+const reportFontFiles = new Set(['Fangsong.ttf', '仿宋_GB2312.ttf', 'Kaiti.ttf', 'SimHei.ttf',
+  'arial.ttf', 'arialbd.ttf', 'ariali.ttf', 'arialbi.ttf', 'times.ttf', 'timesbd.ttf', 'timesi.ttf', 'timesbi.ttf']);
+app.get('/api/report-fonts/:file', (req, res) => {
+  if (!reportFontFiles.has(req.params.file)) { res.sendStatus(404); return; }
+  res.sendFile(req.params.file, { root: resolve(__dirname, '../../fonts'), maxAge: '1d', dotfiles: 'deny' });
+});
+
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    integrations_profile: integrationsProfile,
+    report_meta_source: integrationsProfile === 'server' ? 'external_interface' : 'mock',
+  });
 });
 
 app.use('/api/auth', authRouter);  // 登录(5.1 接缝) + 本地 RBAC(用户/角色/权限)
@@ -45,12 +65,18 @@ app.use('/api/typst', typstRouter);
 app.use('/api/record-templates', recordTemplatesRouter);
 app.use('/api/record-data', recordDataRouter);
 app.use('/api/report-templates', reportTemplatesRouter);
+app.use('/api/host-manufacturers', hostManufacturersRouter);
 app.use('/api/mappings', mappingsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/proposals', proposalsRouter);
 app.use('/api/excel-import', excelImportRouter);
 app.use('/api/equipment', equipmentRouter);
 app.use('/api/images', imagesRouter);
+app.use('/api/template-assets', templateAssetsRouter);
+app.use('/api/collaboration', collaborationRouter);
+app.use('/api/test-methods', testMethodsRouter);
+app.use('/api/report-project-families', reportProjectFamiliesRouter);
+app.use('/api/record-batches', recordBatchesRouter);
 app.use('/api/work-orders', workOrdersRouter);
 app.use('/api/audit-log', auditLogRouter);
 app.use('/api', reworkRouter);  // /api/rework* + /api/orders/:order_no/timeline
@@ -75,6 +101,7 @@ if (existsSync(clientDist)) {
 app.use(errorHandler);
 
 printConfig();
+startTaskStateDeliveryRetryWorker();
 
 // 启动 seed 复用共享连接池（不再单建临时池）；共享池是长生命周期单例，跑完不 end()
 Promise.all([

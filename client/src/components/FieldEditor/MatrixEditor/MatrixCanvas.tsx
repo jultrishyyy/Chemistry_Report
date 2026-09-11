@@ -4,7 +4,7 @@
  * 参数列 / 汇总列表头单击选中 → 表格上方出现「公共操作栏」（左右移 / 删除，与报告结果表画布同款）。
  */
 import { useState, useRef, type CSSProperties } from 'react';
-import { Button, Dropdown, Tag, Tooltip, Select as AntSelect, Switch, Space, Modal, Input, Segmented, InputNumber } from 'antd';
+import { Button, Dropdown, Tag, Tooltip, Select as AntSelect, Switch, Space, Modal, Segmented, InputNumber } from 'antd';
 import type { MenuProps } from 'antd';
 import { PlusOutlined, DeleteOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
 import type { DataMatrixConfig, MatrixParameterDef, MatrixSummaryRowDef, MatrixSummaryColDef } from '../../../../../shared/types';
@@ -12,6 +12,7 @@ import { matrixDataKey, uniqueCode } from '../../../../../shared/matrix-flatten'
 import { FORMULA_TYPES } from '../../../../../shared/formula-engine';
 import InlineEditor from './InlineEditor';
 import HeaderConfigCard, { type HeaderCfgValue } from './HeaderConfigCard';
+import AutoGrowTextArea from '../../AutoGrowTextArea';
 
 // ── P-Map-13 配色：三类区域一眼可分（可变试样数据 / 参数·其他 / 汇总）──
 const C_SAMPLE = '#eef6ff';        // 试样数据格（可变、会算进平均、被报告试样带展开）
@@ -87,6 +88,14 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
   // 行名兜底必须与渲染端一致（createEmptyMatrixValue / embedDataMatrixTypst 都是 `${prefix} ${i+1}`），
   // 否则画布显示 "1/2/3" 而 PDF 显示 "试样 1/试样 2"，配置与渲染对不上
   const rowLabel = (idx: number) => config.default_sample_labels?.[idx] ?? `${prefix} ${idx + 1}`;
+  const matrixColumnWidths = [config.axis_col_width || '', ...params.map(param => param.width || '')];
+  const sharedMatrixColumnWidth = matrixColumnWidths.length
+    && matrixColumnWidths.every(width => width === matrixColumnWidths[0]) && /fr$/.test(matrixColumnWidths[0])
+    ? parseFloat(matrixColumnWidths[0]) : undefined;
+  const matrixRowHeights = Array.from({ length: n }, (_, index) => config.sample_row_heights?.[index] || '');
+  const sharedMatrixRowHeight = matrixRowHeights.length
+    && matrixRowHeights.every(height => height === matrixRowHeights[0]) && /cm$/.test(matrixRowHeights[0])
+    ? parseFloat(matrixRowHeights[0]) : undefined;
 
   // ─── 结构操作 ──────────────────────────────────────────────────────
   const addColumn = (afterIdx?: number) => {
@@ -275,7 +284,13 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
   };
 
   const updateSummaryCol = (id: string, patch: Partial<MatrixSummaryColDef>) => {
-    onChange({ ...config, summary_cols: summaryCols.map(c => c.id === id ? { ...c, ...patch } : c) });
+    onChange({ ...config, summary_cols: summaryCols.map(c => {
+      if (c.id !== id) return c;
+      const next = { ...c, ...patch } as MatrixSummaryColDef;
+      if (patch.source_type && patch.source_type !== 'input_choice') { delete (next as any).choices; delete (next as any).allow_custom; }
+      if (patch.source_type && patch.source_type !== 'formula') delete (next as any).formula;
+      return next;
+    }) });
   };
 
   const removeSummaryCol = (id: string) => {
@@ -306,7 +321,10 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
 
   const updateSummaryRow = (idx: number, patch: Partial<MatrixSummaryRowDef>) => {
     const rows = [...summaries];
-    rows[idx] = { ...rows[idx], ...patch };
+    const next = { ...rows[idx], ...patch } as MatrixSummaryRowDef;
+    if (patch.source_type && patch.source_type !== 'input_choice') { delete (next as any).choices; delete (next as any).allow_custom; }
+    if (patch.source_type && patch.source_type !== 'formula') delete (next as any).formula;
+    rows[idx] = next;
     onChange({ ...config, summary_rows: rows });
   };
 
@@ -632,7 +650,7 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
         value={config.sample_axis === 'col' ? 'col' : 'row'}
         onChange={(v) => onChange({ ...config, sample_axis: v as 'row' | 'col' })}
         options={[{ label: '试样为行 ↓', value: 'row' }, { label: '试样为列 →', value: 'col' }]} />
-      <Tooltip title="试样（可变的那一维）横排还是竖排。试样为行：每个试样一行、参数为列（默认）。试样为列：每个试样一列、参数为行（出片/右侧预览转置显示）。这也决定项目模板里「试样自动展开」是每行一个试样还是每列一个试样。">
+      <Tooltip title="试样为行：每个试样一行、参数为列。试样为列：每个试样一列、参数为行。右侧预览和 PDF 使用相同排布，项目模板据此自动展开试样。">
         <span style={{ color: '#1677ff', cursor: 'help' }}>ⓘ</span>
       </Tooltip>
       {config.sample_axis === 'col' && (
@@ -679,6 +697,28 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
       ] }}>
         <Tooltip title="统计列：右侧一竖列、逐行每格手填，但【不算试样】（如各试样平均值/判定）"><Button size="small" icon={<PlusOutlined />}>统计列</Button></Tooltip>
       </Dropdown>
+      <span style={{ width: 1, height: 18, background: '#e8e8e8' }} />
+      <Tooltip title="一次设置试样列和全部参数列；之后仍可单独调整某列。清空恢复自动。">
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 }}>整表列宽
+          <InputNumber size="small" min={0.3} max={12} step={0.1} style={{ width: 82 }}
+            value={sharedMatrixColumnWidth} placeholder={new Set(matrixColumnWidths).size > 1 ? '不一致' : '自动'}
+            onChange={(value) => onChange({
+              ...config,
+              axis_col_width: value == null ? undefined : `${value}fr`,
+              parameters: params.map(param => ({ ...param, width: value == null ? undefined : `${value}fr` })),
+            })} /> fr
+        </span>
+      </Tooltip>
+      <Tooltip title="一次设置全部试样行的最小行高；之后仍可单独调整某行。清空恢复自适应。">
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 }}>整表行高
+          <InputNumber size="small" min={0.3} max={12} step={0.1} style={{ width: 82 }}
+            value={sharedMatrixRowHeight} placeholder={new Set(matrixRowHeights).size > 1 ? '不一致' : '自适应'}
+            onChange={(value) => onChange({
+              ...config,
+              sample_row_heights: value == null ? undefined : Array.from({ length: n }, () => `${value}cm`),
+            })} /> cm
+        </span>
+      </Tooltip>
       <span style={{ fontSize: 11, color: '#bbb' }}>· 在某行/列表头上双击或右键 → 可在它前后精确插入</span>
     </div>
     {/* ─── 选中表头时的公共操作栏（参数列 / 汇总列：左右移 / 删除） ─── */}
@@ -1192,11 +1232,11 @@ export default function MatrixCanvas({ config, onChange, formulaTarget, onSelect
         <p style={{ fontSize: 12, color: '#888', marginTop: 0 }}>
           录入时该格预填此值（实验员可改）；清空 = 移除默认值。仅对模板内的这一格生效，录入期新增的行回退列级存量默认值。
         </p>
-        <Input
+        <AutoGrowTextArea
           autoFocus
           value={defaultEdit?.value ?? ''}
           onChange={(e) => setDefaultEdit(d => d ? { ...d, value: e.target.value } : d)}
-          onPressEnter={saveCellDefault}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCellDefault(); } }}
           placeholder={isTextMatrix ? '如：符合' : '如：23.5'}
         />
       </Modal>
@@ -1220,8 +1260,8 @@ function LegendItem({ color, label }: { color: string; label: string }) {
   );
 }
 
-const TH: React.CSSProperties = { border: '1px solid #e2e8f0', padding: '8px 12px', background: '#f2f5fb', color: '#26334d', fontWeight: 500 };
-const TD: React.CSSProperties = { border: '1px solid #e8edf3', padding: '7px 10px' };
+const TH: React.CSSProperties = { border: '1px solid #e2e8f0', padding: '6px 8px', background: '#f2f5fb', color: '#26334d', fontWeight: 500 };
+const TD: React.CSSProperties = { border: '1px solid #e8edf3', padding: '5px 7px' };
 
 /**
  * 内联选项编辑器：input_choice 类型汇总行专用

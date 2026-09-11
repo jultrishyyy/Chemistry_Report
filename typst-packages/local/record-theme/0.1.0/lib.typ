@@ -49,7 +49,7 @@
 #let _bold(body, on: true, font: auto) = context {
   if not on { body } else {
     let f = if font == auto { _cfg-get("font", "Songti SC") } else { font }
-    if _nobold-font(f) { text(stroke: 0.03em, body) } else { text(weight: 700, body) }
+    if _nobold-font(f) { text(stroke: 0.015em, body) } else { text(weight: 700, body) }
   }
 }
 
@@ -190,11 +190,11 @@
   set heading(numbering: none)
   // 全局 faux-bold：`*粗*` markup / #strong 在无粗体中文字体（仿宋/黑体/楷体）下 weight:bold 不生效，
   // 给 strong 补描边模拟粗体（保留 weight，故西文真粗体不丢）——一处覆盖所有表头/富文本加粗。
-  show strong: it => if _nobold-font(font) { text(stroke: 0.03em, it) } else { it }
+  show strong: it => if _nobold-font(font) { text(stroke: 0.015em, it) } else { it }
   // 报告项目章节标题（renderContentDoc 为每个项目段前置 #heading level 1）：默认 10.5pt 加粗、居中。
   // faux-bold 感知：无粗体中文字体（仿宋等）补描边，否则用真粗体。
   show heading.where(level: 1): it => align(center, block(above: 0.9em, below: 0.5em)[
-    #text(size: 10.5pt, weight: "bold", ..(if _nobold-font(font) { (stroke: 0.03em) } else { (:) }))[#it.body]
+    #text(size: 10.5pt, weight: "bold", ..(if _nobold-font(font) { (stroke: 0.015em) } else { (:) }))[#it.body]
   ])
 
   // 顶部受控行（原始记录用）：受控号 + 颁布日期 + 实施日期。对齐 .xls 顶部样式。

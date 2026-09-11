@@ -5,7 +5,7 @@
  * 纯前端过滤（订单整页加载），条件经 filterOrders 应用。
  */
 import { Button, Input, Select, DatePicker, Space, Tag } from 'antd';
-import { SearchOutlined, ClearOutlined } from '@ant-design/icons';
+import { SearchOutlined, ClearOutlined, SortAscendingOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import { type OrderSearchCriteria, isOrderSearchActive } from '../pages/Lab/order-shared';
 
@@ -17,7 +17,11 @@ const STATUS_OPTIONS = [
   { value: 'reviewed', label: '整单已审核' },
 ];
 
-export default function OrderSearchBar({ value, onChange, total, shown, statusOptions = STATUS_OPTIONS, keywordPlaceholder = '单号 / 客户 / 样品 / 测试项目', showPeople = true }: {
+export default function OrderSearchBar({
+  value, onChange, total, shown, statusOptions = STATUS_OPTIONS,
+  keywordPlaceholder = '单号 / 客户 / 样品 / 测试项目', showPeople = true,
+  sortValue, onSortChange, sortOptions,
+}: {
   value: OrderSearchCriteria;
   onChange: (c: OrderSearchCriteria) => void;
   total: number;
@@ -27,6 +31,10 @@ export default function OrderSearchBar({ value, onChange, total, shown, statusOp
   keywordPlaceholder?: string;
   /** 是否显示「主检人 / 审核人」筛选（报告侧无意义，传 false 隐藏） */
   showPeople?: boolean;
+  /** 排序独立于筛选重置，默认由列表页传入“最近接收优先”。 */
+  sortValue?: string;
+  onSortChange?: (value: string) => void;
+  sortOptions?: { value: string; label: string }[];
 }) {
   const active = isOrderSearchActive(value);
   const set = (patch: Partial<OrderSearchCriteria>) => onChange({ ...value, ...patch });
@@ -62,6 +70,18 @@ export default function OrderSearchBar({ value, onChange, total, shown, statusOp
             ] : undefined,
           })}
         />
+        {sortValue && onSortChange && sortOptions?.length ? (
+          <>
+            <span style={{ fontSize: 12, color: '#888' }}><SortAscendingOutlined /> 排序</span>
+            <Select
+              size="small"
+              style={{ width: 180 }}
+              value={sortValue}
+              onChange={onSortChange}
+              options={sortOptions}
+            />
+          </>
+        ) : null}
         {showPeople && (
           <>
             <Input

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 
 import { pool } from '../db.js';
+import { assertEditLease } from '../services/collaboration.js';
 
 const router = Router();
 
@@ -15,6 +16,7 @@ router.get('/:reportTemplateId', async (req: Request, res: Response) => {
 
 router.post('/:reportTemplateId', async (req: Request, res: Response) => {
   const { reportTemplateId } = req.params;
+  if (!await assertEditLease(req, res, 'report_template', String(reportTemplateId))) return;
   const { placeholder, source_type, source_field_code, literal_value, formula, transform, notes } = req.body;
   if (!placeholder || !source_type) {
     res.status(400).json({ error: 'placeholder and source_type are required' });
@@ -36,6 +38,7 @@ router.post('/:reportTemplateId', async (req: Request, res: Response) => {
 
 router.post('/:reportTemplateId/batch', async (req: Request, res: Response) => {
   const { reportTemplateId } = req.params;
+  if (!await assertEditLease(req, res, 'report_template', String(reportTemplateId))) return;
   const { mappings } = req.body;
   if (!Array.isArray(mappings)) {
     res.status(400).json({ error: 'mappings array required' });
@@ -61,6 +64,7 @@ router.post('/:reportTemplateId/batch', async (req: Request, res: Response) => {
 
 router.delete('/:reportTemplateId/:placeholder', async (req: Request, res: Response) => {
   const { reportTemplateId, placeholder } = req.params;
+  if (!await assertEditLease(req, res, 'report_template', String(reportTemplateId))) return;
   await pool.query('DELETE FROM report_template_mappings WHERE report_template_id = $1 AND placeholder = $2', [reportTemplateId, placeholder]);
   res.json({ ok: true });
 });

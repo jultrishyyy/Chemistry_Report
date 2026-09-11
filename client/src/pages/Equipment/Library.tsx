@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Table, Input, Button, Space, Upload, message, Tag, Modal, Descriptions } from 'antd';
 import { SearchOutlined, UploadOutlined, EyeOutlined } from '@ant-design/icons';
 import axios from 'axios';
+import { ListPageSizeControl, useListPagination } from '../../hooks/useListPagination';
 
 const API = '/api';
 
@@ -25,8 +26,7 @@ export default function EquipmentLibrary() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [keyword, setKeyword] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const { pagination, current: page, setCurrent: setPage, pageSize, setPageSize } = useListPagination(keyword);
   const [uploading, setUploading] = useState(false);
   const [detail, setDetail] = useState<Equipment | null>(null);
 
@@ -83,19 +83,15 @@ export default function EquipmentLibrary() {
           </Upload>
         </Space>
       </div>
+      <div style={{ display: 'flex', marginBottom: 8 }}>
+        <ListPageSizeControl value={pageSize} onChange={setPageSize} />
+      </div>
 
       <Table
         rowKey="id"
         dataSource={items}
         loading={loading}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          showTotal: (n) => `共 ${n} 条`,
-          onChange: (p, s) => { setPage(p); setPageSize(s); },
-        }}
+        pagination={{ ...pagination, total, showTotal: (n) => `共 ${n} 条` }}
         columns={[
           { title: '管理编号', dataIndex: 'asset_code', width: 140, render: (v: string) => <span style={{ fontFamily: 'monospace' }}>{v}</span> },
           { title: '仪器名称', dataIndex: 'name' },

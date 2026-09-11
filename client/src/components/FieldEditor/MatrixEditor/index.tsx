@@ -197,7 +197,7 @@ export default function MatrixEditor({ field, template, config, onChange }: Prop
         key: 'excel',
         label: <span style={{ fontSize: 12 }}>Excel 导入配置{config.excel_import?.enabled ? ' ✓' : ''}</span>,
         children: (
-          <ExcelImportConfig value={config.excel_import} params={params} onChange={(v) => onChange({ ...config, excel_import: v })} />
+          <ExcelImportConfig value={config.excel_import} onChange={(v) => onChange({ ...config, excel_import: v })} />
         ),
       }]} />
 
@@ -394,111 +394,11 @@ function panelTitle(t: FormulaTarget, params: any[], summaries: MatrixSummaryRow
 }
 
 // ─── Excel 导入配置子组件 ─────────────────────────────────────────────
-const colLetter = (i: number) => String.fromCharCode(65 + i); // 0→A
-
-function ExcelImportConfig({
-  value,
-  params,
-  onChange,
-}: {
-  value?: ExcelImportMapping;
-  params: { code: string; label: string; cell_formula?: string }[];
-  onChange: (v: ExcelImportMapping) => void;
-}) {
-  const v = value || { enabled: false, sheet_name: '' };
-  const startRow1 = (v.data_start_row ?? 2) + 1;      // 存储 0-based，界面按"第 N 行"显示
-  const startCol = v.data_start_col ?? 0;             // 0=A 列
-
-  /**
-   * 数据块模式示意：只导入从 (起始行, 起始列) 开始的矩形数据块。
-   * 行名/列头不读 Excel（由模板配置）——起始行上方、起始列左侧整体跳过。
-   */
-  const colCount = Math.max(startCol + params.length, startCol + 2, 4);
-  const cellInfo = (rowIdx1: number, colIdx: number): { text: string; bg: string; color?: string } => {
-    if (rowIdx1 < startRow1 || colIdx < startCol) {
-      const isOrigin = rowIdx1 === 1 && colIdx === 0;
-      return { text: isOrigin ? '表头区(跳过)' : '', bg: '#f0f0f0', color: '#999' };
-    }
-    const pi = colIdx - startCol;
-    if (pi < params.length) {
-      // 公式列不导入（录入页只读、由公式计算），示意图里明确标出
-      if (params[pi].cell_formula?.trim()) return { text: `ƒ ${params[pi].label}(跳过)`, bg: '#fff7e6', color: '#d46b08' };
-      return { text: params[pi].label, bg: '#f6ffed', color: '#389e0d' };
-    }
-    return { text: '(多余列)', bg: '#fffbe6', color: '#b08400' };
-  };
-
-  return (
-    <Form layout="vertical" size="small">
-      <Form.Item style={{ marginBottom: 8 }}>
-        <Switch checked={v.enabled} onChange={(checked) => onChange({ ...v, enabled: checked })}
-          checkedChildren="允许导入" unCheckedChildren="关闭" />
-        <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>
-          只导入数据块——行名/列头由模板配置，Excel 里的表头区整体跳过
-        </span>
-      </Form.Item>
-      {v.enabled && (
-        <>
-          <Space size={12} wrap style={{ marginBottom: 8 }}>
-            <Form.Item label="Excel Sheet 名称" style={{ marginBottom: 0 }}>
-              <Input style={{ width: 160 }} value={v.sheet_name} onChange={(e) => onChange({ ...v, sheet_name: e.target.value })}
-                placeholder="如：测试结果" />
-            </Form.Item>
-            <Form.Item label="数据从第几行开始" style={{ marginBottom: 0 }}
-              tooltip="表头占几行就从下一行开始。如表头 2 行 → 数据从第 3 行开始">
-              <InputNumber min={1} max={21} value={startRow1}
-                onChange={(n) => onChange({ ...v, data_start_row: (n ?? 1) - 1 })}
-                addonBefore="第" addonAfter="行" style={{ width: 130 }} />
-            </Form.Item>
-            <Form.Item label="数据从哪一列开始" style={{ marginBottom: 0 }}
-              tooltip="行名（试样名）列在数据左侧时，从它右边那列开始。如 A 列是行名 → 数据从 B 列开始">
-              <AntSelect style={{ width: 100 }} value={startCol}
-                onChange={(n) => onChange({ ...v, data_start_col: n })}
-                options={Array.from({ length: 12 }, (_, i) => ({ value: i, label: `${colLetter(i)} 列` }))} />
-            </Form.Item>
-          </Space>
-
-          {/* 示意图：你的 Excel 应长这样 */}
-          <Form.Item label="导入示意（你的 Excel 应长这样）" style={{ marginBottom: 0 }}>
-            <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
-              <thead>
-                <tr>
-                  <th style={{ ...EX_TH, width: 28 }} />
-                  {Array.from({ length: colCount }, (_, c) => (
-                    <th key={c} style={{ ...EX_TH, minWidth: 64 }}>{colLetter(c)}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: Math.min(startRow1 - 1 + 3, 8) }, (_, r) => {
-                  const row1 = r + 1;
-                  return (
-                    <tr key={r}>
-                      <td style={{ ...EX_TH, textAlign: 'center' }}>{row1}</td>
-                      {Array.from({ length: colCount }, (_, c) => {
-                        const info = cellInfo(row1, c);
-                        return (
-                          <td key={c} style={{ ...EX_TD, background: info.bg, color: info.color || '#555' }}>
-                            {info.text}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-              灰 = 表头区（行名/列头由模板配置，导入时跳过）· 绿 = 数据块（按模板列顺序整块导入）·
-              橙 ƒ = 公式列（不导入，由公式按其他列自动计算）。
-              导入后行/列多了可自行删，少了模板允许时会自动补（行名/列头需自行确认）
-            </div>
-          </Form.Item>
-        </>
-      )}
-    </Form>
-  );
+function ExcelImportConfig({ value, onChange }: { value?: ExcelImportMapping; onChange: (v: ExcelImportMapping) => void }) {
+  const v = value || { enabled: false, sheet_name: '', mode: 'auto' as const };
+  return <Space wrap>
+    <Switch checked={v.enabled} onChange={enabled => onChange({ ...v, enabled, mode: 'auto' })} checkedChildren="允许导入" unCheckedChildren="关闭" />
+    {v.enabled && <Input style={{ width: 250 }} aria-label="Sheet名称（选填）" placeholder="Sheet名称（选填）" value={v.sheet_name} onChange={e => onChange({ ...v, sheet_name: e.target.value, mode: 'auto' })} />}
+    <span style={{ fontSize: 12, color: '#888' }}>留空时：单Sheet自动选择，多Sheet在导入时选择；数据区域在导入预览中确认。</span>
+  </Space>;
 }
-
-const EX_TH: React.CSSProperties = { border: '1px solid #d9dee8', background: '#f2f5fb', padding: '2px 6px', color: '#666', fontWeight: 500 };
-const EX_TD: React.CSSProperties = { border: '1px solid #e4e8f0', padding: '2px 6px', textAlign: 'center' };

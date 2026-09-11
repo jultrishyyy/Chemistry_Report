@@ -9,6 +9,7 @@
 import type { RecordTemplate, FieldDefinition, DataMatrixConfig } from './types';
 import { matrixDataKey, createEmptyMatrixValue, flattenMatrixValuesToFlatData, applyMatrixCellFormulas, applyMatrixSummaryFormulas, applyPerCellFormulas } from './matrix-flatten';
 import { execute, topologicalOrder } from './formula-engine';
+import { formatDateByPrecision } from './date-precision';
 
 /**
  * 示例图片目录【占位符】（不写死任何机器路径，可跨服务器部署）。
@@ -43,7 +44,7 @@ function mockFieldValue(field: FieldDefinition, idx = 0): any {
     case 'textarea':
       return field.default_value || '示例多行文本内容';
     case 'date':
-      return new Date().toISOString().slice(0, 10);
+      return formatDateByPrecision(new Date(), field.date_precision || 'day', field.date_separator || '-');
     case 'select':
       return field.options?.[0] || '选项A';
     case 'checkbox':
@@ -122,6 +123,57 @@ export function withMockPhotoTables(template: RecordTemplate): RecordTemplate {
   };
 }
 
+/** 统一自由网格 free_grid 的预览示例值：按格类型生成（数字/选择/文字）；
+ *  记录侧样品带（无 matrix_code）时按 N 个示例样品展开为 `${rowId}::${colId}::s${i}` + `__sample_count__`。 */
+function mockFreeGridValue(ft: FieldDefinition['free_table']): Record<string, any> {
+  const gv: Record<string, any> = {};
+  if (!ft) return gv;
+  const inputs = ft.input_cells || {};
+  const types = ft.cell_types || {};
+  const opts = ft.cell_options || {};
+  // 记录侧样品带（多带·同轴，无 matrix_code = 自引用）：每带按 N 个示例样品展开成员行/列
+  const norm = ft.sample_bands?.length
+    ? ft.sample_bands.filter(b => b?.refs?.length)
+    : (ft.sample_band?.ref ? [{ id: 'legacy', axis: ft.sample_band.axis, refs: [ft.sample_band.ref], matrix_code: ft.sample_band.matrix_code }] : []);
+  const selfBands = norm.filter(b => !b.matrix_code);
+  const bandOfAxisId = new Map<string, { id: string; axis: string; refs: string[]; cross_refs?: string[] }>();
+  for (const b of selfBands) for (const rid of b.refs) if (!bandOfAxisId.has(rid)) bandOfAxisId.set(rid, b);
+  const numFmt = ft.cell_number_fmt || {};
+  const rounding = ft.cell_rounding || {};
+  const hasTableNumFmt = !!ft.default_number_fmt;
+  const hasTableRounding = !!ft.default_rounding;
+  let ni = 0; // 数字示例计数器：让不同格/不同样品的示例数字有差异（不用随机，保证可复现）
+  const exampleFor = (key: string): string => {
+    const o = opts[key]; // 选择框格（含表头选择框）：用首个选项，否则预览会空白无法渲染
+    if (o && o.length) return o[0];
+    const t = types[key];
+    if (t === 'text') return '示例';                       // 明确文字格 → 文字示例
+    // 保留足够原始精度和 5 临界位，让修约与显示格式变化在预览里肉眼可见；实际修约/格式化由统一渲染器完成。
+    if (t === 'number' || numFmt[key] || rounding[key] || hasTableNumFmt || hasTableRounding) {
+      const base = 10.125 + (ni++ * 6.37125) % 88;
+      return base.toFixed(5);
+    }
+    return '示例';
+  };
+  // 单元格（连续块）多于 1 → 预览各带只展 1 份（自然展示该块，如序号 1/2/3）；单行/列单元 → 展 3 份
+  const countForBand = (b: { refs: string[] }) => (b.refs.length > 1 ? 1 : 3);
+  // 录入格 + 选择框格（后者含未标为录入的表头选择框，需一并给示例值）
+  const numericFixed = Object.keys(ft.fixed_text_cells || {}).filter(key =>
+    types[key] === 'number' && !(ft.cells?.[key] || '').trim());
+  const keysToFill = new Set([...Object.keys(inputs), ...Object.keys(opts), ...numericFixed]);
+  for (const key of keysToFill) {
+    const [rid, cid] = key.split('::');
+    const b = bandOfAxisId.get(rid) || bandOfAxisId.get(cid);   // 行带 refs=行 id 命中 rid；列带 refs=列 id 命中 cid
+    const inExactBand = !!b && (b.axis === 'row'
+      ? (!b.cross_refs?.length || b.cross_refs.includes(cid))
+      : (!b.cross_refs?.length || b.cross_refs.includes(rid)));
+    if (b && inExactBand) { const N = countForBand(b); for (let i = 0; i < N; i++) gv[`${rid}::${cid}::s${i}`] = exampleFor(key); }
+    else gv[key] = exampleFor(key);
+  }
+  for (const b of selfBands) gv[`__sample_count__::${b.id}`] = countForBand(b);
+  return gv;
+}
+
 /** 生成「原始（嵌套）」示例数据 = record_data.raw_data 的形状（字段 code → 原始值/矩阵值对象）。
  *  与 generateMockData 不同：后者返回展平+派生后的显示数据；本函数返回未展平的原始录入值。 */
 export function generateMockRawData(template: RecordTemplate): Record<string, any> {
@@ -133,11 +185,8 @@ export function generateMockRawData(template: RecordTemplate): Record<string, an
       } else if (f.type === 'data_matrix' && f.matrix) {
         data[f.code] = mockMatrixValue(f.matrix);
       } else if (f.type === 'free_grid') {
-        // 统一网格：仅录入格填示例值（键 rowId::colId），固定文字/表头由模板 cells 出
-        const inputs = f.free_table?.input_cells || {};
-        const gv: Record<string, string> = {};
-        for (const key of Object.keys(inputs)) gv[key] = '示例';
-        data[f.code] = gv;
+        // 统一网格：仅录入格填示例值（按格类型：数字给示例数字/选择给首个选项/文字给"示例"）
+        data[f.code] = mockFreeGridValue(f.free_table);
       } else if (f.type !== 'computed') {
         data[f.code] = mockFieldValue(f);
       }

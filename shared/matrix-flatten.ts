@@ -1,6 +1,9 @@
 import type { RecordTemplate, FieldDefinition, DataMatrixConfig, DataMatrixValue, MatrixParameterDef } from './types';
 import { execute, type Formula } from './formula-engine';
 import { evalArithmetic } from './expr-eval';
+import { recordSampleBands } from './free-grid-binding';
+import { sampleAxesKey } from './free-grid-samples';
+import { projectLegacyMatrices } from './legacy-matrix-bridge.ts';
 
 export function matrixDataKey(sampleId: string, paramCode: string): string {
   return `${sampleId}__${paramCode}`;
@@ -84,6 +87,14 @@ export function buildFieldDefaults(template: RecordTemplate): Record<string, any
   const init: Record<string, any> = {};
   for (const g of template.groups) {
     for (const f of g.fields) {
+      if (f.type === 'free_grid' && f.free_table) {
+        const initial: Record<string, any> = {};
+        for (const band of recordSampleBands(f.free_table)) {
+          const axis = band.axis === 'row' ? f.free_table.rows : f.free_table.columns;
+          initial[sampleAxesKey(band.id)] = axis.filter(item => band.refs.includes(item.id)).map(item => ({ ref: item.id, sample: 0 }));
+        }
+        if (Object.keys(initial).length) init[f.code] = initial;
+      }
       if (f.default_value === undefined || f.default_value === null || f.default_value === '') continue;
       if (['text', 'textarea', 'number', 'date', 'select', 'checkbox'].includes(f.type)) {
         init[f.code] = f.default_value;
@@ -292,10 +303,29 @@ export function applyPerCellFormulas(template: RecordTemplate, flat: Record<stri
   return out;
 }
 
+/** 把录入人员确认过的公式修正值覆盖到展平数据。 */
+export function applyMatrixFormulaOverrides(template: RecordTemplate, flat: Record<string, any>): Record<string, any> {
+  const out = { ...flat };
+  for (const group of template.groups) {
+    for (const field of group.fields) {
+      if (field.type !== 'data_matrix') continue;
+      const matrixValue = out[field.code] as DataMatrixValue | undefined;
+      const overrides = matrixValue?.formula_overrides;
+      if (!overrides) continue;
+      for (const [localKey, entry] of Object.entries(overrides)) {
+        if (!entry || entry.value === undefined || entry.value === null) continue;
+        out[`${field.code}__${localKey}`] = entry.value;
+      }
+    }
+  }
+  return out;
+}
+
 /** 在矩阵单元已展平到 flat 的前提下，写入各「本表公式」/「每列统计」汇总行的计算结果 */
 export function applyMatrixSummaryFormulas(template: RecordTemplate, flat: Record<string, any>): Record<string, any> {
   // 先应用 per-cell 公式
-  let out = applyPerCellFormulas(template, flat);
+  // 先套用一次人工修正，使后续汇总/判定使用修正后的明细结果。
+  let out = applyMatrixFormulaOverrides(template, applyPerCellFormulas(template, flat));
   for (const g of template.groups) {
     for (const f of g.fields) {
       if (f.type !== 'data_matrix' || !f.matrix) continue;
@@ -373,7 +403,8 @@ export function applyMatrixSummaryFormulas(template: RecordTemplate, flat: Recor
       }
     }
   }
-  return out;
+  // 汇总公式自身也可修正；最终显示和 PDF 均以确认后的修正值为准。
+  return applyMatrixFormulaOverrides(template, out);
 }
 
 export function collectTypstDataKeys(template: RecordTemplate): string[] {
@@ -386,7 +417,7 @@ export function collectTypstDataKeys(template: RecordTemplate): string[] {
             keys.push(`${f.code}__${matrixDataKey(`s${i}`, p.code)}`);
           }
         }
-      } else if (f.type === 'image' || f.type === 'spacer') {
+      } else if (f.type === 'image' || f.type === 'spacer' || f.type === 'record_conclusion') {
         // image 字段由 __IMAGE_GROUP__ 锚点替换；spacer 是纯版式 #v()——都不引用 data，不进 #let data
         continue;
       } else if (f.type === 'report_conclusion_table' || f.type === 'report_result_table'
@@ -439,7 +470,7 @@ export function createEmptyMatrixValue(cfg: DataMatrixConfig): DataMatrixValue {
 
 /** 公式计算：把 data_matrix 嵌套值展平为 code__sample__param */
 export function flattenMatrixValuesToFlatData(template: RecordTemplate, data: Record<string, any>): Record<string, any> {
-  const out = { ...data };
+  const out = projectLegacyMatrices(template, data, { ...data }).flat;
   for (const g of template.groups) {
     for (const f of g.fields) {
       if (f.type !== 'data_matrix') continue;

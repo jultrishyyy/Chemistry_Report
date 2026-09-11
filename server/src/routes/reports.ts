@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { hasContinuousText, restoreContinuousSource } from '../../../shared/report-continuous-text';
 import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,7 +11,7 @@ import {
   flattenMatrixValuesToFlatData,
   applyMatrixCellFormulas,
   applyMatrixSummaryFormulas,
-} from '../../../shared/matrix-flatten.js';
+} from '../../../shared/matrix-flatten.ts';
 import {
   generateTypst,
   injectReportFieldsIntoTypst,
@@ -21,10 +22,14 @@ import {
   type ReportRenderCtx,
 } from '../../../shared/typst-generator.js';
 import type { ReportBlock, RecordTemplate, FieldDefinition, ReportContentDoc, ReportMeta } from '../../../shared/types.js';
-import { fetchReportMeta } from '../services/external-report-meta.js';
-import { headerFooterConfig } from '../../../config/index.js';
+import { resolveReportMeta } from '../services/external-report-meta.js';
+import { headerFooterConfig, integrationsProfile } from '../../../config/index.js';
+import { imageCollectionKey } from '../../../shared/image-collection.js';
+import { extractRecordConclusion } from '../../../shared/record-conclusion.js';
+import { findRecordHeaderChanges } from '../../../shared/record-header-changes.ts';
 
 import { pool } from '../db.js';
+import { assertEditLease } from '../services/collaboration.js';
 
 const router = Router();
 
@@ -40,6 +45,85 @@ async function writeReportAudit(reportId: number, action: 'generate' | 'edit', a
     `INSERT INTO report_audit_log (report_id, action, actor_name, diff, note) VALUES ($1, $2, $3, $4::jsonb, $5)`,
     [reportId, action, actor, JSON.stringify(diff || []), note || null]
   );
+}
+
+const jsonClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+
+/** 图片数据不应因“编辑其它字段”或前端旧快照漏字段而被覆盖丢失。
+ * 只补齐新文档中缺失的图片键；空数组代表用户明确删除，必须保留为空。
+ */
+function preserveImageState(previous: any, incoming: any): any {
+  const next = jsonClone(incoming);
+  const imageKeys = (section: any) => {
+    const keys = new Set<string>();
+    for (const group of section?.groups || []) {
+      if (group?.section_role !== 'images') continue;
+      keys.add(imageCollectionKey(group.id));
+      for (const field of group.fields || []) {
+      if (field?.type === 'image') keys.add(field.image_source_code || field.code);
+      if (field?.type === 'report_image_gallery') {
+        for (const item of field.image_gallery?.items || []) if (item?.source_field_code) keys.add(item.source_field_code);
+      }
+      }
+    }
+    return keys;
+  };
+  const mergeSection = (oldSection: any, newSection: any) => {
+    if (!oldSection || !newSection) return;
+    const oldRaw = oldSection.ctx?.record_raw_data || {};
+    const newRaw = newSection.ctx?.record_raw_data || (newSection.ctx = { ...(newSection.ctx || {}), record_raw_data: {} }).record_raw_data;
+    const keys = new Set([...imageKeys(oldSection), ...imageKeys(newSection)]);
+    Object.keys(oldRaw).filter(key => key.startsWith('__image_collection__::')).forEach(key => keys.add(key));
+    for (const key of keys) if (!(key in newRaw) && key in oldRaw) newRaw[key] = jsonClone(oldRaw[key]);
+
+    const oldFields = new Map<string, any>();
+    for (const group of oldSection.groups || []) for (const field of group.fields || []) {
+      if (['image', 'report_photo_table', 'report_image_gallery'].includes(field?.type)) oldFields.set(field.id || field.code, field);
+    }
+    for (const group of newSection.groups || []) for (const field of group.fields || []) {
+      const old = oldFields.get(field?.id || field?.code);
+      if (!old || !['image', 'report_photo_table', 'report_image_gallery'].includes(field?.type)) continue;
+      if (field.image_photos === undefined && old.image_photos !== undefined) field.image_photos = jsonClone(old.image_photos);
+      if (field.image_items === undefined && old.image_items !== undefined) field.image_items = jsonClone(old.image_items);
+      if (field.photo_table === undefined && old.photo_table !== undefined) field.photo_table = jsonClone(old.photo_table);
+      if (field.image_gallery === undefined && old.image_gallery !== undefined) field.image_gallery = jsonClone(old.image_gallery);
+    }
+  };
+  mergeSection(previous?.cover, next?.cover);
+  const oldProjects = previous?.projects || [];
+  for (let i = 0; i < (next?.projects || []).length; i++) {
+    const project = next.projects[i];
+    const old = oldProjects.find((p: any) => p.record_data_id && p.record_data_id === project.record_data_id) || oldProjects[i];
+    mergeSection(old, project);
+  }
+  return next;
+}
+
+/** 从首页草稿中取真正属于图片分区的 ctx 快照，不能用整个 ctx 覆盖各报告的首页数据。 */
+function pickCoverImageRawData(cover: any): Record<string, any> {
+  const raw = cover?.ctx?.record_raw_data || {};
+  const keys = new Set<string>();
+  const sourceCodes = new Set<string>();
+  for (const group of cover?.groups || []) {
+    if (group?.section_role !== 'images') continue;
+    keys.add(imageCollectionKey(group.id));
+    for (const field of group.fields || []) if (field?.type === 'image') {
+      const code = field.image_source_code || field.code;
+      keys.add(code);
+      sourceCodes.add(code);
+    }
+  }
+  const picked: Record<string, any> = {};
+  for (const key of keys) if (key in raw) picked[key] = jsonClone(raw[key]);
+  // 兼容从原始记录沿用的动态图片集合：其 group id 可能不同，但来源字段相同。
+  // 只复制与首页图片字段匹配的集合，绝不把整份首页 ctx 覆盖到其他报告。
+  for (const [key, value] of Object.entries(raw)) {
+    if (!key.startsWith('__image_collection__::') || !value || typeof value !== 'object') continue;
+    const collectionCodes = Array.isArray((value as any).source_field_codes)
+      ? (value as any).source_field_codes : [];
+    if (collectionCodes.some((code: string) => sourceCodes.has(code))) picked[key] = jsonClone(value);
+  }
+  return picked;
 }
 
 router.post('/generate', async (req: Request, res: Response) => {
@@ -156,7 +240,7 @@ router.get('/preview/:reportTemplateId', async (req: Request, res: Response) => 
  *  - cover_template_id: number       — 首页模板 id
  *  - project_assignments: { record_data_id, project_template_id, enabled?, title?, page_break? }[]
  *      手动指定每条记录用哪个项目模板渲染；可选 overrides：
- *        enabled (默认 true) / title (项目章节标题，默认模板名) / page_break (默认 true)
+ *        enabled (默认 true) / title (可选的单次项目章节标题覆盖，默认取委托单项目名) / page_break (默认 true)
  *  - mock_context?: { customer_name, sample_name, received_at }  — 演示阶段的伪委托单信息
  *
  * 返回: { report_id, warnings, pdf_url }
@@ -218,7 +302,7 @@ export async function buildReportTypst(params: {
   cover_page_template_id?: number | null;   // 可选·真封面（P3）
   project_assignments: any[];
   mock_context: any;
-  /** 可选·每报告页眉页脚元数据（接口 1.2 取号）。提供则用它，否则按订单号 fetchReportMeta（mock）。 */
+  /** 可选·每报告页眉页脚元数据（接口 1.2 取号）。server 仅使用此值；demo 缺省时使用示例值。 */
   report_meta?: ReportMeta | null;
   /** 可选·首页结构覆盖（order 级首页草稿 content_doc.cover.groups）。提供则用它替换首页模板的 field_definitions，
    *  让取号前的首页编辑（结构/样式/手改的字面量）carry 到本报告；binding/结论表仍按本报告 scope 重解析。 */
@@ -318,33 +402,29 @@ export async function buildReportTypst(params: {
   // 首页草稿 carry-over：用 order 级首页草稿的已编辑 groups 替换首页结构（含字段增删/样式/手改字面量）。
   // ctx 仍按本报告 scope 现算（见下方 coverCtx），所以 binding 与结论汇总表会按本报告样品/项目重解析。
   if (Array.isArray(cover_groups_override) && cover_groups_override.length) {
+    if (hasContinuousText({ cover: { groups: cover_groups_override } })) {
+      throw new Error('生成新报告不能复用已固定的连续正文，请使用保留字段绑定的首页草稿。');
+    }
     coverTpl.field_definitions = cover_groups_override;
   }
 
-  // 报告页眉页脚：按订单号取机构级元数据（mock 接缝 external-report-meta），注入首页主题 config。
+  // 报告页眉页脚：server 完全使用接口 1.2 数据；demo 才使用示例数据，注入首页主题 config。
   // 整篇报告 cover+projects 共用首页那一个 set page，所以页眉页脚在 cover 设一次即覆盖全文。
   // 注入到 coverTpl.layout_options 后会随 content_doc 一起快照、重渲染走同一份，保证一致（合规留痕）。
   // 报告接口（1.2）页眉页脚/抬头元数据：注入页眉页脚【且】作为 binding source='report_meta' 供封面/首页正文引用。
   let reportMetaResolved: ReportMeta | null = null;
   try {
-    // 机构级抬头（公司名称/地址/电话/传真/网址/资质/报告备注等）是本地常量，接口 1.2 未必每报告推送。
-    // 故以 config/header-footer.json（fetchReportMeta）为【底】，接口推送的【非空】字段逐个覆盖之：
-    //   接口没推公司名/地址 → 回退配置默认（修复"单位名称/地址已配映射但出报告拉不到"）；
-    //   接口推了真实报告号/校验码/客户名 → 覆盖 mock/默认。
-    // 不再是"接口给了个对象就整体丢默认"（原 `report_meta || mock` 的坑：接口对象里缺的字段全空）。
-    const base = await fetchReportMeta(order_no);
-    let resolved: ReportMeta = base;
-    if (report_meta) {
-      const merged: any = { ...base };
-      // ⚠️ 客户（委托单位）名称/地址是【每报告】数据，只从接口取号推送来（buildReportMetaFromReq 从 CustomerName/CustomerAddress 取）。
-      // 接口没推就【留空 → 渲染成 '—'】，绝不回退 config/mock 的示例客户（否则会乱填成"奇瑞汽车"那种默认值，与真实委托方不符）。
-      // 机构常量（公司名/地址/电话/传真/网址/资质/报告备注）仍以 config 为底回退——那些才是本地固定的。
-      delete merged.customer_name;
-      delete merged.customer_address;
-      for (const [k, v] of Object.entries(report_meta)) {
-        if (v !== null && v !== undefined && String(v).trim() !== '') merged[k] = v;
-      }
-      resolved = merged as ReportMeta;
+    const resolved = await resolveReportMeta(order_no, report_meta);
+    if (integrationsProfile === 'server' && !report_meta) {
+      warnings.push({
+        type: 'report_meta_missing',
+        detail: 'server 模式未收到报告信息接口数据，页眉页脚不会使用示例值',
+      });
+    } else if (integrationsProfile === 'server' && !String(resolved.qualification_note || '').trim()) {
+      warnings.push({
+        type: 'qualification_note_missing',
+        detail: '报告信息接口未提供资质备注 QualificationRemark，正式报告资质将留空',
+      });
     }
     reportMetaResolved = resolved;
     // 页眉页脚由系统统一写死（config/header-footer.json），不再读模板里的用户自配版式：
@@ -394,7 +474,10 @@ export async function buildReportTypst(params: {
   const recMap = new Map<number, any>();
   const tplMap = new Map<number, any>();
   if (assignmentRecIds.length) {
-    const r = await pool.query('SELECT * FROM record_data WHERE id = ANY($1)', [assignmentRecIds]);
+    const r = await pool.query(
+      `SELECT r.*, b.shared_data AS batch_shared_data
+         FROM record_data r LEFT JOIN record_batches b ON b.id=r.record_batch_id
+        WHERE r.id = ANY($1)`, [assignmentRecIds]);
     for (const row of r.rows) recMap.set(row.id, row);
     // 关键：渲染时按 record_data.template_version_id 锁定的快照，
     // 而不是模板当前最新版本——保证历史数据可重现（P0 #2）
@@ -467,7 +550,7 @@ export async function buildReportTypst(params: {
   let projects: any[] = [];
   const projectSummary: any[] = [];
   // P-Map-7：每项目先收一条原始记录（含 sample_no + 子结论列表），循环后按样品分组排序、跑 index 再展平成 projectSummary。
-  const projectRecords: Array<{ sample_no?: string; sample_name: string; name: string; standard: string; conclusions: Array<{ sub_name?: string; value: string }> }> = [];
+  const projectRecords: Array<{ sample_no?: string; sample_name: string; name: string; standard: string; conclusions: Array<{ sub_name?: string; value: string; judgment_requirement?: string }> }> = [];
   const allDeviceCodes: Set<string> = new Set();
 
   for (const a of activeAssignments) {
@@ -480,6 +563,22 @@ export async function buildReportTypst(params: {
     if (!recData) {
       warnings.push({ type: 'record_missing', project_template_id: a.project_template_id });
       continue;
+    }
+    if (recData.cancelled_at) {
+      warnings.push({ type: 'record_method_cancelled', record_data_id: a.record_data_id });
+      continue;
+    }
+    if (projTpl.linked_record_template_id != null
+        && Number(projTpl.linked_record_template_id) !== Number(recData.template_id)) {
+      throw new Error(
+        `项目模板 ${projTpl.name || projTpl.id} 未关联原始记录模板 ${recData.template_id}，已阻止错误数据拉取`,
+      );
+    }
+    if (a.project_template_version_id != null
+        && Number(projTpl.current_version_id) !== Number(a.project_template_version_id)) {
+      throw new Error(
+        `项目模板 ${projTpl.name || projTpl.id} 的生效版本已变化，请刷新候选后重新确认`,
+      );
     }
 
     // 优先用 record_data.template_version_id 锁定的版本快照渲染（P0 #2）
@@ -499,7 +598,34 @@ export async function buildReportTypst(params: {
       layout_options: rawTpl.layout_options || {},
     };
 
-    const merged: Record<string, any> = { ...(recData.raw_data || {}), ...(recData.derived_data || {}) };
+    const effectiveRaw: Record<string, any> = { ...(recData.raw_data || {}), ...(recData.batch_shared_data || {}) };
+    const headerChanges = findRecordHeaderChanges(linkedTpl, effectiveRaw);
+    if (headerChanges.length) {
+      warnings.push({
+        type: 'record_free_grid_header_changed', record_data_id: recData.id,
+        tables: [...new Set(headerChanges.map(change => change.table))], changes: headerChanges,
+        detail: '数据录入时修改了表头名称（可能包含新增试样表头）。映射仍按稳定标识取值，请核对报告中的表头名称及其对应数据，必要时修改报告。',
+      });
+    }
+    const entryAdjustedTables = linkedTpl.groups.flatMap(group => group.fields || [])
+      .filter(field => {
+        if (field.type !== 'free_grid') return false;
+        const value = effectiveRaw[field.code];
+        const instanceTable = value && typeof value === 'object' ? value.__free_table_structure__ : null;
+        return !!instanceTable && (
+          (instanceTable.rows || []).some((row: any) => row?.entry_added)
+          || (instanceTable.columns || []).some((column: any) => column?.entry_added)
+        );
+      });
+    if (entryAdjustedTables.length) {
+      warnings.push({
+        type: 'record_free_grid_structure_changed',
+        record_data_id: recData.id,
+        tables: entryAdjustedTables.map(field => field.label || field.code),
+        detail: '数据录入时新增了非试样行或列；新增结构已保留在原始记录中，但项目模板不会自动映射这些临时位置。',
+      });
+    }
+    const merged: Record<string, any> = { ...effectiveRaw, ...(recData.derived_data || {}) };
     let flat = flattenMatrixValuesToFlatData(linkedTpl, merged);
     flat = applyMatrixCellFormulas(linkedTpl, flat);
     flat = applyMatrixSummaryFormulas(linkedTpl, flat);
@@ -512,12 +638,38 @@ export async function buildReportTypst(params: {
     // 展平 variant_list / select 自定义等复杂字段，使 binding `record_field` 能取到字符串
     flat = flattenDataForDisplay(linkedTpl, flat);
 
+    // 新模型：结论是“分区模块 + 独立字段”；旧 record_conclusion 复合字段由统一读取器兼容。
+    const recordConclusion = extractRecordConclusion(linkedTpl, effectiveRaw);
+    const reportableItems = recordConclusion?.items.filter(item => item.status === 'completed' && item.report_enabled) || [];
+    const structuredConclusions = reportableItems.map(item => ({
+      sub_name: recordConclusion?.mode === 'children' ? item.name : undefined,
+      value: item.conclusion || '—',
+      judgment_requirement: item.judgment_requirement,
+      project_name: recordConclusion?.project_name || '',
+    }));
+    // 结构化结论存在但本次没有任何可进报告的已完成项：整份方法记录不生成报告项目。
+    if (recordConclusion && structuredConclusions.length === 0) {
+      warnings.push({ type: 'record_conclusion_no_reportable_item', record_data_id: recData.id, template_id: recData.template_id });
+      continue;
+    }
+    const structuredRecordConclusion = recordConclusion ? {
+      mode: recordConclusion.mode,
+      project_name: recordConclusion.project_name,
+      judgment_requirement: recordConclusion.judgment_requirement,
+      conclusion: recordConclusion.conclusion,
+      items: structuredConclusions.map(item => ({
+        name: item.sub_name,
+        judgment_requirement: item.judgment_requirement,
+        conclusion: item.value,
+      })),
+    } : undefined;
+
     // 收集本项目自己的设备引用（不要混到其它项目）
     const projectDeviceCodes: string[] = [];
     for (const g of linkedTpl.groups) {
       for (const f of g.fields) {
         if (f.type === 'device_ref') {
-          const v = (recData.raw_data || {})[f.code];
+          const v = effectiveRaw[f.code];
           if (Array.isArray(v)) {
             for (const c of v) {
               if (c) {
@@ -550,26 +702,35 @@ export async function buildReportTypst(params: {
       test_info: testInfo,
       report_meta: reportMetaCtx,
       record_flat_data: flat,
-      record_raw_data: recData.raw_data || {},
+      record_raw_data: effectiveRaw,
+      record_conclusion: structuredRecordConclusion,
       record_meta: projMeta,
       linked_record_template: linkedTpl,
     };
 
     const titleOverride = (a.title || '').trim();
-    // 项目名优先级（6.7）：工作台改的 title > 项目报告模板「项目名称」(layout_options.project_name)
-    //   > 关联原始记录的 project_name（兼容存量）> 原始记录模板名 > 项目报告模板名
-    const displayName = titleOverride
-      || (projTpl.layout_options as any)?.project_name
-      || (linkedTpl.layout_options as any)?.project_name
-      || linkedTpl.name || projTpl.name;
-    // 6.7：检测结论＝项目报告模板声明的 conclusions[]，逐条按 binding 从关联原始记录解析（值本质是数据）。
-    // 子项目↔结论框一对一（每条自带 sub_name + binding）。无声明＝该项目暂无结论（'—'）。
+    // 新模型严格以原始记录结论分区的总项目名称为准；工作台 title 与 layout_options.project_name
+    // 只在存量（无结构化结论）记录中继续作为兼容来源。
+    const structuredProjectName = recordConclusion?.project_name || '';
+    const displayName = recordConclusion
+      ? (structuredProjectName
+        || String(recData.test_item_name || testInfo.project_name || '').trim()
+        || linkedTpl.name || projTpl.name)
+      : (titleOverride
+        || String(recData.test_item_name || testInfo.project_name || '').trim()
+        || (projTpl.layout_options as any)?.project_name
+        || (linkedTpl.layout_options as any)?.project_name
+        || linkedTpl.name || projTpl.name);
+    // 新模板优先使用原始记录结构化结论；存量模板继续使用项目报告模板上的单结论绑定。
     const conclDecls: Array<{ sub_name?: string; binding: any }> =
       Array.isArray((projTpl.layout_options as any)?.conclusions) ? (projTpl.layout_options as any).conclusions : [];
     const toStr = (v: any) => (v === null || v === undefined || v === '') ? '—' : String(v);
-    const conclusionFields = conclDecls
+    const legacyConclusionFields = conclDecls.slice(0, 1)
       .filter(d => d && d.binding)
-      .map(d => ({ sub_name: d.sub_name, value: toStr(resolveBinding(d.binding, projCtx)) }));
+      .map(d => ({ sub_name: undefined, value: toStr(resolveBinding(d.binding, projCtx)) }));
+    const conclusionFields = recordConclusion
+      ? structuredConclusions.map(({ sub_name, value, judgment_requirement }) => ({ sub_name, value, judgment_requirement }))
+      : legacyConclusionFields;
     const sInfo: any = sampleInfo;
     projectRecords.push({
       sample_no: (sInfo.sort_no != null && sInfo.sort_no !== '') ? String(sInfo.sort_no) : undefined,
@@ -588,7 +749,8 @@ export async function buildReportTypst(params: {
       groups: projGroups,
       layout_options: projTpl.layout_options || {},
       record_flat_data: flat,
-      record_raw_data: recData.raw_data || {},
+      record_raw_data: effectiveRaw,
+      record_conclusion: structuredRecordConclusion,
       record_meta: projMeta,
       linked_record_template: linkedTpl,
       order_meta: orderMeta,
@@ -619,7 +781,7 @@ export async function buildReportTypst(params: {
         projectSummary.push({
           index: runningIdx,
           name: pr.name,
-          standard: pr.standard,
+          standard: c.judgment_requirement || pr.standard,
           conclusion: c.value,
           sample_no: pr.sample_no,
           sample_name: pr.sample_name,
@@ -644,10 +806,9 @@ export async function buildReportTypst(params: {
       foundCodes.add(row.asset_code);
       if (!row.trace_date || !row.expire_date) {
         warnings.push({ type: 'equipment_missing_date', asset_code: row.asset_code, name: row.name });
-        continue;
       }
-      const td = new Date(row.trace_date).toISOString().slice(0, 10);
-      const ed = new Date(row.expire_date).toISOString().slice(0, 10);
+      const td = row.trace_date ? new Date(row.trace_date).toISOString().slice(0, 10) : '';
+      const ed = row.expire_date ? new Date(row.expire_date).toISOString().slice(0, 10) : '';
       // 溯源日期 / 到期日期 分列直接取自设备库
       const entry = {
         name: row.name,
@@ -686,6 +847,27 @@ export async function buildReportTypst(params: {
       sort_no: joinSample(orderSamples.map(s => s.sort_no)),
       model: joinSample(orderSamples.map(s => s.model)),
     };
+    // 首页没有单一项目上下文，按本报告 scope 内原始记录做确定性汇总：
+    // 检测时间＝最早提交时间，审核时间＝最晚审核时间；人员去重后用顿号合并。
+    const scopedRecords = activeAssignments
+      .map((assignment: any) => recMap.get(assignment.record_data_id))
+      .filter(Boolean);
+    const uniqueNames = (key: 'tester_name' | 'reviewer_name') => [...new Set(scopedRecords
+      .map((record: any) => String(record[key] || '').trim()).filter(Boolean))].join('、');
+    const pickTime = (key: 'tested_at' | 'reviewed_at', mode: 'min' | 'max') => {
+      const values = scopedRecords.map((record: any) => record[key]).filter(Boolean);
+      if (!values.length) return null;
+      return values.slice().sort((a: any, b: any) => {
+        const diff = new Date(a).getTime() - new Date(b).getTime();
+        return mode === 'min' ? diff : -diff;
+      })[0];
+    };
+    const coverRecordMeta = {
+      tester_name: uniqueNames('tester_name') || null,
+      tested_at: pickTime('tested_at', 'min'),
+      reviewer_name: uniqueNames('reviewer_name') || null,
+      reviewed_at: pickTime('reviewed_at', 'max'),
+    };
     const coverCtx: ReportRenderCtx = {
       order: {
         order_no,
@@ -697,6 +879,7 @@ export async function buildReportTypst(params: {
       order_samples: orderSamples,
       report_sample: reportSample,
       report_meta: reportMetaCtx,
+      record_meta: coverRecordMeta,
       project_summary: projectSummary,
       equipment_rows: allEquipmentRows,
       blank_scope: blank_scope || false,   // 取号前：样品信息表 / 检测结论表出占位
@@ -713,7 +896,7 @@ export async function buildReportTypst(params: {
           name: coverPageTpl.name,
           groups: coverPageTpl.field_definitions,
           layout_options: coverPageTpl.layout_options || {},
-          ctx: { order: coverCtx.order, order_meta: orderMeta, order_samples: orderSamples, report_meta: reportMetaCtx } as any,
+          ctx: { order: coverCtx.order, order_meta: orderMeta, order_samples: orderSamples, report_meta: reportMetaCtx, record_meta: coverRecordMeta } as any,
         },
       } : {}),
       cover: {
@@ -740,6 +923,7 @@ export async function buildReportTypst(params: {
           equipment_rows: p.equipment_rows || [],
           record_flat_data: p.record_flat_data,
           record_raw_data: p.record_raw_data,
+          record_conclusion: p.record_conclusion,
           record_meta: p.record_meta,
           linked_record_template: p.linked_record_template,
         } as any,
@@ -786,7 +970,7 @@ export async function buildReportTypst(params: {
 /**
  * 生成一份报告并入库（buildReportTypst → 编译 → INSERT reports + 审计）。
  * generate-batch（手动拆分）与外部取号生成（接口 1.2，routes/external.ts）共用，
- * 保证装配 / 入库 / 留痕口径一致。`report_meta` 提供则用每报告元数据，否则按订单 mock。
+ * 保证装配 / 入库 / 留痕口径一致。`report_meta` 提供则使用接口元数据；缺省时仅 demo 使用示例，server 保持空白。
  */
 export async function generateAndStoreReport(params: {
   order_no: string;
@@ -819,7 +1003,22 @@ export async function generateAndStoreReport(params: {
   try { await compileTypst(finalTypst); compiled = true; }
   catch (e: any) { warnings.push({ type: 'compile_failed', detail: e.message }); }
 
-  const scope = { sample_label, record_data_ids: assignmentRecIds, project_template_ids: assignmentTplIds };
+  const scope = {
+    sample_label,
+    record_data_ids: assignmentRecIds,
+    project_template_ids: assignmentTplIds,
+    // 组合关系与生成时实际采用的项目模板版本一并快照。不能只保留两个平行 id 数组，
+    // 否则同一份原始记录使用多个项目模板时，事后无法准确还原每个章节的数据来源。
+    project_assignments: project_assignments.filter((a: any) => a.enabled !== false).map((a: any) => ({
+      scope_key: a.scope_key || null,
+      record_data_id: Number(a.record_data_id),
+      project_template_id: Number(a.project_template_id),
+      project_template_version_id: a.project_template_version_id == null
+        ? null : Number(a.project_template_version_id),
+      title: a.title || null,
+      page_break: a.page_break !== false,
+    })),
+  };
   const docJson = contentDoc ? JSON.stringify(contentDoc) : null;
   const ins = await pool.query(
     `INSERT INTO reports (order_no, cover_template_id, project_template_ids, record_data_ids,
@@ -1081,33 +1280,46 @@ router.post('/cover-draft', async (req: Request, res: Response) => {
  * 每条记录用其原始记录模板 id，匹配一个未归档的项目报告模板（linked_record_template_id 相同）。
  * 一个记录模板可能对应多个项目模板，取 id 最小（稳定）；没有对应项目模板的记录跳过。
  */
-async function deriveApprovedAssignments(order_no: string, includeAll = false): Promise<Array<{ record_data_id: number; project_template_id: number }>> {
+async function deriveApprovedAssignments(
+  order_no: string,
+  includeAll = false,
+  includeAllLinkedTemplates = false,
+): Promise<Array<{ record_data_id: number; project_template_id: number }>> {
   // includeAll（编辑首页草稿·订单级预览）：不限审核状态，覆盖订单下【全部】原始记录 → 结论表列出订单对应的所有测试项目；
   // 缺省（取号生成 / scope-candidates）：仅 reviewed 已审核通过的记录（最终报告只能用审核通过的数据）。
   const recs = await pool.query(
     includeAll
-      ? `SELECT id, template_id FROM record_data WHERE order_no = $1 ORDER BY id`
-      : `SELECT id, template_id FROM record_data WHERE order_no = $1 AND audit_status = 'reviewed' ORDER BY id`,
+      ? `SELECT id, template_id FROM record_data WHERE order_no = $1 AND cancelled_at IS NULL ORDER BY id`
+      : `SELECT id, template_id FROM record_data WHERE order_no = $1 AND audit_status = 'reviewed' AND cancelled_at IS NULL ORDER BY id`,
     [order_no]);
   if (!recs.rows.length) return [];
   const recTplIds = [...new Set(recs.rows.map((r: any) => r.template_id).filter((x: any) => x != null))];
   if (!recTplIds.length) return [];
   // 仅取【当前生效版本已审核通过】的项目模板——未审核（草稿/待审）的项目模板不参与报告生成。
   const projs = await pool.query(
-    `SELECT t.id, t.linked_record_template_id FROM report_templates t
+    `SELECT t.id, t.linked_record_template_id,
+            t.host_manufacturer_id
+     FROM report_templates t
      JOIN report_template_versions cv ON cv.id = t.current_version_id
      WHERE t.template_kind = 'project' AND t.archived_at IS NULL
        AND t.linked_record_template_id = ANY($1) AND cv.status = 'approved'
-     ORDER BY t.id`,
+     ORDER BY t.linked_record_template_id,
+              CASE WHEN t.host_manufacturer_id IS NULL THEN 0 ELSE 1 END,
+              t.id`,
     [recTplIds]);
-  const projByRecTpl = new Map<number, number>();
+  const projByRecTpl = new Map<number, number[]>();
   for (const p of projs.rows) {
-    if (!projByRecTpl.has(p.linked_record_template_id)) projByRecTpl.set(p.linked_record_template_id, p.id);
+    const ids = projByRecTpl.get(p.linked_record_template_id) || [];
+    ids.push(p.id);
+    projByRecTpl.set(p.linked_record_template_id, ids);
   }
   const assignments: Array<{ record_data_id: number; project_template_id: number }> = [];
   for (const r of recs.rows) {
-    const pid = projByRecTpl.get(r.template_id);
-    if (pid) assignments.push({ record_data_id: r.id, project_template_id: pid });
+    const pids = projByRecTpl.get(r.template_id) || [];
+    const selectedPids = includeAllLinkedTemplates ? pids : pids.slice(0, 1);
+    for (const pid of selectedPids) {
+      assignments.push({ record_data_id: r.id, project_template_id: pid });
+    }
   }
   return assignments;
 }
@@ -1252,29 +1464,36 @@ router.get('/:id/docx', async (req: Request, res: Response) => {
  *  - 原始 Typst 编辑（旧）：传 final_typst / blocks_snapshot 直接覆盖。
  */
 router.put('/:id', async (req: Request, res: Response) => {
+  if (!await assertEditLease(req, res, 'report_instance', String(req.params.id))) return;
   const { final_typst, blocks_snapshot, content_doc } = req.body;
 
   if (content_doc) {
+    const prev = await pool.query('SELECT content_doc, is_cover_draft FROM reports WHERE id = $1', [req.params.id]);
+    if (!prev.rows.length) { res.status(404).json({ error: '报告不存在' }); return; }
+    if (prev.rows[0].is_cover_draft && hasContinuousText(content_doc)) {
+      res.status(400).json({ error: '公共首页草稿需要保留字段绑定，请在生成后的报告中编辑连续正文。' }); return;
+    }
+    // 保存时以当前库中图片为兜底，防止客户端局部编辑快照遗漏图片数据导致整段图片被清空。
+    const safeContentDoc = preserveImageState(prev.rows[0].content_doc, content_doc);
     let rendered: string;
     try {
-      rendered = renderContentDoc(content_doc);
+      rendered = renderContentDoc(safeContentDoc);
     } catch (e: any) {
       res.status(400).json({ error: '实例文档渲染失败：' + e.message });
       return;
     }
     // 与上一版 content_doc 比较，留痕本次改了哪些字段
-    const prev = await pool.query('SELECT content_doc FROM reports WHERE id = $1', [req.params.id]);
-    const diff = prev.rows.length ? diffContentDocValues(prev.rows[0].content_doc, content_doc) : [];
+    const diff = diffContentDocValues(prev.rows[0].content_doc, safeContentDoc);
     await pool.query(
       `UPDATE reports SET content_doc = $1::jsonb, final_typst = $2, edited = true, version = version + 1
        WHERE id = $3`,
-      [JSON.stringify(content_doc), rendered, req.params.id]
+      [JSON.stringify(safeContentDoc), rendered, req.params.id]
     );
     if (diff.length) {
       await writeReportAudit(Number(req.params.id), 'edit', reportActor(req), diff,
         `结构化编辑 ${diff.length} 处`);
     }
-    res.json({ ok: true, edited: true, changes: diff.length });
+    res.json({ ok: true, edited: true, changes: diff.length, content_doc: safeContentDoc });
     return;
   }
 
@@ -1304,6 +1523,9 @@ router.post('/apply-cover', async (req: Request, res: Response) => {
   const draftRes = await pool.query(
     'SELECT content_doc FROM reports WHERE order_no = $1 AND is_cover_draft = true LIMIT 1', [order_no]);
   const draftCover = draftRes.rows[0]?.content_doc?.cover;
+  if (hasContinuousText({ cover: draftCover })) {
+    res.status(400).json({ error: '首页草稿含有固定报告正文，不能批量应用，以免覆盖其他报告的样品信息。' }); return;
+  }
   if (!draftCover) { res.status(404).json({ error: '本订单没有首页草稿，无法套用' }); return; }
 
   const out: Array<{ id: number; ok: boolean; error?: string }> = [];
@@ -1331,10 +1553,13 @@ router.post('/apply-cover', async (req: Request, res: Response) => {
       // 换首页结构/图片/样式，保留本报告的 ctx / 页眉页脚 / 项目段。
       // 首页原样照片（image 分区）存于草稿 cover.ctx.record_raw_data（按字段 code），不在 groups 里——
       // 须把草稿的这些照片并入本报告首页 ctx.record_raw_data，否则套用后首页照片会丢（显示空）。
-      const draftCoverPhotos = draftCover.ctx?.record_raw_data || {};
-      cd.cover = {
-        ...cd.cover,
-        groups: draftCover.groups,
+      const draftCoverPhotos = pickCoverImageRawData(draftCover);
+      // 使用全新对象而非原地修改数据库驱动返回的 JSON；项目段始终从原报告完整保留。
+      const nextDoc = {
+        ...jsonClone(cd),
+        cover: {
+        ...jsonClone(cd.cover),
+        groups: jsonClone(draftCover.groups || []),
         layout_options: {
           ...(cd.cover.layout_options || {}),
           theme_config: draftCover.layout_options?.theme_config ?? cd.cover.layout_options?.theme_config,
@@ -1343,11 +1568,15 @@ router.post('/apply-cover', async (req: Request, res: Response) => {
           ...(cd.cover.ctx || {}),
           record_raw_data: { ...((cd.cover.ctx || {}).record_raw_data || {}), ...draftCoverPhotos },
         },
+        },
+        // 明确保留项目段，防止首页草稿（cover-only）结构被误当作完整文档保存。
+        projects: jsonClone(cd.projects || []),
       };
-      const finalTypst = renderContentDoc(cd);
+      const safeDoc = preserveImageState(cd, nextDoc);
+      const finalTypst = renderContentDoc(safeDoc);
       await pool.query(
         'UPDATE reports SET content_doc = $1::jsonb, final_typst = $2, edited = true, version = version + 1 WHERE id = $3',
-        [JSON.stringify(cd), finalTypst, rid]);
+        [JSON.stringify(safeDoc), finalTypst, rid]);
       await writeReportAudit(rid, 'edit', reportActor(req), [], '套用首页草稿（结构/图片/样式）');
       out.push({ id: rid, ok: true });
     } catch (e: any) {
@@ -1360,15 +1589,75 @@ router.post('/apply-cover', async (req: Request, res: Response) => {
 /**
  * GET /api/reports/:id/scope-candidates — 列出本报告所属订单可纳入的全部「样品 × 项目」候选，
  * 并标记当前报告已包含哪些。供实例编辑器「调整样品/项目」弹窗勾选。
- * 候选来源与生成时一致：deriveApprovedAssignments（订单下审核通过的原始记录 × 关联项目模板）。
+ * 候选来源为整单全部审核通过的原始记录 × 关联项目模板；同时保留当前报告已经使用的组合，
+ * 这样旧报告即使来源记录/模板后来变更，也不会在“调整范围”中凭空消失。
  */
 router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
   try {
-    const r = await pool.query('SELECT order_no, scope FROM reports WHERE id = $1', [req.params.id]);
+    const r = await pool.query(
+      `SELECT r.order_no, r.scope, r.external_status, r.is_cover_draft,
+              EXISTS (
+                SELECT 1 FROM report_requisitions rq
+                 WHERE rq.report_id = r.id AND rq.delivery_status = 'sent'
+              ) AS delivered
+         FROM reports r WHERE r.id = $1`,
+      [req.params.id],
+    );
     if (!r.rows.length) { res.status(404).json({ error: 'Not found' }); return; }
-    const { order_no, scope } = r.rows[0];
+    const { order_no, scope, external_status, is_cover_draft, delivered } = r.rows[0];
+    // 项目模板的新版只能自动带入“未送审、仍在生成/编辑阶段”的报告。
+    // 已回传、外部审核中/已通过，以及外部退回修改的报告都保留生成时的模板快照，
+    // 后者只允许用户针对退回意见手动改，不接受模板自动刷新。
+    const templateRefreshAllowed = !is_cover_draft && !delivered
+      && (!external_status || external_status === 'none');
     const includedRecIds = new Set<number>(((scope?.record_data_ids) || []).map((x: any) => Number(x)));
-    const candidates = await deriveApprovedAssignments(order_no);
+    const scopedAssignments = Array.isArray(scope?.project_assignments) ? scope.project_assignments : [];
+    const hasScopedPairs = scopedAssignments.some((x: any) => x?.record_data_id && x?.project_template_id);
+    const includedPairs = new Set<string>(
+      scopedAssignments
+        .map((x: any) => `${Number(x.record_data_id)}:${Number(x.project_template_id)}`),
+    );
+    const includedVersionByPair = new Map<string, number | null>(scopedAssignments
+      .filter((x: any) => x?.record_data_id && x?.project_template_id)
+      .map((x: any) => [
+        `${Number(x.record_data_id)}:${Number(x.project_template_id)}`,
+        x.project_template_version_id == null ? null : Number(x.project_template_version_id),
+      ]));
+    const approvedCandidates = await deriveApprovedAssignments(order_no, false, true);
+    const currentCandidates = (Array.isArray(scope?.project_assignments) ? scope.project_assignments : [])
+      .filter((x: any) => x?.record_data_id && x?.project_template_id)
+      .map((x: any) => ({
+        record_data_id: Number(x.record_data_id),
+        project_template_id: Number(x.project_template_id),
+      }));
+    // 兼容项目组合快照上线前生成的旧报告：它们只有两组平行 id 数组。
+    // 当长度一致时按下标还原；单项目模板时复用这一模板，避免旧报告的调整弹窗变成空白。
+    if (!currentCandidates.length) {
+      const legacyRecIds = Array.isArray(scope?.record_data_ids) ? scope.record_data_ids : [];
+      const legacyTplIds = Array.isArray(scope?.project_template_ids) ? scope.project_template_ids : [];
+      legacyRecIds.forEach((recordId: any, index: number) => {
+        const templateId = legacyTplIds[index] ?? (legacyTplIds.length === 1 ? legacyTplIds[0] : null);
+        if (recordId && templateId) currentCandidates.push({
+          record_data_id: Number(recordId), project_template_id: Number(templateId),
+        });
+      });
+    }
+    const pairMap = new Map<string, { record_data_id: number; project_template_id: number }>();
+    [...approvedCandidates, ...currentCandidates].forEach((candidate) => {
+      pairMap.set(`${Number(candidate.record_data_id)}:${Number(candidate.project_template_id)}`, candidate);
+    });
+    // 即使某条已审核原始记录尚未关联/生效项目模板，也要作为“待配置项目”展示。
+    // 用户可先把它纳入报告范围（首页样品信息随之更新），待模板就绪后再补充项目明细页。
+    const allReviewed = await pool.query(
+      `SELECT id, sample_external_id, test_item_name FROM record_data
+        WHERE order_no=$1 AND audit_status='reviewed' AND cancelled_at IS NULL ORDER BY id`, [order_no]);
+    const recordsWithTemplate = new Set(approvedCandidates.map(c => Number(c.record_data_id)));
+    for (const record of allReviewed.rows) {
+      if (!recordsWithTemplate.has(Number(record.id))) {
+        pairMap.set(`${Number(record.id)}:0`, { record_data_id: Number(record.id), project_template_id: 0 });
+      }
+    }
+    const candidates = [...pairMap.values()];
     if (!candidates.length) { res.json({ order_no, candidates: [] }); return; }
 
     const recIds = candidates.map(c => c.record_data_id);
@@ -1377,7 +1666,7 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
       `SELECT id, tester_name, sample_external_id, test_item_name FROM record_data WHERE id = ANY($1)`, [recIds]);
     const recById = new Map<number, any>(recRes.rows.map((x: any) => [Number(x.id), x]));
     const projRes = await pool.query(
-      `SELECT t.id, t.name, cv.layout_options
+      `SELECT t.id, t.name, t.current_version_id, cv.layout_options
          FROM report_templates t
          LEFT JOIN report_template_versions cv ON cv.id = t.current_version_id
         WHERE t.id = ANY($1)`, [projIds]);
@@ -1394,7 +1683,16 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
       const proj = projById.get(Number(c.project_template_id)) || {};
       const sid = rec.sample_external_id;
       const sInfo = sampleById.get(String(sid)) || sampleByName.get(String(sid)) || {};
-      const projName = (proj.layout_options?.project_name) || proj.name || `项目#${c.project_template_id}`;
+      const pendingTemplate = Number(c.project_template_id) === 0;
+      const projName = rec.test_item_name
+        || (pendingTemplate ? '测试项目' : ((proj.layout_options?.project_name) || proj.name || `项目#${c.project_template_id}`));
+      const pairKey = `${Number(c.record_data_id)}:${Number(c.project_template_id)}`;
+      const included = hasScopedPairs
+        ? includedPairs.has(pairKey)
+        : includedRecIds.has(Number(c.record_data_id))
+          || (Array.isArray(scope?.selected_record_data_ids) && scope.selected_record_data_ids.map(Number).includes(Number(c.record_data_id)));
+      const selectedVersionId = includedVersionByPair.get(pairKey) ?? null;
+      const currentVersionId = proj.current_version_id == null ? null : Number(proj.current_version_id);
       return {
         record_data_id: c.record_data_id,
         project_template_id: c.project_template_id,
@@ -1403,10 +1701,21 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
         sample_no: sInfo.sort_no != null ? String(sInfo.sort_no) : '',
         test_item_name: rec.test_item_name || '',
         tester_name: rec.tester_name || '',
-        included: includedRecIds.has(Number(c.record_data_id)),
+        needs_template: pendingTemplate,
+        included,
+        project_template_version_id: currentVersionId,
+        selected_project_template_version_id: selectedVersionId,
+        // 历史报告未记录版本 id 时也视为需刷新：自动重建一次后即会补齐快照。
+        template_updated: templateRefreshAllowed && included && !pendingTemplate && !!currentVersionId
+          && selectedVersionId !== currentVersionId,
       };
     });
-    res.json({ order_no, candidates: out });
+    res.json({
+      order_no,
+      candidates: out,
+      template_refresh_allowed: templateRefreshAllowed,
+      template_refresh_blocked_reason: templateRefreshAllowed ? null : '报告已送审或已进入外部流程，保留生成时的项目模板快照',
+    });
   } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
@@ -1421,15 +1730,60 @@ router.post('/:id/rescope', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: '非法 id' }); return; }
   const assignments = Array.isArray(req.body?.assignments) ? req.body.assignments : null;
+  const refreshFromTemplate = req.body?.refresh_from_template === true;
   if (!assignments) { res.status(400).json({ error: 'assignments 必填' }); return; }
-  const enabled = assignments.filter((a: any) => a && a.enabled !== false && a.record_data_id && a.project_template_id);
-  if (!enabled.length) { res.status(400).json({ error: '至少选择一个样品/项目' }); return; }
+  const selected = assignments.filter((a: any) => a && a.enabled !== false && a.record_data_id);
+  if (!selected.length) { res.status(400).json({ error: '至少选择一个样品/项目' }); return; }
+  const enabled = selected.filter((a: any) => Number(a.project_template_id) > 0);
   try {
     const r = await pool.query(
-      'SELECT order_no, cover_template_id, content_doc, scope FROM reports WHERE id = $1', [id]);
+      `SELECT r.order_no, r.cover_template_id, r.content_doc, r.scope,
+              r.external_status, r.is_cover_draft,
+              EXISTS (
+                SELECT 1 FROM report_requisitions rq
+                 WHERE rq.report_id = r.id AND rq.delivery_status = 'sent'
+              ) AS delivered
+         FROM reports r WHERE r.id = $1`, [id]);
     if (!r.rows.length) { res.status(404).json({ error: 'Not found' }); return; }
     const row = r.rows[0];
-    const coverGroups = row.content_doc?.cover?.groups || null;   // 沿用本报告首页结构/图片/样式
+    if (refreshFromTemplate && (row.is_cover_draft || row.delivered
+        || (row.external_status && row.external_status !== 'none'))) {
+      res.status(409).json({
+        error: '该报告已送审或已进入外流程，不会因项目模板变化而修改',
+        code: 'submitted_report_template_snapshot_locked',
+      });
+      return;
+    }
+    // 非模板自动刷新的人工调整也不能越过正常送审终态；
+    // external_revision 是外部明确退回后的可编辑例外，但上面已禁止它被“模板自动刷新”。
+    if (!refreshFromTemplate && (row.external_status === 'submitted_external'
+        || row.external_status === 'external_approved'
+        || (row.delivered && row.external_status !== 'external_revision'))) {
+      res.status(409).json({ error: '已送审报告不能调整样品/项目范围' });
+      return;
+    }
+    // 只接受本订单当前可用（审核通过）的组合，或本报告已有的历史组合；避免客户端任意拼接记录/模板。
+    const approved = await deriveApprovedAssignments(row.order_no, false, true);
+    const reviewedRecords = await pool.query(
+      `SELECT id, sample_external_id FROM record_data WHERE order_no=$1 AND audit_status='reviewed' AND cancelled_at IS NULL`, [row.order_no]);
+    const reviewedRecordIds = new Set(reviewedRecords.rows.map((x: any) => Number(x.id)));
+    const existing = Array.isArray(row.scope?.project_assignments) ? row.scope.project_assignments : [];
+    const legacyExisting = existing.length ? [] : (Array.isArray(row.scope?.record_data_ids) ? row.scope.record_data_ids : [])
+      .map((recordId: any, index: number) => {
+        const templateIds = Array.isArray(row.scope?.project_template_ids) ? row.scope.project_template_ids : [];
+        const templateId = templateIds[index] ?? (templateIds.length === 1 ? templateIds[0] : null);
+        return templateId ? { record_data_id: recordId, project_template_id: templateId } : null;
+      })
+      .filter(Boolean);
+    const allowed = new Set([...approved, ...existing, ...legacyExisting]
+      .filter((a: any) => a?.record_data_id && a?.project_template_id)
+      .map((a: any) => `${Number(a.record_data_id)}:${Number(a.project_template_id)}`));
+    if (enabled.some((a: any) => !allowed.has(`${Number(a.record_data_id)}:${Number(a.project_template_id)}`))
+      || selected.some((a: any) => !reviewedRecordIds.has(Number(a.record_data_id)))) {
+      res.status(409).json({ error: '所选样品/项目不在本订单可用范围内，请刷新后重试' }); return;
+    }
+    // 重算已确认覆盖人工正文：恢复来源绑定，不能保留冻结的旧样品文字。
+    const coverGroups = row.content_doc?.cover?.groups?.map(restoreContinuousSource) || null;
     // 沿用本报告原有订单级展示值（客户名/样品名/收样日期），避免重算后这些 order 级字段被清空。
     const prevOrder = row.content_doc?.cover?.ctx?.order || {};
     const mockContext = {
@@ -1437,12 +1791,26 @@ router.post('/:id/rescope', async (req: Request, res: Response) => {
       sample_name: prevOrder.sample_name,
       received_at: prevOrder.received_at,
     };
+    const selectedRecordIds = [...new Set(selected.map((a: any) => Number(a.record_data_id)))];
+    const selectedRecordRows = reviewedRecords.rows.filter((record: any) => selectedRecordIds.includes(Number(record.id)));
+    const orderRes = await pool.query('SELECT payload FROM work_orders WHERE order_no=$1', [row.order_no]);
+    const orderSamples: any[] = Array.isArray(orderRes.rows[0]?.payload?.samples) ? orderRes.rows[0].payload.samples : [];
+    const selectedSampleIds = new Set(selectedRecordRows.map((record: any) => String(record.sample_external_id)));
+    const reportSamples = orderSamples.filter((sample: any) => selectedSampleIds.has(String(sample?.id)) || selectedSampleIds.has(String(sample?.name)))
+      .map((sample: any, index: number) => ({
+        no: sample?.sort_no != null ? String(sample.sort_no) : String(index + 1), name: sample?.name || '',
+        sort_no: sample?.sort_no != null ? String(sample.sort_no) : '', model: sample?.model || '',
+        barcode: sample?.barcode || '', id: sample?.id != null ? String(sample.id) : undefined,
+      }));
     const built = await buildReportTypst({
       order_no: row.order_no,
       cover_template_id: row.cover_template_id,
       project_assignments: enabled,
       mock_context: mockContext,
+      // 重建只能复用这份报告生成时冻结的接口 1.2 元数据，不能在 server 模式掉回示例值或清空页眉页脚。
+      report_meta: row.content_doc?.cover?.ctx?.report_meta || null,
       cover_groups_override: coverGroups,
+      report_samples: reportSamples,
     });
     const { finalTypst, contentDoc, warnings, assignmentTplIds, assignmentRecIds } = built;
 
@@ -1450,13 +1818,31 @@ router.post('/:id/rescope', async (req: Request, res: Response) => {
     try { await compileTypst(finalTypst); compiled = true; }
     catch (e: any) { warnings.push({ type: 'compile_failed', detail: e.message }); }
 
-    const scope = { sample_label: row.scope?.sample_label ?? null, record_data_ids: assignmentRecIds, project_template_ids: assignmentTplIds };
+    const versionRows = assignmentTplIds.length ? await pool.query(
+      'SELECT id, current_version_id FROM report_templates WHERE id = ANY($1)', [assignmentTplIds],
+    ) : { rows: [] as any[] };
+    const currentVersionByTemplate = new Map<number, number | null>(versionRows.rows.map((template: any) => [
+      Number(template.id), template.current_version_id == null ? null : Number(template.current_version_id),
+    ]));
+    const scope = {
+      sample_label: row.scope?.sample_label ?? null,
+      record_data_ids: assignmentRecIds,
+      project_template_ids: assignmentTplIds,
+      project_assignments: enabled.map((a: any) => ({
+        record_data_id: Number(a.record_data_id),
+        project_template_id: Number(a.project_template_id),
+        project_template_version_id: currentVersionByTemplate.get(Number(a.project_template_id)) ?? null,
+        title: a.title || null,
+        page_break: a.page_break !== false,
+      })),
+      selected_record_data_ids: selectedRecordIds,
+    };
     const docJson = contentDoc ? JSON.stringify(contentDoc) : null;
     await pool.query(
       `UPDATE reports SET content_doc = $1::jsonb, content_doc_original = $1::jsonb, final_typst = $2,
-         scope = $3::jsonb, project_template_ids = $4, record_data_ids = $5, edited = false, version = version + 1
+         scope = $3::jsonb, project_template_ids = $4, record_data_ids = $5, edited = false, version = version + 1, warnings = $7::jsonb
        WHERE id = $6`,
-      [docJson, finalTypst, JSON.stringify(scope), assignmentTplIds, assignmentRecIds, id]);
+      [docJson, finalTypst, JSON.stringify(scope), assignmentTplIds, assignmentRecIds, id, JSON.stringify(warnings)]);
     await writeReportAudit(id, 'edit', reportActor(req), [], `调整样品/项目范围并重算（${assignmentRecIds.length} 个项目）`);
     res.json({ ok: true, warnings, compiled });
   } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }

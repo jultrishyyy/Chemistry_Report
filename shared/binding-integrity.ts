@@ -12,6 +12,7 @@
  * 两侧校验口径一致。
  */
 import type { FieldGroup, CellBinding } from './types';
+import { recordSampleBands, sampleBandForCell } from './free-grid-binding';
 
 /** 报告模板里一处指向原始记录的绑定 */
 export interface BindingRef {
@@ -72,6 +73,18 @@ export function collectReportBindings(groups: FieldGroup[] | undefined): Binding
           pushHdr(sc.note_binding, `汇总列 ${sc.label} 备注`);
         }
       }
+      // free_grid（原始记录表格·从原始记录拉取生成）：每格 cell_bindings 指向记录字段/记录 free_grid 格
+      const ftbl = f.free_table;
+      if (ftbl?.cell_bindings) {
+        for (const [key, b] of Object.entries(ftbl.cell_bindings)) {
+          if (b) out.push({ path: `${base} · 原始记录表格[${key}]`, label: f.label || '原始记录表格', binding: b });
+        }
+      }
+      if (ftbl?.cell_unit_bindings) {
+        for (const [key, b] of Object.entries(ftbl.cell_unit_bindings)) {
+          if (b) out.push({ path: `${base} · 原始记录表格单位[${key}]`, label: f.label || '原始记录表格单位', binding: b });
+        }
+      }
     }
   }
   return out;
@@ -85,6 +98,8 @@ export interface RecordFieldIndex {
   imageCodes: Set<string>;
   /** matrix_code → 该矩阵的参数列 code 集 + 汇总行 id 集 + 汇总列 id 集 */
   matrices: Map<string, { params: Set<string>; summaryRows: Set<string>; summaryCols: Set<string> }>;
+  /** free_grid 字段 code → 该表所有合法格键（`${rowId}::${colId}`，行×列全组合）。供 record_free_cell(_sample) 校验。 */
+  freeGrids: Map<string, Set<string>>;
 }
 
 /** 从原始记录模板的 groups 建索引。 */
@@ -92,21 +107,32 @@ export function buildRecordFieldIndex(groups: FieldGroup[] | undefined): RecordF
   const fieldCodes = new Set<string>();
   const imageCodes = new Set<string>();
   const matrices = new Map<string, { params: Set<string>; summaryRows: Set<string>; summaryCols: Set<string> }>();
+  const freeGrids = new Map<string, Set<string>>();
   for (const g of groups ?? []) {
     for (const f of g.fields ?? []) {
+      if (f.type === 'free_grid' && f.legacy_matrix) {
+        const m = f.legacy_matrix.config;
+        matrices.set(f.code, { params: new Set(m.parameters.map(p => p.code)),
+          summaryRows: new Set((m.summary_rows || []).map(s => s.id)),
+          summaryCols: new Set((m.summary_cols || []).map(s => s.id)) });
+      }
       if (f.type === 'data_matrix' && f.matrix) {
         matrices.set(f.code, {
           params: new Set((f.matrix.parameters ?? []).map(p => p.code)),
           summaryRows: new Set((f.matrix.summary_rows ?? []).map(s => s.id)),
           summaryCols: new Set((f.matrix.summary_cols ?? []).map(c => c.id)),
         });
+      } else if (f.type === 'free_grid' && f.free_table && f.code) {
+        const keys = new Set<string>();
+        for (const r of f.free_table.rows ?? []) for (const c of f.free_table.columns ?? []) keys.add(`${r.id}::${c.id}`);
+        freeGrids.set(f.code, keys);
       } else if (f.code) {
         fieldCodes.add(f.code);
         if (f.type === 'image') imageCodes.add(f.code);
       }
     }
   }
-  return { fieldCodes, imageCodes, matrices };
+  return { fieldCodes, imageCodes, matrices, freeGrids };
 }
 
 /**
@@ -131,12 +157,13 @@ export function validateReportBindings(
   const out: DanglingBinding[] = [];
   // 单条 record_* 绑定校验（结果表绑定与检测结论声明共用）
   const checkRecordBinding = (b: CellBinding, push: (reason: string, detail: string) => void): void => {
-    if (!linked && (b.source === 'record_field' || b.source === 'record_cell' || b.source === 'record_summary' || b.source === 'record_header' || b.source === 'record_cell_sample' || b.source === 'record_sample_label' || b.source === 'record_sample_index')) {
+    if (!linked && (b.source === 'record_field' || b.source === 'record_field_unit' || b.source === 'record_cell' || b.source === 'record_summary' || b.source === 'record_header' || b.source === 'record_cell_sample' || b.source === 'record_sample_label' || b.source === 'record_sample_index' || b.source === 'record_free_cell' || b.source === 'record_free_cell_sample' || b.source === 'record_free_formula_cell' || b.source === 'record_free_formula_cell_sample' || b.source === 'record_free_template_cell' || b.source === 'record_free_cell_unit' || b.source === 'record_free_cell_unit_sample')) {
       push('未关联原始记录模板，无法校验数据绑定', `来源 ${b.source}`);
       return;
     }
     switch (b.source) {
       case 'record_field':
+      case 'record_field_unit':
         if (!idx.fieldCodes.has(b.field_code)) push('引用的记录字段不存在', `字段编码 ${b.field_code}`);
         break;
       case 'record_cell': {
@@ -170,8 +197,25 @@ export function validateReportBindings(
       }
       case 'record_sample_label':
       case 'record_sample_index': {
-        // P-Map-10：样品带样品名/序号绑定，只需矩阵存在。
-        if (!idx.matrices.get(b.matrix_code)) push('引用的数据矩阵不存在', `矩阵编码 ${b.matrix_code}`);
+        // P-Map-10：矩阵样品带需要矩阵存在；原始记录表格样品带的序号不依赖矩阵，matrix_code 允许为空。
+        if (b.matrix_code && !idx.matrices.get(b.matrix_code)) push('引用的数据矩阵不存在', `矩阵编码 ${b.matrix_code}`);
+        break;
+      }
+      case 'record_free_cell':
+      case 'record_free_cell_sample':
+      case 'record_free_formula_cell':
+      case 'record_free_formula_cell_sample':
+      case 'record_free_template_cell':
+      case 'record_free_cell_unit':
+      case 'record_free_cell_unit_sample': {
+        // F1/F2：绑定原始记录某 free_grid 字段的某个格（带内=逐样品）。
+        const keys = idx.freeGrids.get(b.field_code);
+        if (!keys) push('引用的原始记录表格字段不存在', `原始记录表格编码 ${b.field_code}`);
+        else if (!keys.has(b.cell_key)) push('原始记录表格里没有该单元格', `${b.field_code} 的单元格 ${b.cell_key}`);
+        else if (b.source === 'record_free_cell_sample' || b.source === 'record_free_formula_cell_sample' || b.source === 'record_free_cell_unit_sample') {
+          const table = recordGroups?.flatMap(group => group.fields || []).find(field => field.code === b.field_code)?.free_table;
+          if (table && !sampleBandForCell(table, b.cell_key)) push('来源格不属于可逐试样读取的区域', `${b.field_code} 的 ${b.cell_key}，请检查试样区域或重新选择来源`);
+        }
         break;
       }
       // 其余来源不指向记录字段，跳过
@@ -183,8 +227,8 @@ export function validateReportBindings(
       out.push({ path: ref.path, label: ref.label, source: b.source, reason, detail }));
   }
 
-  // 6.7：项目报告模板的检测结论声明（layout_options.conclusions[]）——每条 binding 指向原始记录判定值。
-  for (const decl of conclusions ?? []) {
+  // 项目模板只使用一个检测结论；外层数组仅为存量数据结构兼容。
+  for (const decl of (conclusions ?? []).slice(0, 1)) {
     const b = decl?.binding;
     if (!b) continue;
     const label = decl.sub_name ? `检测结论·${decl.sub_name}` : '检测结论';
@@ -196,6 +240,20 @@ export function validateReportBindings(
   for (const g of reportGroups ?? []) {
     const gLabel = g.label || g.id;
     for (const f of g.fields ?? []) {
+      // 新图片分区模型：image 字段通过 image_source_code 定位来源分区，
+      // 数据期再整体读取该分区的动态图片集合。
+      if (f.type === 'image') {
+        const source = f.image_source_code;
+        const base = `${gLabel} / ${f.label || f.code || f.id} · 图片`;
+        // 首页 image 是文员直接上传，不设置 image_source_code；仅校验明确声明了记录来源的项目图片。
+        if (!source) continue;
+        if (!linked) {
+          out.push({ path: base, label: f.label || '图片', source: 'record_field', reason: '未关联原始记录模板，无法校验图片绑定', detail: `来源 ${source}` });
+        } else if (!idx.imageCodes.has(source)) {
+          out.push({ path: base, label: f.label || '图片', source: 'record_field', reason: '绑定的图片字段不存在', detail: `原始记录图片字段 ${source}` });
+        }
+        continue;
+      }
       if (f.type !== 'report_image_gallery') continue;
       const base = `${gLabel} / ${f.label || f.code || f.id} · 图片表`;
       const pushG = (reason: string, detail: string) =>
@@ -215,33 +273,64 @@ export function validateReportBindings(
       }
     }
   }
+
+  // free_grid 样品带（source_field）：驱动样品数的记录 free_grid 字段须存在
+  for (const g of reportGroups ?? []) {
+    const gLabel = g.label || g.id;
+    for (const f of g.fields ?? []) {
+      const freeTable = f.free_table;
+      const sourceBands = (freeTable?.sample_bands ?? []).filter(band => !!band.source_field);
+      for (const band of sourceBands) {
+        if (!band.source_field) continue;
+        const base = `${gLabel} / ${f.label || f.code || f.id} · 样品带`;
+        if (!linked) out.push({ path: base, label: f.label || '原始记录表格', source: 'record_free_cell_sample', reason: '未关联原始记录模板，无法校验样品带来源', detail: `来源原始记录表格 ${band.source_field}` });
+        else if (!idx.freeGrids.has(band.source_field)) out.push({ path: base, label: f.label || '原始记录表格', source: 'record_free_cell_sample', reason: '样品带来源原始记录表格不存在', detail: `原始记录表格 ${band.source_field}` });
+        else if (band.source_band_id) {
+          const table = recordGroups?.flatMap(group => group.fields || []).find(field => field.code === band.source_field)?.free_table;
+          if (table && !recordSampleBands(table).some(source => source.id === band.source_band_id)) out.push({ path: base, label: f.label || '原始记录表格', source: 'record_free_cell_sample', reason: '原始记录的试样区域已变更', detail: '请重新拉取表格或确认试样来源，不能继续按旧区域展开' });
+        }
+      }
+      // 逐试样绑定必须落在报告侧对应的样品带内。普通新增行/列不能自由承担样品数量，
+      // 否则模板轴长度与数据录入时的实际试样数不一致，展开后会错位。
+      for (const [cellKey, binding] of [...Object.entries(freeTable?.cell_bindings ?? {}), ...Object.entries(freeTable?.cell_unit_bindings ?? {})]) {
+        if (binding.source !== 'record_free_cell_sample' && binding.source !== 'record_free_formula_cell_sample' && binding.source !== 'record_free_cell_unit_sample' && binding.source !== 'record_sample_index') continue;
+        if (binding.source === 'record_sample_index' && !sourceBands.length && freeTable?.sample_bands?.some(band => band.matrix_code === binding.matrix_code)) continue;
+        const [rowId, colId] = cellKey.split('::');
+        const matchingBand = sourceBands.find(band => {
+          const inBand = band.axis === 'row'
+            ? band.refs.includes(rowId) && (!band.cross_refs?.length || band.cross_refs.includes(colId))
+            : band.refs.includes(colId) && (!band.cross_refs?.length || band.cross_refs.includes(rowId));
+          if (!inBand) return false;
+          return binding.source === 'record_sample_index' || band.source_field === binding.field_code;
+        });
+        if (matchingBand) continue;
+        out.push({
+          path: `${gLabel} / ${f.label || f.code || f.id} · 原始记录表格[${cellKey}]`,
+          label: f.label || '原始记录表格',
+          source: binding.source,
+          reason: '逐试样来源不在报告对应的试样区域内',
+          detail: 'field_code' in binding
+            ? `来源 ${binding.field_code}，请选择对应试样区域中的格子`
+            : '试样序号必须放在试样区域中',
+        });
+      }
+    }
+  }
   return out;
 }
 
 /**
  * 6.7：项目报告模板「检测结论声明」的必填校验（与失效校验 validateReportBindings 分开，这里管"有没有填"）。
  * 返回人类可读错误清单（空数组＝通过）。规则：
- *   ① 项目名称必填（显示为报告章节标题）；
- *   ② 至少一条结论，且每条都选了数据来源（非空 literal 视为未选）；
- *   ③ 多于一条（多子项目）时，每条都必须填子项目名（单条时可留空＝默认用项目名）。
+ *   ① 必须配置一条结论数据来源（非空 literal 视为未选）。
+ * 项目名称不属于模板配置：生成报告时自动取委托单当前分单的项目名称。
  */
 export function validateProjectConclusions(
-  projectName: string | undefined,
   conclusions: Array<{ sub_name?: string; binding?: CellBinding }> | undefined,
 ): string[] {
   const errs: string[] = [];
-  if (!(projectName || '').trim()) errs.push('请填写「项目名称」（显示为报告章节标题）');
-  const list = Array.isArray(conclusions) ? conclusions : [];
-  if (list.length === 0) {
-    errs.push('请至少添加一条「项目结论」并选择数据来源');
-    return errs;
-  }
+  const conclusion = Array.isArray(conclusions) ? conclusions[0] : undefined;
   const isFilled = (b?: CellBinding) => !!b && !(b.source === 'literal' && !((b as any).text || '').trim());
-  const multi = list.length > 1;
-  list.forEach((c, i) => {
-    const tag = multi ? `第 ${i + 1} 条结论` : '结论';
-    if (!isFilled(c.binding)) errs.push(`${tag}未选择数据来源`);
-    if (multi && !(c.sub_name || '').trim()) errs.push(`${tag}缺「子项目名称」（多个子项目时必填）`);
-  });
+  if (!isFilled(conclusion?.binding)) errs.push('结论未选择数据来源');
   return errs;
 }

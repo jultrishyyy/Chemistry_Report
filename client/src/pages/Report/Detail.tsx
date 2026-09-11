@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Button, Select, Space, message, Card, Descriptions, Alert } from 'antd';
 import { DownloadOutlined, FileTextOutlined } from '@ant-design/icons';
 import axios from 'axios';
+import PdfPreview from '../../components/TypstViewer/PdfPreview';
 
 const API = '/api';
 
@@ -18,6 +19,10 @@ export default function ReportDetail() {
     axios.get(`${API}/report-templates`).then(res => setTemplates(res.data));
     axios.get(`${API}/record-data`).then(res => setRecords(res.data));
   }, []);
+
+  useEffect(() => () => {
+    if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl);
+  }, [pdfUrl]);
 
   useEffect(() => {
     if (selectedRecords.length === 0) { setRecordDetails([]); return; }
@@ -108,7 +113,9 @@ export default function ReportDetail() {
 
       <div style={{ flex: 1, minHeight: 0 }}>
         {pdfUrl ? (
-          <iframe src={pdfUrl} style={{ width: '100%', height: '100%', border: '1px solid #d9d9d9' }} title="Report PDF" />
+          <div style={{ width: '100%', height: '100%', border: '1px solid #d9d9d9' }}>
+            <PdfPreview url={pdfUrl} height="100%" />
+          </div>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f5f5f5', color: '#999', flexDirection: 'column', gap: 8 }}>
             <FileTextOutlined style={{ fontSize: 48 }} />

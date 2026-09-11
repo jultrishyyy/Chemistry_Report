@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, Form, Input, Button, Typography, Tag, message } from 'antd';
 import { UserOutlined, LockOutlined, LoginOutlined } from '@ant-design/icons';
 import axios from 'axios';
@@ -18,6 +19,7 @@ const DEMO_ACCOUNTS = [
 
 export default function Login() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [form] = Form.useForm();
   const [busy, setBusy] = useState(false);
   // 登录模式：mock(本机演示，任意密码) vs 真实 OA。决定是否显示演示账号提示。
@@ -30,6 +32,8 @@ export default function Login() {
     setBusy(true);
     try {
       await login(v.loginName.trim(), v.pwd || '');
+      // 身份切换后不保留上一位用户所在的受限页面（如 /admin/users）。
+      navigate('/', { replace: true });
     } catch (e: any) {
       message.error(e?.response?.data?.error || '登录失败');
     } finally {

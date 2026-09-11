@@ -3,16 +3,68 @@ import {
   listVersions, getVersion, createDraft, submitForReview, reviewVersion, withdrawVersion,
   forkTemplate, getLineage, syncToChildren, listAuditLog, logTemplateAudit, readActor,
   requestArchive, cancelArchiveRequest, reviewArchiveRequest, rollbackToVersion,
-  diffFieldDefinitions, VersionFlowError, actorHasPermission,
+  diffFieldDefinitions, computeSyncedFieldDefinitions, VersionFlowError, actorHasPermission,
 } from '../services/template-versions.js';
 
 import { pool } from '../db.js';
+import { assertEditLease } from '../services/collaboration.js';
+import { ensureRecordIdentityFields } from '../../../shared/record-template-normalize.js';
+import { isRecordFieldTransferable } from '../../../shared/record-field-transfer.js';
 
 const router = Router();
 
 /** 业务流错误带 status（409 冲突 / 403 权限），其余 500 */
 function sendError(res: Response, e: any, fallback = 500) {
   res.status(e instanceof VersionFlowError ? e.status : fallback).json({ error: e.message });
+}
+function requirePermission(req: Request, res: Response, permission: 'record_template.edit' | 'record.review', label: string) {
+  if (actorHasPermission(req as any, permission)) return true;
+  res.status(403).json({ error: `当前账号无${label}权限` });
+  return false;
+}
+
+async function syncCommonComponentLinks(db: { query: (sql: string, params?: any[]) => Promise<any> }, templateId: number, groups: any[]) {
+  const refs = new Map<number, number | null>();
+  for (const group of Array.isArray(groups) ? groups : []) {
+    const componentId = Number(group?.common_component_id);
+    if (Number.isFinite(componentId)) refs.set(componentId, group?.common_component_version_id ? Number(group.common_component_version_id) : null);
+  }
+  await db.query('DELETE FROM record_template_common_components WHERE template_id=$1', [templateId]);
+  for (const [componentId, versionId] of refs) {
+    await db.query(
+      `INSERT INTO record_template_common_components (template_id,component_id,synced_component_version_id)
+       VALUES ($1,$2,$3)`, [templateId, componentId, versionId],
+    );
+  }
+}
+
+/** 项目组只是模板归类。复用存量方案表保存一对一归属，方法名称/编码不再要求用户配置。 */
+async function setTemplateFamily(
+  db: { query: (sql: string, params?: any[]) => Promise<any> },
+  templateId: number, familyId: number | null, templateName: string,
+) {
+  if (!familyId) {
+    await db.query('DELETE FROM test_method_schemes WHERE record_template_id=$1', [templateId]);
+    return;
+  }
+  await db.query(
+    `INSERT INTO test_method_schemes
+     (group_id,method_code,method_name,record_template_id,report_project_name,recommended,sort_order)
+     VALUES ($1,$2,$3,$4,$3,FALSE,0)
+     ON CONFLICT (record_template_id) DO UPDATE SET group_id=EXCLUDED.group_id,
+       method_code=EXCLUDED.method_code,method_name=EXCLUDED.method_name,
+       report_project_name=EXCLUDED.report_project_name,updated_at=NOW()`,
+    [familyId, `template_${templateId}`, templateName, templateId],
+  );
+}
+
+/** 同名校验：未归档的原始记录模板名称唯一（去首尾空格比较）。占用返回 true，excludeId 排除自身（改名用）。 */
+async function recordNameTaken(name: string, excludeId?: number): Promise<boolean> {
+  const r = await pool.query(
+    `SELECT 1 FROM record_templates WHERE archived_at IS NULL AND btrim(name) = btrim($1) AND ($2::int IS NULL OR id <> $2) LIMIT 1`,
+    [name, excludeId ?? null]
+  );
+  return r.rows.length > 0;
 }
 
 /** 把版本行的受控列合进 layout_options.controlled，渲染层（themeConfigToTypstDict）据此印顶部受控行 */
@@ -37,6 +89,7 @@ function mergeControlled(row: any) {
 const OPEN_DRAFT_SQL = `
   (SELECT json_build_object(
       'id', dv.id, 'version_no', dv.version_no, 'status', dv.status, 'author_name', dv.author_name,
+      'submitted_by_name', dv.submitted_by_name, 'submitted_by_job_no', dv.submitted_by_job_no,
       'reviewer_name', dv.reviewer_name, 'review_note', dv.review_note,
       'change_summary', dv.change_summary, 'updated_at', dv.updated_at)
    FROM record_template_versions dv
@@ -55,6 +108,9 @@ router.get('/', async (req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT t.id, t.name, t.version, t.source_file, t.created_at, t.updated_at,
             t.parent_template_id, t.current_version_id, t.archived_at,
+            ms.id AS method_scheme_id, ms.method_code, ms.method_name, ms.standard AS method_standard,
+            tg.id AS template_group_id, tg.code AS template_group_code, tg.name AS template_group_name,
+            tg.shared_profile_code,
             t.archive_requested_by, t.archive_requested_at, t.archive_request_note,
             cv.version_no AS current_version_no, cv.status AS current_status,
             cv.author_name AS current_author,
@@ -65,6 +121,8 @@ router.get('/', async (req: Request, res: Response) => {
             ${OPEN_DRAFT_SQL}
      FROM record_templates t
      LEFT JOIN record_template_versions cv ON cv.id = t.current_version_id
+     LEFT JOIN test_method_schemes ms ON ms.record_template_id = t.id
+     LEFT JOIN test_template_groups tg ON tg.id = ms.group_id
      ${whereSql}
      ORDER BY t.id ASC`
   );
@@ -73,25 +131,49 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  // 返回 base 元数据 + 当前生效版本的字段定义（base 已不存 field_definitions）
+  // 返回 base 元数据 + 当前生效版本的字段定义（base 已不存 field_definitions）。
+  // 少量历史模板尚未回填 current_version_id，但仍保有草稿/历史版本；这些模板用于
+  // 「以现有模板为骨架」时不应得到空 field_definitions 后被前端误当作空白模板。
+  // 因此仅在当前生效版本缺失时，回退到最新版本提供内容；current_version_no/status
+  // 仍保留真实的生效状态，不把草稿伪装成已生效。
   const result = await pool.query(
     `SELECT t.id, t.name, t.version, t.source_file, t.created_at, t.updated_at,
             t.parent_template_id, t.parent_version_id, t.current_version_id, t.archived_at,
+            ms.id AS method_scheme_id, ms.method_code, ms.method_name, ms.standard AS method_standard,
+            ms.report_project_template_id, ms.report_project_name,
+            tg.id AS template_group_id, tg.code AS template_group_code, tg.name AS template_group_name,
+            tg.shared_profile_code,
             t.archive_requested_by, t.archive_requested_at, t.archive_request_note,
             t.field_mapping,
             cv.version_no AS current_version_no, cv.status AS current_status,
-            cv.field_definitions, cv.layout_options, cv.typst_source,
-            cv.controlled_no, cv.controlled_issue_date, cv.controlled_effective_date,
+            COALESCE(cv.field_definitions, fallback.field_definitions) AS field_definitions,
+            COALESCE(cv.layout_options, fallback.layout_options) AS layout_options,
+            COALESCE(cv.typst_source, fallback.typst_source) AS typst_source,
+            COALESCE(cv.controlled_no, fallback.controlled_no) AS controlled_no,
+            COALESCE(cv.controlled_issue_date, fallback.controlled_issue_date) AS controlled_issue_date,
+            COALESCE(cv.controlled_effective_date, fallback.controlled_effective_date) AS controlled_effective_date,
             ${OPEN_DRAFT_SQL}
      FROM record_templates t
      LEFT JOIN record_template_versions cv ON cv.id = t.current_version_id
+     LEFT JOIN test_method_schemes ms ON ms.record_template_id = t.id
+     LEFT JOIN test_template_groups tg ON tg.id = ms.group_id
+     LEFT JOIN LATERAL (
+       SELECT v.field_definitions, v.layout_options, v.typst_source,
+              v.controlled_no, v.controlled_issue_date, v.controlled_effective_date
+       FROM record_template_versions v
+       WHERE v.template_id = t.id
+       ORDER BY v.version_no DESC, v.id DESC
+       LIMIT 1
+     ) fallback ON true
      WHERE t.id = $1`, [id]
   );
   if (result.rows.length === 0) {
     res.status(404).json({ error: 'Template not found' });
     return;
   }
-  res.json(mergeControlled(result.rows[0]));
+  const row = mergeControlled(result.rows[0]);
+  row.field_definitions = ensureRecordIdentityFields(row.field_definitions);
+  res.json(row);
 });
 
 /** 列出所有版本 */
@@ -104,7 +186,9 @@ router.get('/:id/versions', async (req: Request, res: Response) => {
 router.get('/:id/versions/:vid', async (req: Request, res: Response) => {
   const v = await getVersion(pool, 'record', Number(req.params.vid));
   if (!v) { res.status(404).json({ error: 'Version not found' }); return; }
-  res.json(mergeControlled(v));
+  const row = mergeControlled(v);
+  row.field_definitions = ensureRecordIdentityFields(row.field_definitions);
+  res.json(row);
 });
 
 /**
@@ -138,6 +222,7 @@ router.get('/:id/audit-log', async (req: Request, res: Response) => {
 router.post('/:id/controlled', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '设置模板受控信息')) return;
   const { controlled_no, controlled_issue_date, controlled_effective_date } = req.body || {};
   const r = await pool.query(
     `UPDATE record_template_versions
@@ -154,15 +239,34 @@ router.post('/:id/controlled', async (req: Request, res: Response) => {
 
 /** 母子树 */
 router.get('/:id/lineage', async (req: Request, res: Response) => {
-  const r = await getLineage(pool, 'record', Number(req.params.id));
-  res.json(r);
+  const templateId = Number(req.params.id);
+  const r = await getLineage(pool, 'record', templateId);
+  const family = await pool.query(
+    `SELECT g.id,g.name,g.code FROM test_method_schemes mine
+       JOIN test_template_groups g ON g.id=mine.group_id
+      WHERE mine.record_template_id=$1`, [templateId],
+  );
+  let familyRelation: any = null;
+  if (family.rows.length) {
+    const members = await pool.query(
+      `SELECT t.id,t.name,t.parent_template_id,t.current_version_id,v.version_no,v.status
+         FROM test_method_schemes m JOIN record_templates t ON t.id=m.record_template_id
+         LEFT JOIN record_template_versions v ON v.id=t.current_version_id
+        WHERE m.group_id=$1 AND t.archived_at IS NULL ORDER BY t.name,t.id`, [family.rows[0].id],
+    );
+    familyRelation = { ...family.rows[0], members: members.rows };
+  }
+  res.json({ ...r, family: familyRelation });
 });
 
 router.post('/', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
-  const { name, field_definitions, typst_source, source_file, layout_options, parent_template_id, parent_version_id } = req.body;
+  if (!requirePermission(req, res, 'record_template.edit', '编辑原始记录模板')) return;
+  const { name, field_definitions, typst_source, source_file, layout_options, parent_template_id, parent_version_id,
+    template_group_id } = req.body;
   if (!name || !field_definitions) { res.status(400).json({ error: 'name and field_definitions are required' }); return; }
+  if (await recordNameTaken(name)) { res.status(409).json({ error: `已存在同名原始记录模板「${String(name).trim()}」，请换一个名称`, code: 'duplicate_name' }); return; }
   // 新建模板初始为草稿(draft)、无生效版本：必须走「提交审核 → 审核通过」后才生效，
   // 未通过前在录入关联等选用场景中禁选（服务端 /link 也会兜底 409）。
   const client = await pool.connect();
@@ -183,6 +287,8 @@ router.post('/', async (req: Request, res: Response) => {
        actor.name, '初始版本']
     );
     await logTemplateAudit(client, 'record', t.id, 'create', actor, { name }, v1.rows[0].id);
+    await syncCommonComponentLinks(client, t.id, field_definitions);
+    if (template_group_id) await setTemplateFamily(client, t.id, Number(template_group_id), String(name).trim());
     await client.query('COMMIT');
     res.status(201).json({ ...t, current_version_id: null });
   } catch (e: any) {
@@ -193,24 +299,47 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
+/** 只修改项目组归属，不创建内容草稿。 */
+router.put('/:id/family', async (req: Request, res: Response) => {
+  const actor = readActor(req as any); const id = Number(req.params.id);
+  if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '编辑原始记录模板')) return;
+  const template = await pool.query('SELECT id,name FROM record_templates WHERE id=$1 AND archived_at IS NULL', [id]);
+  if (!template.rows.length) { res.status(404).json({ error: '原始记录模板不存在' }); return; }
+  try {
+    await setTemplateFamily(pool, id, req.body?.template_group_id ? Number(req.body.template_group_id) : null, template.rows[0].name);
+    await logTemplateAudit(pool, 'record', id, 'family_change', actor, { template_group_id: req.body?.template_group_id || null });
+    res.json({ ok: true, template_group_id: req.body?.template_group_id || null });
+  } catch (e: any) { sendError(res, e); }
+});
+
 /** PUT /:id 不再直接改主表；改为创建/更新一个 draft（不会立即生效） */
 router.put('/:id', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '编辑原始记录模板')) return;
   const id = Number(req.params.id);
-  const { field_definitions, typst_source, layout_options, change_summary, name, draft_updated_at } = req.body;
+  if (!await assertEditLease(req, res, 'record_template', String(id))) return;
+  const { field_definitions, typst_source, layout_options, change_summary, name, draft_updated_at,
+    template_group_id } = req.body;
   if (!field_definitions) { res.status(400).json({ error: 'field_definitions required' }); return; }
   try {
     // name 改动不走版本流，直接改 base（视为元数据）
     if (name) {
       const old = await pool.query(`SELECT name FROM record_templates WHERE id = $1`, [id]);
       if (old.rows[0] && old.rows[0].name !== name) {
+        if (await recordNameTaken(name, id)) { res.status(409).json({ error: `已存在同名原始记录模板「${String(name).trim()}」，请换一个名称`, code: 'duplicate_name' }); return; }
         await pool.query(`UPDATE record_templates SET name = $1, updated_at = NOW() WHERE id = $2`, [name, id]);
         await logTemplateAudit(pool, 'record', id, 'rename', actor, { from: old.rows[0].name, to: name });
       }
     }
     const draft = await createDraft(pool, 'record', id, actor.name,
       { field_definitions, layout_options, typst_source, change_summary, draft_updated_at });
+    await syncCommonComponentLinks(pool, id, field_definitions);
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'template_group_id')) {
+      await setTemplateFamily(pool, id, template_group_id ? Number(template_group_id) : null,
+        String(name || `原始记录模板 ${id}`).trim());
+    }
     await logTemplateAudit(pool, 'record', id, 'update_draft', actor,
       { version_no: draft.version_no }, draft.id);
     res.json(draft);
@@ -223,10 +352,11 @@ router.put('/:id', async (req: Request, res: Response) => {
 router.post('/:id/submit', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '提交模板审核')) return;
   const { version_id, change_summary } = req.body;
   if (!version_id) { res.status(400).json({ error: 'version_id required' }); return; }
   try {
-    const v = await submitForReview(pool, 'record', Number(version_id), actor.name, actor.role, change_summary);
+    const v = await submitForReview(pool, 'record', Number(version_id), actor.name, actor.role, change_summary, actor.jobNo);
     await logTemplateAudit(pool, 'record', Number(req.params.id), 'submit', actor,
       { version_no: v.version_no, change_summary: v.change_summary }, v.id);
     res.json(v);
@@ -239,8 +369,9 @@ router.post('/:id/submit', async (req: Request, res: Response) => {
 router.post('/:id/versions/:vid/withdraw', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '撤回模板审核')) return;
   try {
-    const v = await withdrawVersion(pool, 'record', Number(req.params.vid), actor.name, actor.role);
+    const v = await withdrawVersion(pool, 'record', Number(req.params.vid), actor.name, actor.role, actor.jobNo);
     await logTemplateAudit(pool, 'record', Number(req.params.id), 'withdraw', actor,
       { version_no: v.version_no }, v.id);
     res.json(v);
@@ -253,10 +384,10 @@ router.post('/:id/versions/:vid/withdraw', async (req: Request, res: Response) =
 router.post('/:id/versions/:vid/review', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
-  if (!actorHasPermission(req as any, 'record_template.edit')) { res.status(403).json({ error: '当前角色无审核权限（需测试主管）' }); return; }
+  if (!requirePermission(req, res, 'record.review', '审核原始记录模板')) return;
   const { decision, note } = req.body || {};
   try {
-    const v = await reviewVersion(pool, 'record', Number(req.params.vid), decision, actor.name, note || null, actor.role);
+    const v = await reviewVersion(pool, 'record', Number(req.params.vid), decision, actor.name, note || null, actor.role, actor.jobNo, actor.roles);
     res.json(v);
   } catch (e: any) {
     sendError(res, e, 400);
@@ -267,6 +398,7 @@ router.post('/:id/versions/:vid/review', async (req: Request, res: Response) => 
 router.post('/:id/versions/:vid/rollback', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '恢复模板版本')) return;
   try {
     const v = await rollbackToVersion(pool, 'record', Number(req.params.id), Number(req.params.vid), actor);
     res.json(v);
@@ -279,8 +411,10 @@ router.post('/:id/versions/:vid/rollback', async (req: Request, res: Response) =
 router.post('/:id/fork', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '派生模板')) return;
   const { name, parent_version_id } = req.body;
   if (!name) { res.status(400).json({ error: 'name required' }); return; }
+  if (await recordNameTaken(name)) { res.status(409).json({ error: `已存在同名原始记录模板「${String(name).trim()}」，请换一个名称`, code: 'duplicate_name' }); return; }
   // 默认从当前生效版本派生
   let pv = parent_version_id;
   if (!pv) {
@@ -304,6 +438,7 @@ router.post('/:id/fork', async (req: Request, res: Response) => {
 router.post('/:id/sync-to-children', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '同步模板')) return;
   const { child_ids, include_added = true, source_version_id, dry_run = false } = req.body || {};
   if (!Array.isArray(child_ids) || child_ids.length === 0) {
     res.status(400).json({ error: 'child_ids required' }); return;
@@ -317,6 +452,104 @@ router.post('/:id/sync-to-children', async (req: Request, res: Response) => {
   } catch (e: any) {
     sendError(res, e);
   }
+});
+
+/**
+ * 项目组成员间按字段标识/编码同步。来源和目标不要求存在母子关系；目标专有字段不会被删除。
+ * body: {target_ids:number[], include_added?:boolean, dry_run?:boolean}
+ */
+router.post('/:id/sync-to-family', async (req: Request, res: Response) => {
+  const actor = readActor(req as any); const sourceId = Number(req.params.id);
+  if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '同步项目组模板')) return;
+  const targetIds = [...new Set((Array.isArray(req.body?.target_ids) ? req.body.target_ids : [])
+    .map(Number).filter((id: number) => Number.isFinite(id) && id !== sourceId))];
+  if (!targetIds.length) { res.status(400).json({ error: '请至少选择一个项目组目标模板' }); return; }
+  try {
+    const source = await pool.query(
+      `SELECT t.id,t.name,t.current_version_id,v.version_no,v.status,v.field_definitions
+         FROM record_templates t JOIN record_template_versions v ON v.id=t.current_version_id
+        WHERE t.id=$1 AND t.archived_at IS NULL`, [sourceId],
+    );
+    if (!source.rows.length || source.rows[0].status !== 'approved') {
+      throw new VersionFlowError('只能从当前已审核生效的模板同步', 409);
+    }
+    const membership = await pool.query('SELECT group_id FROM test_method_schemes WHERE record_template_id=$1', [sourceId]);
+    if (!membership.rows.length) throw new VersionFlowError('当前模板尚未加入项目组', 409);
+    const targets = await pool.query(
+      `SELECT t.id,t.name,t.current_version_id,v.version_no,v.field_definitions,v.layout_options,v.typst_source
+         FROM test_method_schemes m JOIN record_templates t ON t.id=m.record_template_id
+         LEFT JOIN record_template_versions v ON v.id=t.current_version_id
+        WHERE m.group_id=$1 AND t.id=ANY($2::int[]) AND t.archived_at IS NULL ORDER BY t.name,t.id`,
+      [membership.rows[0].group_id, targetIds],
+    );
+    if (targets.rows.length !== targetIds.length) throw new VersionFlowError('部分目标模板不属于当前项目组', 409);
+
+    const result: any = { source_version_no: source.rows[0].version_no, applied: [], skipped: [], preview: [] };
+    const sourceGroups = source.rows[0].field_definitions || [];
+    const sourceFields = sourceGroups.flatMap((group: any) => (group.fields || [])
+      .filter((field: any) => isRecordFieldTransferable(field, group))
+      .map((field: any) => ({ field, group })));
+    for (const target of targets.rows) {
+      const open = await pool.query(
+        `SELECT version_no,status,author_name FROM record_template_versions
+          WHERE template_id=$1 AND status IN ('draft','pending','rejected') AND version_no>$2
+          ORDER BY version_no DESC LIMIT 1`, [target.id, Number(target.version_no || 0)],
+      );
+      if (open.rows.length) {
+        const blocked = `存在未定稿 v${open.rows[0].version_no}，为避免覆盖已跳过`;
+        if (req.body?.dry_run) result.preview.push({ id: target.id, name: target.name, stats: { replaced: [], removed: [], added: [] }, blocked });
+        else result.skipped.push({ id: target.id, name: target.name, reason: blocked });
+        continue;
+      }
+      if (!target.current_version_id) {
+        const blocked = '目标模板没有当前生效版本';
+        if (req.body?.dry_run) result.preview.push({ id: target.id, name: target.name, stats: { replaced: [], removed: [], added: [] }, blocked });
+        else result.skipped.push({ id: target.id, name: target.name, reason: blocked });
+        continue;
+      }
+      const targetGroups = target.field_definitions || [];
+      const mapping: any = { groups: {}, fields: {} };
+      for (const targetGroup of targetGroups) {
+        const sourceGroup = sourceGroups.find((group: any) => group.id === targetGroup.id)
+          || sourceGroups.find((group: any) => String(group.label || '').trim() === String(targetGroup.label || '').trim());
+        if (sourceGroup) mapping.groups[targetGroup.id] = sourceGroup.id;
+        for (const targetField of targetGroup.fields || []) {
+          const match = sourceFields.find((entry: any) => entry.field.id === targetField.id)
+            || sourceFields.find((entry: any) => entry.field.code && entry.field.code === targetField.code
+              && entry.field.type === targetField.type);
+          if (match) mapping.fields[targetField.id] = match.field.id;
+        }
+      }
+      const computed = computeSyncedFieldDefinitions(
+        sourceGroups,
+        targetGroups,
+        mapping,
+        !!req.body?.include_added,
+        { fieldFilter: isRecordFieldTransferable, syncGroupMetadata: false },
+      );
+      const changeCount = computed.stats.replaced.length + computed.stats.removed.length + computed.stats.added.length;
+      if (req.body?.dry_run) {
+        result.preview.push({ id: target.id, name: target.name, stats: computed.stats,
+          ...(changeCount ? {} : { blocked: '相同字段没有变化，无需同步' }) });
+        continue;
+      }
+      if (!changeCount) { result.skipped.push({ id: target.id, name: target.name, reason: '相同字段没有变化，无需同步' }); continue; }
+      const summary = `同步自项目组模板「${source.rows[0].name}」v${source.rows[0].version_no}`;
+      const draft = await createDraft(pool, 'record', target.id, actor.name, {
+        field_definitions: computed.field_definitions, layout_options: target.layout_options,
+        typst_source: target.typst_source, change_summary: summary,
+      });
+      const pending = await submitForReview(pool, 'record', draft.id, actor.name, actor.role, summary, actor.jobNo);
+      await logTemplateAudit(pool, 'record', target.id, 'sync_in', actor, {
+        family_source_template_id: sourceId, source_version_no: source.rows[0].version_no,
+        version_no: pending.version_no, stats: computed.stats,
+      }, pending.id);
+      result.applied.push({ id: target.id, name: target.name, version_no: pending.version_no, stats: computed.stats });
+    }
+    if (!req.body?.dry_run) delete result.preview;
+    res.json(result);
+  } catch (e: any) { sendError(res, e); }
 });
 
 /**
@@ -375,6 +608,7 @@ async function performArchive(id: number, force: boolean, actor: { name: string;
 router.post('/:id/archive-request', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '删除模板')) return;
   try {
     res.json(await requestArchive(pool, 'record', Number(req.params.id), actor, req.body?.note));
   } catch (e: any) { sendError(res, e, 400); }
@@ -384,6 +618,7 @@ router.post('/:id/archive-request', async (req: Request, res: Response) => {
 router.post('/:id/archive-request/cancel', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '撤销删除申请')) return;
   try {
     res.json(await cancelArchiveRequest(pool, 'record', Number(req.params.id), actor));
   } catch (e: any) { sendError(res, e, 400); }
@@ -393,6 +628,7 @@ router.post('/:id/archive-request/cancel', async (req: Request, res: Response) =
 router.post('/:id/archive-review', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
   if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record.review', '审批模板删除')) return;
   const { decision, note, force } = req.body || {};
   try {
     const request = await reviewArchiveRequest(pool, 'record', Number(req.params.id), decision, actor, note);
@@ -414,6 +650,8 @@ router.delete('/:id', async (_req: Request, res: Response) => {
 /** 恢复已归档的模板 */
 router.post('/:id/restore', async (req: Request, res: Response) => {
   const actor = readActor(req as any);
+  if (!actor.name) { res.status(401).json({ error: '未登录' }); return; }
+  if (!requirePermission(req, res, 'record_template.edit', '恢复模板')) return;
   const { id } = req.params;
   const r = await pool.query(
     `UPDATE record_templates SET archived_at = NULL, updated_at = NOW()

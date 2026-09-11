@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 
 import { pool } from '../db.js';
+import { requirePermission } from './auth.js';
 
 const router = Router();
 
@@ -64,7 +65,7 @@ router.get('/:orderNo', async (req: Request, res: Response) => {
 });
 
 /** 手动新建订单（source=manual），与接口传入的单完全同构 */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const { order_no, customer_name, received_at, samples } = req.body as {
     order_no?: string; customer_name?: string; received_at?: string; samples?: unknown;
   };
@@ -91,7 +92,7 @@ router.post('/', async (req: Request, res: Response) => {
  * record_data 删除会级联清掉 record_audit_log（FK ON DELETE CASCADE）。
  * 按依赖顺序删，避免外键约束报错。
  */
-router.delete('/:orderNo', async (req: Request, res: Response) => {
+router.delete('/:orderNo', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const { orderNo } = req.params;
   const client = await pool.connect();
   try {
@@ -133,7 +134,7 @@ router.delete('/:orderNo', async (req: Request, res: Response) => {
  *   - record_audit_log 随 FK ON DELETE CASCADE 清理；引用被删记录的 rework_tickets：
  *     未关闭的先置 resolved（记录已不存在、工单失去意义，且避免 data_entry 锁永远挂住报告），再解除引用。
  */
-router.put('/:orderNo/link', async (req: Request, res: Response) => {
+router.put('/:orderNo/link', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const { orderNo } = req.params;
   const { sample_id, test_name, linked_template_id, op } = req.body as {
     sample_id?: string;
@@ -241,6 +242,69 @@ router.put('/:orderNo/link', async (req: Request, res: Response) => {
 });
 
 /**
+ * 将同一个原始记录模板批量关联到任意“样品 × 测试项目”组合，并为尚无记录的项目创建独立草稿。
+ * 每个样品仍拥有自己的 record_data，保证审核、附件和报告追溯彼此独立。
+ */
+router.post('/:orderNo/bulk-link', requirePermission('record.entry'), async (req: Request, res: Response) => {
+  const { orderNo } = req.params;
+  const { targets, template_id } = req.body as { targets?: Array<{ sample_id?: string; test_name?: string }>; template_id?: number };
+  const targetInputs = Array.isArray(targets) ? targets
+    .filter(item => typeof item?.sample_id === 'string' && !!item.sample_id && typeof item?.test_name === 'string' && !!item.test_name)
+    .map(item => ({ sample_id: item.sample_id!, test_name: item.test_name! })) : [];
+  const deduped = [...new Map(targetInputs.map(item => [`${item.sample_id}\u0000${item.test_name}`, item])).values()];
+  if (!deduped.length || !template_id) {
+    res.status(400).json({ error: 'targets and template_id are required' }); return;
+  }
+  const actor = readActor(req);
+  if (!actor.name) { res.status(401).json({ error: '未登录或缺少用户信息' }); return; }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const template = await client.query(
+      `SELECT t.id, t.current_version_id, v.status
+       FROM record_templates t LEFT JOIN record_template_versions v ON v.id = t.current_version_id
+       WHERE t.id = $1`, [template_id]);
+    if (!template.rows.length) throw Object.assign(new Error('模板不存在'), { status: 404 });
+    if (!template.rows[0].current_version_id || template.rows[0].status !== 'approved') {
+      throw Object.assign(new Error('模板还没有审核通过的生效版本，不能关联'), { status: 409 });
+    }
+    const order = await client.query('SELECT payload FROM work_orders WHERE order_no = $1 FOR UPDATE', [orderNo]);
+    if (!order.rows.length) throw Object.assign(new Error('Work order not found'), { status: 404 });
+    const payload = order.rows[0].payload || {};
+    const samples = Array.isArray(payload.samples) ? payload.samples : [];
+    const resolvedTargets = deduped.map(input => {
+      const sample = samples.find((item: any) => item.id === input.sample_id);
+      const test = sample && (sample.test_infos || []).find((item: any) => item.name === input.test_name);
+      return { ...input, sample, test };
+    });
+    const invalid = resolvedTargets.filter(item => !item.sample || !item.test).map(item => `${item.sample_id} · ${item.test_name}`);
+    if (invalid.length) throw Object.assign(new Error(`以下样品/项目不存在：${invalid.join('、')}`), { status: 400 });
+
+    let linked = 0, created = 0, skipped = 0;
+    for (const target of resolvedTargets) {
+      const ids = linkedIdsOf(target.test);
+      if (!ids.includes(template_id)) { target.test.linked_template_ids = [...ids, template_id]; delete target.test.linked_template_id; linked++; }
+      const existing = await client.query(
+        `SELECT id FROM record_data WHERE template_id = $1 AND order_no = $2 AND sample_external_id = $3 AND test_item_name = $4 LIMIT 1`,
+        [template_id, orderNo, target.sample_id, target.test_name]);
+      if (existing.rows.length) { skipped++; continue; }
+      await client.query(
+        `INSERT INTO record_data
+          (template_id, template_version_id, raw_data, derived_data, ad_hoc_fields, order_no, sample_external_id, test_item_name, tester_name, tested_at, audit_status, current_version)
+         VALUES ($1, $2, '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, $3, $4, $5, $6, NOW(), 'draft', 1)`,
+        [template_id, template.rows[0].current_version_id, orderNo, target.sample_id, target.test_name, actor.name]);
+      created++;
+    }
+    await client.query('UPDATE work_orders SET payload = $1::jsonb, updated_at = NOW() WHERE order_no = $2', [JSON.stringify(payload), orderNo]);
+    await client.query('COMMIT');
+    res.json({ ok: true, linked, created, skipped, total: resolvedTargets.length });
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  } finally { client.release(); }
+});
+
+/**
  * 编辑订单结构（改/增删 样品·测试项目）。不走数据审核流，但留痕 + 护栏。
  *
  * body：{ samples: [{ id?, name, test_infos: [{ _orig_name?, name, standard? }] }] }
@@ -253,7 +317,7 @@ router.put('/:orderNo/link', async (req: Request, res: Response) => {
  * 级联：改测试项目名 → UPDATE record_data.test_item_name（唯一键的一部分）
  * 关联：改名/改标准时保留该项目原有 linked_template_ids
  */
-router.put('/:orderNo/structure', async (req: Request, res: Response) => {
+router.put('/:orderNo/structure', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const { orderNo } = req.params;
   const newSamples = Array.isArray(req.body?.samples) ? req.body.samples : null;
   if (!newSamples) { res.status(400).json({ error: 'samples 必须是数组' }); return; }

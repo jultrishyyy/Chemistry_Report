@@ -1,15 +1,17 @@
-import { Form, Input, Switch, Select as AntSelect, Button, Space, Tag, InputNumber, Radio, Alert, Tabs, Popover, DatePicker, Tooltip } from 'antd';
+import { Form, Input, Switch, Select as AntSelect, Button, Space, Tag, InputNumber, Radio, Alert, Tabs, DatePicker, Tooltip, Modal } from 'antd';
 import dayjs from 'dayjs';
-import { useRef, useState } from 'react';
-import { PlusOutlined, DeleteOutlined, HolderOutlined, SnippetsOutlined, LinkOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PlusOutlined, DeleteOutlined, HolderOutlined, SnippetsOutlined, LinkOutlined, ArrowUpOutlined, ArrowDownOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useDrag, useDrop } from 'react-dnd';
 import type { FieldDefinition, RecordTemplate } from '../../../../shared/types';
+import AutoGrowTextArea from '../AutoGrowTextArea';
 import {
   FIELD_CATEGORIES,
-  categoriesForEditor,
+  categoriesForGroup,
   categoryOfField,
   choiceModeOf,
   editorCapabilities,
+  createFieldForCategory,
   rebuildFieldForCategory,
   type ChoiceMode,
   type FieldCategory,
@@ -20,6 +22,8 @@ import ImageLayoutControls from './ImageLayoutControls';
 import ReportResultTableCanvas from './MatrixEditor/ReportResultTableCanvas';
 import FreeGridCanvas from './MatrixEditor/FreeGridCanvas';
 import BindingPickerModal, { BindingSummary } from '../ReportEditor/BindingPickerModal';
+import ClosablePopover from '../ClosablePopover';
+import StaticContentEditor from './StaticContentEditor';
 
 interface Props {
   field: FieldDefinition;
@@ -34,7 +38,20 @@ interface Props {
   editorMode?: 'record' | 'report-cover' | 'report-project';
   /** 报告项目模式下关联的原始记录模板（供 BindingEditor 使用） */
   linkedRecord?: RecordTemplate | null;
+  onDetailFocus?: (detailCode: string) => void;
 }
+
+const DATE_PRECISION_OPTIONS = [
+  { value: 'day', label: '日' },
+  { value: 'hour', label: '时' },
+  { value: 'minute', label: '分' },
+];
+const datePickerFormat = (precision: FieldDefinition['date_precision'], separator: FieldDefinition['date_separator']) => {
+  const day = separator === '/' ? 'YYYY/MM/DD' : 'YYYY-MM-DD';
+  return precision === 'minute' ? `${day} HH:mm` : precision === 'hour' ? `${day} HH:00` : day;
+};
+const dateStorageFormat = (precision: FieldDefinition['date_precision']) =>
+  precision === 'minute' ? 'YYYY-MM-DDTHH:mm' : precision === 'hour' ? 'YYYY-MM-DDTHH:00' : 'YYYY-MM-DD';
 
 const SEMANTIC_ROLE_LABEL: Record<string, string> = {
   inspector: '主检 = 登录用户',
@@ -45,9 +62,10 @@ const SEMANTIC_ROLE_LABEL: Record<string, string> = {
 
 /** 自动表/复杂表类型 + 版式间隔：无字段级格式与普通取值绑定 */
 const NO_FORMAT_BINDING = [
-  'data_matrix', 'image', 'spacer', 'report_conclusion_table', 'report_result_table',
-  'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_photo_table',
+  'data_matrix', 'free_grid', 'image', 'spacer', 'record_conclusion', 'report_conclusion_table', 'report_result_table',
+  'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_sample_description_table', 'report_photo_table',
   'daterange',  // 取值＝date_range.start/end 两个绑定（在「类型配置」里配），不走通用单 binding
+  // free_grid：格子级绑定/格式都在「类型配置」画布里逐格设，字段级「格式」「取值绑定」Tab 无意义 → 排除。
 ];
 
 /**
@@ -55,18 +73,33 @@ const NO_FORMAT_BINDING = [
  * 这些类型获得一个「版式」Tab：图/表标题（显示开关+样式）+ 题注位置 + 对齐 + 段前后间距，
  * 让项目报告里的表格也能像首页文本字段一样逐个调版式。
  */
-const FIGURE_LAYOUT_TYPES = ['report_result_table', 'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_photo_table', 'report_conclusion_table'];
+const FIGURE_LAYOUT_TYPES = ['report_result_table', 'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_sample_description_table', 'report_photo_table', 'report_conclusion_table'];
 
 /**
  * 「标签 / 备注拆成独立 Tab」的表格类型（所有非图片表格）：数据表格 + 报告结果表/设备表/样品信息表/检测结论表。
  * 这些字段的「基础」Tab 精简为 类别 + 必填；表格【标题】移到「标签」Tab、下方【备注】移到「备注」Tab、
  * 整表版式（字体/字号/表头加粗/内容对齐/对齐间距）留在「版式」Tab。
  * 不含图片类表格（image / report_photo_table / report_image_gallery）——它们的标题/备注仍在图片版式里统一设。
+ * free_grid（原始记录表格）也纳入：与数据表格一致地拆出「版式/标签/备注」三个独立 Tab（标题/备注均为纯文本框，填了才显示）。
  */
-const LABEL_NOTE_TAB_TYPES = ['data_matrix', 'report_result_table', 'report_equipment_table', 'report_sample_table', 'report_conclusion_table'];
+const LABEL_NOTE_TAB_TYPES = ['data_matrix', 'free_grid', 'report_result_table', 'report_equipment_table', 'report_sample_table', 'report_sample_description_table', 'report_conclusion_table'];
 
 /** 「版式」Tab 里出现「整表文字」（字体/字号/表头加粗/内容对齐）配置的表格类型。 */
-const TABLE_TEXT_STYLE_TYPES = ['report_result_table', 'report_equipment_table', 'report_sample_table', 'report_conclusion_table'];
+const TABLE_TEXT_STYLE_TYPES = ['report_result_table', 'report_equipment_table', 'report_sample_table', 'report_sample_description_table', 'report_conclusion_table'];
+
+/** 统一表格编辑工具栏覆盖的字段类型，以及各自需要恢复默认的结构配置键。 */
+const TABLE_CONFIG_KEYS: Partial<Record<FieldDefinition['type'], keyof FieldDefinition>> = {
+  data_matrix: 'matrix',
+  free_grid: 'free_table',
+  report_result_table: 'result_table',
+  report_equipment_table: 'equipment_table',
+  report_sample_table: 'sample_table',
+  report_sample_description_table: 'sample_description_table',
+  report_conclusion_table: 'conclusion_table',
+  report_photo_table: 'photo_table',
+};
+
+const cloneField = (value: FieldDefinition): FieldDefinition => JSON.parse(JSON.stringify(value));
 
 /** 整表文字「字体」可选项（与 FormatPanel/DocumentStylePanel 同口径，仅 demo_v1/fonts/ 已打包字体）。 */
 const TABLE_FONT_OPTIONS = [
@@ -87,20 +120,132 @@ function cleanTableStyle(ts: Record<string, any> | undefined): any {
   return Object.keys(o).length ? o : undefined;
 }
 
-export default function FieldPropsPanel({ field, template, onChange, onReplaceField, editorMode = 'record', linkedRecord = null }: Props) {
+type EquipmentOption = {
+  asset_code: string;
+  name: string;
+  model?: string;
+  status?: string;
+};
+
+/** 原始记录模板：为 device_ref 配置常用设备。保存的始终是设备管理编号，不复制设备名称等易变信息。 */
+function DeviceRefConfigEditor({ field, onChange }: { field: FieldDefinition; onChange: (patch: Partial<FieldDefinition>) => void }) {
+  const config = field.device_ref_config || {};
+  const presetCodes = useMemo(() => config.preset_asset_codes || [], [config.preset_asset_codes]);
+  const [options, setOptions] = useState<EquipmentOption[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!presetCodes.length) return;
+    fetch(`/api/equipment/lookup?codes=${encodeURIComponent(presetCodes.join(','))}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then((rows: EquipmentOption[]) => setOptions(prev => {
+        const merged = new Map(prev.map(item => [item.asset_code, item]));
+        rows.forEach(item => merged.set(item.asset_code, item));
+        return Array.from(merged.values());
+      }))
+      .catch(() => undefined);
+  }, [presetCodes]);
+
+  const searchEquipment = (keyword: string) => {
+    if (!keyword.trim()) return;
+    setLoading(true);
+    fetch(`/api/equipment?keyword=${encodeURIComponent(keyword.trim())}&limit=30`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setOptions(prev => {
+        const merged = new Map(prev.map(item => [item.asset_code, item]));
+        (data.items || []).forEach((item: EquipmentOption) => merged.set(item.asset_code, item));
+        return Array.from(merged.values());
+      }))
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
+  };
+
+  const setConfig = (patch: Partial<NonNullable<FieldDefinition['device_ref_config']>>) =>
+    onChange({ device_ref_config: { ...config, ...patch } });
+
+  return (
+    <>
+      <Form.Item label="选择方式">
+        <Radio.Group optionType="button" buttonStyle="solid"
+          value={config.selection_mode || 'multiple'}
+          onChange={e => setConfig({ selection_mode: e.target.value })}
+          options={[{ value: 'single', label: '单台设备' }, { value: 'multiple', label: '多台设备' }]} />
+      </Form.Item>
+      <Form.Item label="模板常用设备" tooltip="输入仪器名称、型号或管理编号搜索设备库，可配置多个快捷候选。">
+        <AntSelect
+          mode="multiple"
+          showSearch
+          filterOption={false}
+          loading={loading}
+          value={presetCodes}
+          onSearch={searchEquipment}
+          onChange={codes => setConfig({ preset_asset_codes: codes })}
+          placeholder="搜索并选择常用设备"
+          notFoundContent={loading ? '搜索中…' : '输入关键字搜索设备库'}
+          options={options.map(item => ({
+            value: item.asset_code,
+            label: `${item.name}${item.model ? `（${item.model}）` : ''} — ${item.asset_code}${item.status ? ` [${item.status}]` : ''}`,
+          }))}
+        />
+      </Form.Item>
+      <Form.Item label="允许选择其他设备" tooltip="开启后，录入人可搜索整个设备库；关闭后只能选择上面的常用设备。">
+        <Switch checked={config.allow_library_search !== false}
+          onChange={value => setConfig({ allow_library_search: value })} />
+      </Form.Item>
+    </>
+  );
+}
+
+export default function FieldPropsPanel({ field, template, onChange: commitChange, onReplaceField: commitReplaceField, editorMode = 'record', linkedRecord = null, onDetailFocus }: Props) {
   const category = categoryOfField(field);
   const caps = editorCapabilities(editorMode);
   const isReportMode = caps.valueBinding;
+  const tableConfigKey = TABLE_CONFIG_KEYS[field.type];
+  const historyEnabled = !!tableConfigKey;
+
+  const onChange = (patch: Partial<FieldDefinition>) => {
+    commitChange(patch);
+  };
+
+  const replaceField = (next: FieldDefinition) => {
+    if (!commitReplaceField) return;
+    commitReplaceField(next);
+  };
+
+  const resetTableToDefault = () => {
+    if (!tableConfigKey || !commitReplaceField) return;
+    const defaultField = createFieldForCategory(category, field.id);
+    const defaultConfig = defaultField[tableConfigKey];
+    Modal.confirm({
+      title: '重置为默认表格',
+      content: '将清除当前表格的行列结构、合并、公式及格子绑定，恢复该表格类型的默认结构。字段名、标签、备注和外层格式保持不变。',
+      okText: '确认重置',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        const next = cloneField(field) as any;
+        next[tableConfigKey] = defaultConfig === undefined ? undefined : JSON.parse(JSON.stringify(defaultConfig));
+        replaceField(next);
+      },
+    });
+  };
   // 「什么编辑器就显示什么字段」：按 editors 白名单过滤（与添加字段下拉同一口径）
-  const allowedCategories = categoriesForEditor(editorMode);
+  const parentGroup = template.groups.find(group => group.fields.some(candidate => candidate.id === field.id));
+  const groupCategories = categoriesForGroup(editorMode, parentGroup?.section_role);
+  const allowedCategories = field.conclusion_role
+    ? groupCategories.filter(candidate =>
+        field.conclusion_role === 'project_name' || field.conclusion_role === 'item_name'
+          ? candidate.key === 'text'
+          : candidate.key === 'text' || candidate.key === 'choice')
+    : groupCategories;
   // 防御：存量字段若其类别不在本编辑器白名单（罕见的历史脏数据），仍把它列进下拉，避免类别选框显示空白
   const visibleCategories = allowedCategories.some(c => c.key === category)
     ? allowedCategories
     : [...allowedCategories, ...FIELD_CATEGORIES.filter(c => c.key === category)];
 
   const handleCategoryChange = (cat: FieldCategory) => {
-    if (!onReplaceField) return;
-    onReplaceField(rebuildFieldForCategory(field, cat));
+    if (!commitReplaceField) return;
+    replaceField(rebuildFieldForCategory(field, cat));
   };
 
   const isSimpleValue = ['text', 'number', 'date', 'choice'].includes(category);
@@ -122,8 +267,10 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     ) : category === 'date' ? (
       <DatePicker
         style={{ width: 200 }}
+        showTime={field.date_precision && field.date_precision !== 'day' ? { format: field.date_precision === 'minute' ? 'HH:mm' : 'HH' } : false}
+        format={datePickerFormat(field.date_precision, field.date_separator)}
         value={field.default_value ? dayjs(String(field.default_value)) : undefined}
-        onChange={(_d, ds) => onChange({ default_value: ds || undefined })}
+        onChange={(d) => onChange({ default_value: d ? d.format(dateStorageFormat(field.date_precision)) : undefined })}
       />
     ) : category === 'choice' ? (
       field.type === 'checkbox' ? (
@@ -144,64 +291,96 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
         />
       )
     ) : (
-      <Input value={field.default_value || ''} onChange={(e) => onChange({ default_value: e.target.value || undefined })} />
+      <AutoGrowTextArea value={field.default_value || ''} onChange={(e) => onChange({ default_value: e.target.value || undefined })} />
     )
   );
 
-  // —— Tab 1:基础（类别/必填/单位/行数/标签/说明）——
-  const basicTab = (
-    <Form layout="vertical" size="small">
-      <Form.Item label="字段类别" extra="切换类别会清除与新类别无关的配置（选项、子字段、数据表格等）">
-        <AntSelect
-          style={{ width: '100%' }}
-          value={category}
-          onChange={(v) => handleCategoryChange(v as FieldCategory)}
-          options={visibleCategories.map(c => ({ value: c.key, label: `${c.icon}  ${c.label}` }))}
-        />
-        <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-          {FIELD_CATEGORIES.find(c => c.key === category)?.hint}
-        </div>
-      </Form.Item>
+  // 文档级默认 字体/字号：字体/字号控件在"未设本级"时直接显示这两个【实际生效值】（所见即所得），不再显示"跟随默认"。
+  // 主题内建默认＝宋体(Songti SC) / 10pt（与 record-theme 的 _cfg-get("font","Songti SC")、DocumentStylePanel body_size?？10 一致）。
+  const _themeCfg = template.layout_options?.theme_config as Record<string, any> | undefined;
+  const docFont = _themeCfg?.font || 'Songti SC';
+  const docSize = typeof _themeCfg?.body_size === 'number' ? _themeCfg.body_size : 10;
+  // 文档级「字段名默认粗细」(label_weight，缺省 bold)：字段名/标题的「加粗」控件未设本级时直接显示 加粗/正常，不再显示"跟随"。
+  const docLabelBold = (_themeCfg?.label_weight ?? 'bold') !== 'regular';
+  // 「距离」旋钮未设时显示的【当前默认值】(pt)：标题/备注与表格的间距，渲染端缺省跟随文档「字段间距」(line_gap，缺省 0.6em)。
+  // 换算成 pt 展示（em×正文字号），让旋钮"目前是多少就填多少"，而不是空着写"默认"。
+  const docGapPt = (() => {
+    const lg = _themeCfg?.line_gap;
+    if (lg == null || lg === '') return Math.round(0.6 * docSize * 10) / 10;
+    if (typeof lg === 'number') return Math.round(lg * docSize * 10) / 10;   // 裸数字视作 em
+    const s = String(lg);
+    if (/em$/.test(s)) return Math.round(parseFloat(s) * docSize * 10) / 10;
+    if (/pt$/.test(s)) return Math.round(parseFloat(s) * 10) / 10;
+    return Math.round(0.6 * docSize * 10) / 10;
+  })();
 
-      {field.semantic_role && (
-        <Form.Item label="自动填充来源">
-          <Tag color="blue">系统自动注入（{SEMANTIC_ROLE_LABEL[field.semantic_role] || field.semantic_role}）</Tag>
-          <span style={{ fontSize: 11, color: '#888' }}>由「溯源信息」分区固化，录入页只读、不污染 raw_data</span>
-        </Form.Item>
-      )}
-
-      <Space direction="horizontal" style={{ marginBottom: 12 }} wrap>
-        <Form.Item label="必填" tooltip="开启后，录入页此字段不填写就无法提交" style={{ marginBottom: 0 }}>
+  // —— Tab 区上方【常驻行】：字段类别 + 必填（+ 自动注入提示）——
+  // 「类别切换」是跨所有类型的高频操作、且表格类的「基础」Tab 精简后近乎空白，故提到 Tab 上方常驻，
+  // 顺带把「必填」也放这里；表格类因此不再需要单独的「基础」Tab（见 items 组装处）。
+  const categoryRow = (
+    <div style={{ marginBottom: 10, padding: '8px 10px', background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6 }}>
+      <Space wrap size={14} align="center">
+        <Space size={6}>
+          <span style={{ fontSize: 12, color: '#888' }}>字段类别</span>
+          <AntSelect size="small" style={{ width: 150 }} value={category}
+            onChange={(v) => handleCategoryChange(v as FieldCategory)}
+            options={visibleCategories.map(c => ({ value: c.key, label: `${c.icon}  ${c.label}` }))} />
+        </Space>
+        {/* 表格类字段名：仅编辑器显示名（字段列表/选择器里用），【不进渲染】；表格标题在「标签」Tab 单独设。 */}
+        {hasLabelNoteTabs && (
           <Space size={6}>
-            <Switch checked={field.required || false} onChange={(v) => onChange({ required: v })} />
-            <span style={{ fontSize: 11, color: '#888' }}>{field.required ? '录入时必须填写' : '录入时可留空'}</span>
+            <Tooltip title="仅作字段列表里的显示名，不会渲染进 PDF；表格标题请在「标签」Tab 设。">
+              <span style={{ fontSize: 12, color: '#888' }}>字段名</span>
+            </Tooltip>
+            <AutoGrowTextArea size="small" style={{ width: 150 }} value={field.label}
+              placeholder="仅编辑器显示，不渲染"
+              onChange={(e) => onChange({ label: e.target.value })} />
           </Space>
-        </Form.Item>
-        {(category === 'text' || category === 'number') && (
-          <Form.Item label="单位" style={{ marginBottom: 0 }}>
-            <Input style={{ width: 100 }} value={field.unit || ''}
-              onChange={(e) => onChange({ unit: e.target.value || undefined })}
-              placeholder="如 ℃ / mm" />
-          </Form.Item>
         )}
-        {category === 'text' && (
-          <Form.Item label="行数" style={{ marginBottom: 0 }}
-            tooltip="只影响录入控件：单行=一行输入框（回车不换行）；多行=可敲回车分段的文本域，换行会原样进 PDF。两种在 PDF 上超宽都会自动折行">
-            <Radio.Group
-              value={field.type === 'textarea' ? 'multi' : 'single'}
-              onChange={(e) => onChange({ type: e.target.value === 'multi' ? 'textarea' : 'text' })}
-              optionType="button"
-              options={[{ value: 'single', label: '单行' }, { value: 'multi', label: '多行' }]}
-            />
-          </Form.Item>
+        {/* 「必填」只对【录入时要填】的字段有意义；报告模板(值来自绑定映射、不录入)与间隔(空白块)都不显示。 */}
+        {field.type !== 'spacer' && field.type !== 'static_content' && !isReportMode && (
+          <span style={{ fontSize: 12, color: '#888' }}>必填
+            <Tooltip title="开启后，录入页此字段不填写就无法提交；关闭＝可留空（非必填）。">
+              <QuestionCircleOutlined style={{ marginLeft: 3, color: '#bbb' }} />
+            </Tooltip>
+            <Switch size="small" style={{ marginLeft: 6 }} checked={field.required || false}
+              onChange={(v) => onChange({ required: v })} />
+          </span>
+        )}
+        {field.semantic_role && (
+          <Tooltip title="该字段由系统按「溯源信息」自动填写（如主检=登录人、检测日期=提交时间），录入时只读、无需手填。">
+            <Tag color="blue" style={{ margin: 0 }}>系统自动注入（{SEMANTIC_ROLE_LABEL[field.semantic_role] || field.semantic_role}）</Tag>
+          </Tooltip>
+        )}
+        {field.conclusion_role && (
+          <Tooltip title="该标记用于稳定生成报告；修改字段名称或在文本/选择之间切换都不会断开映射。">
+            <Tag color="green" style={{ margin: 0 }}>结论模块字段 · {{
+              project_name: '总项目名称', item_name: '子项目名称', judgment_requirement: '判定要求', conclusion: '结论',
+            }[field.conclusion_role]}</Tag>
+          </Tooltip>
+        )}
+        {!isReportMode && !field.semantic_role && !['data_matrix', 'free_grid', 'image', 'device_ref', 'record_conclusion', 'static_content', 'spacer'].includes(field.type) && (
+          <Tooltip title="设为公共后，该字段在同一个项目录入批次中只保存一份；切换不同测试方法原始记录时自动显示同一值。系统会自动匹配各模板中的相同字段。">
+            <span style={{ fontSize: 12, color: '#888' }}>批次公共字段
+              <Switch size="small" style={{ marginLeft: 6 }} checked={field.data_scope === 'batch_shared'}
+                onChange={(checked) => onChange({ data_scope: checked ? 'batch_shared' : undefined })} />
+            </span>
+          </Tooltip>
         )}
       </Space>
+    </div>
+  );
 
-      {/* 简单值类型 + 时间范围的标签文字在「字段名」Tab 编辑；复杂类型（矩阵/图片/报告自动表）只在此给一个标签输入。
-          非图片表格（LABEL_NOTE_TAB_TYPES）的标签移到独立「标签」Tab，此处不再显示。 */}
+  // —— 「标签/显示标题/备注/说明」元信息块（原「基础」Tab 内容，去掉 Form 外壳）——
+  // 简单值/时间范围已各自并入 字段名/字段值；此块现只服务 设备(device_ref) / 图片表(report_photo_table) /
+  // 图片组(report_image_gallery)——注入它们各自的「类型配置」Tab 顶部，故【不再单出「基础」Tab】。
+  // （单位/行数已并入简单值的「字段值」Tab；此块不含它们。）
+  const basicMetaBlock = (
+    <>
+      {/* 复杂类型（设备/图片表/图片组）在此给一个标签输入；简单值/时间范围在「字段名/字段值」编辑、非图片表格在「标签」Tab。 */}
       {!isSimpleValue && !isDateRange && !hasLabelNoteTabs && (
         <Form.Item label="标签（显示名称）">
-          <Input value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
+          <AutoGrowTextArea value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
         </Form.Item>
       )}
 
@@ -229,61 +408,44 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
 
       {/* 图/表的备注信息：图片＝表格【上方】的描述（如「样品描述：见原始样品照片。」，与表内表头 label 是两层不同标题）；其余图表＝下方小字题注。
           非图片表格已把备注移到独立「备注」Tab（!hasLabelNoteTabs 排除）。 */}
-      {!hasLabelNoteTabs && (['data_matrix', 'image', 'report_result_table', 'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_photo_table', 'report_conclusion_table'] as string[]).includes(field.type) && (
+      {!hasLabelNoteTabs && (['data_matrix', 'image', 'report_result_table', 'report_equipment_table', 'report_image_gallery', 'report_sample_table', 'report_sample_description_table', 'report_photo_table', 'report_conclusion_table'] as string[]).includes(field.type) && (
         <Form.Item label="备注信息（紧贴图/表下方显示）"
           tooltip="填入后在 PDF 里紧贴该图片/表格的下方以小字显示（如「注：试样取自批次 A」）。图片的主标题＝上面的「标签」（表内表头行、跟随文档字号）；这里只是下方小字题注。留空＝不显示。">
-          <Input.TextArea rows={2} value={field.caption || ''}
+          <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.caption || ''}
             onChange={(e) => onChange({ caption: e.target.value || undefined })} />
         </Form.Item>
       )}
 
-      {/* 非图片表格「基础」Tab 精简为 类别 + 必填；字段说明对这些自动表无意义，隐藏。 */}
-      {!hasLabelNoteTabs && (
+      {/* 字段说明（录入时的提示）——对表格类无意义、报告模板不录入，均隐藏。 */}
+      {!hasLabelNoteTabs && !isReportMode && (
         <Form.Item label="字段说明（录入时的提示）">
-          <Input.TextArea rows={2} value={field.description || ''} onChange={(e) => onChange({ description: e.target.value || undefined })} />
+          <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.description || ''} onChange={(e) => onChange({ description: e.target.value || undefined })} />
         </Form.Item>
       )}
-    </Form>
+    </>
   );
 
-  // —— Tab:标签 ——（非图片表格：显示在表格左上方的表格说明/标题）
-  // 数据表缺省显示标题；报告自动表缺省不显示——语义相反，按 type 分流（与原「基础」里的开关同口径）。
-  const labelDefaultShown = field.type === 'data_matrix';
-  const labelShown = labelDefaultShown ? !field.hide_label : field.hide_label === false;
+  // —— Tab:标签 ——（表格标题，显示在表格左上方；【与「字段名」解耦】）
+  // 标题存独立字段 `table_title`（渲染端 wrapFigure/embedDataMatrixTypst 只认它）；「字段名」`label` 只作编辑器
+  // 显示名、不进渲染（在 Tab 上方常驻行编辑）。填了才显示、留空＝不显示（所见即所得），默认留空。
   const labelTab = (
     <Form layout="vertical" size="small">
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
-        message="标签＝表格标题（显示在表格左上方）"
-        description="作为该表格的说明标题，居左显示在表格上方。可开关显示、设文字与样式，并调标题与表格之间的距离。" />
-      <Form.Item label="显示标签（表格标题）"
-        tooltip="打开后在表格上方加一行标题（居左、字体跟随模板）。标题文字与样式在下方设置。">
-        <Space size={6}>
-          <Switch checked={labelShown}
-            onChange={(v) => onChange({ hide_label: labelDefaultShown ? (v ? undefined : true) : (v ? false : undefined) })} />
-          <span style={{ fontSize: 11, color: '#888' }}>
-            {labelShown ? `显示标题「${field.label || ''}」` : '不显示标题'}
-          </span>
-        </Space>
+        message="表格标签（显示在表格上方）" />
+      <Form.Item label="标签内容">
+        <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.table_title ?? ''} placeholder="填写作为表格标题；留空＝不显示"
+          onChange={(e) => onChange({ table_title: e.target.value || undefined })} />
       </Form.Item>
-      {labelShown ? (
-        <>
-          <Form.Item label="标签内容">
-            <Input value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
-          </Form.Item>
-          <Form.Item label="标签样式（字体/字号/加粗/斜体/颜色）">
-            <FormatPanel variant="text" value={field.label_style}
-              onChange={(ls) => onChange({ label_style: ls, label_bold: undefined })} />
-          </Form.Item>
-          <Form.Item label="标签与表格的距离" style={{ marginBottom: 0 }}
-            tooltip="标签和它下方表格之间的留白（pt）。留空＝默认紧贴。">
-            <InputNumber min={0} max={60} step={1} style={{ width: 140 }} addonAfter="pt" placeholder="默认"
-              value={field.label_gap ? parseFloat(field.label_gap) : undefined}
-              onChange={(v) => onChange({ label_gap: v != null ? `${v}pt` : undefined })} />
-          </Form.Item>
-        </>
-      ) : (
-        <div style={{ fontSize: 12, color: '#999' }}>标签已隐藏——表格不显示标题。打开上面的开关可设标题文字与样式。</div>
-      )}
+      <Form.Item label="标签与表格的距离"
+        tooltip="标签和它下方表格之间的留白（pt）。留空＝默认紧贴。需先填了标签内容才有效果。">
+        <InputNumber min={0} max={60} step={1} style={{ width: 140 }} addonAfter="pt"
+          value={field.label_gap ? parseFloat(field.label_gap) : docGapPt}
+          onChange={(v) => onChange({ label_gap: v != null ? `${v}pt` : undefined })} />
+      </Form.Item>
+      <Form.Item label="标签样式" style={{ marginBottom: 0 }}>
+        <FormatPanel inheritedFont={docFont} inheritedSize={docSize} inheritedBold={true} variant="text" value={field.label_style}
+          onChange={(ls) => onChange({ label_style: ls, label_bold: undefined })} />
+      </Form.Item>
     </Form>
   );
 
@@ -291,27 +453,20 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
   const notesTab = (
     <Form layout="vertical" size="small">
       <Alert type="info" showIcon style={{ marginBottom: 12 }}
-        message="备注＝表格备注（显示在表格下方）"
-        description="以小字显示在表格下方（如「注：试样取自批次 A」）。可设内容、相对表格的位置、距离与样式。留空＝不显示。" />
+        message="表格备注（显示在表格下方）" />
       <Form.Item label="备注内容">
-        <Input.TextArea rows={2} value={field.caption || ''}
+        <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.caption || ''} placeholder="填写作为表格备注；留空＝不显示"
           onChange={(e) => onChange({ caption: e.target.value || undefined })} />
       </Form.Item>
-      <Form.Item label="备注位置" tooltip="备注相对表格的位置。">
-        <Radio.Group optionType="button" buttonStyle="solid" size="small"
-          value={field.caption_position || 'below'}
-          onChange={(e) => onChange({ caption_position: e.target.value === 'below' ? undefined : e.target.value })}
-          options={[{ value: 'above', label: '表格上方' }, { value: 'below', label: '表格下方' }]} />
-      </Form.Item>
+      {/* 备注固定显示在表格下方（缺省 caption_position=below）——不再提供「表格上方/下方」切换。 */}
       <Form.Item label="备注与表格的距离"
         tooltip="备注和表格之间的留白（pt）。留空＝默认。需先填了备注内容才有效果。">
-        <InputNumber min={0} max={40} step={1} style={{ width: 140 }} addonAfter="pt" placeholder="默认"
-          value={field.caption_gap ? parseFloat(field.caption_gap) : undefined}
+        <InputNumber min={0} max={40} step={1} style={{ width: 140 }} addonAfter="pt"
+          value={field.caption_gap ? parseFloat(field.caption_gap) : docGapPt}
           onChange={(v) => onChange({ caption_gap: v != null ? `${v}pt` : undefined })} />
       </Form.Item>
-      <Form.Item label="备注样式（字体/字号/加粗/斜体/颜色）" style={{ marginBottom: 0 }}
-        tooltip="备注文字的样式。缺省 9pt 常规。需先填了备注内容才有效果。">
-        <FormatPanel variant="text" value={field.caption_style}
+      <Form.Item label="备注样式" style={{ marginBottom: 0 }}>
+        <FormatPanel inheritedFont={docFont} inheritedSize={docSize} variant="text" value={field.caption_style}
           onChange={(cs) => onChange({ caption_style: cs })} />
       </Form.Item>
     </Form>
@@ -333,10 +488,10 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
       {!field.hide_label ? (
         <>
           <Form.Item label="文字">
-            <Input value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
+            <AutoGrowTextArea value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
           </Form.Item>
           <Form.Item label="样式（字体/字号/加粗/斜体/颜色）" style={{ marginBottom: 0 }}>
-            <FormatPanel variant="text" value={field.label_style}
+            <FormatPanel inheritedFont={docFont} inheritedSize={docSize} inheritedBold={true} variant="text" value={field.label_style}
               onChange={(ls) => onChange({ label_style: ls, label_bold: undefined })} />
           </Form.Item>
         </>
@@ -346,9 +501,47 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     </Form>
   );
 
-  // —— Tab：字段值 ——（仅简单值类型）
+  // —— Tab：字段值 ——（仅简单值类型；含原「基础」的 单位/行数/说明——简单值不再单出「基础」Tab）
   const valueTab = (
     <Form layout="vertical" size="small">
+      {category === 'date' && (
+        <Space wrap size={16} align="start">
+          <Form.Item label="时间精度" tooltip="控制原始记录及报告中的显示范围；系统自动注入的检测/审核时间也遵循此设置。">
+            <Radio.Group size="small" optionType="button" buttonStyle="solid"
+              value={field.date_precision || 'day'}
+              onChange={(e) => onChange({ date_precision: e.target.value === 'day' ? undefined : e.target.value })}
+              options={DATE_PRECISION_OPTIONS} />
+          </Form.Item>
+          <Form.Item label="日期分隔符" tooltip="控制年月日显示为 2026-08-06 或 2026/08/06；时间部分仍使用冒号。">
+            <Radio.Group size="small" optionType="button" buttonStyle="solid"
+              value={field.date_separator || '-'}
+              onChange={(e) => onChange({ date_separator: e.target.value === '-' ? undefined : e.target.value })}
+              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }]} />
+          </Form.Item>
+        </Space>
+      )}
+      {/* 单位 / 行数＝录入设置：报告模板值来自绑定映射、不录入，隐藏 */}
+      {!isReportMode && (category === 'text' || category === 'number') && (
+        <Space direction="horizontal" wrap style={{ marginBottom: 4 }}>
+          <Form.Item label="单位" style={{ marginBottom: 0 }}>
+            <Input style={{ width: 100 }} value={field.unit || ''}
+              onChange={(e) => onChange({ unit: e.target.value || undefined })} placeholder="如 ℃ / mm" />
+          </Form.Item>
+          {category === 'text' && (
+            <Form.Item label="行数" style={{ marginBottom: 0 }}
+              tooltip="只影响录入控件：单行=一行输入框（回车不换行）；多行=可敲回车分段的文本域，换行会原样进 PDF。两种在 PDF 上超宽都会自动折行">
+              <Radio.Group value={field.type === 'textarea' ? 'multi' : 'single'}
+                onChange={(e) => onChange({ type: e.target.value === 'multi' ? 'textarea' : 'text' })}
+                optionType="button"
+                options={[{ value: 'single', label: '单行' }, { value: 'multi', label: '多行' }]} />
+            </Form.Item>
+          )}
+        </Space>
+      )}
+      {/* 选择字段：选项列表/单选多选/允许自定义＝录入设置；报告模板不录入，隐藏（值走绑定） */}
+      {!isReportMode && category === 'choice' && commitReplaceField && (
+        <ChoiceEditor field={field} onReplace={commitReplaceField} onChange={onChange} />
+      )}
       {isReportMode ? (
         <ReportValueSource
           key={field.id}
@@ -362,11 +555,50 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           {defaultValueControl}
         </Form.Item>
       )}
+      {/* 录入提示＝录入页帮助文字；报告模板不录入，隐藏 */}
+      {!isReportMode && (
+        <Form.Item label="录入提示（说明）"
+          tooltip="录入页此字段的灰色提示文字，帮助实验员填写；不进 PDF。留空＝无提示。">
+          <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.description || ''}
+            onChange={(e) => onChange({ description: e.target.value || undefined })} />
+        </Form.Item>
+      )}
       <Form.Item label="样式（字体/字号/加粗/斜体/颜色）" style={{ marginBottom: 0 }}>
-        <FormatPanel variant="text" value={field.value_style}
+        <FormatPanel inheritedFont={docFont} inheritedSize={docSize} variant="text" value={field.value_style}
           onChange={(vs) => onChange({ value_style: vs })} />
       </Form.Item>
     </Form>
+  );
+
+  // —— 字段名↔字段值 距离（label_width 字段级覆盖）——
+  // 复用 #field 的 label_width（标签固定列宽/值起始位置）：字段 ＞ 分区 ＞ 文档。仅竖排 #field 有效（图/表无此项）。
+  // undefined＝跟随分区/文档；'none'＝紧贴；长度(如 8em)＝标签占该列宽、值右移。与「分区头·字段值对齐」同款交互。
+  const labelValueGapControl = (
+    <div style={{ marginTop: 10 }}>
+      <Tooltip title="字段「名」与「值」之间的距离：跟随分区=用分区/文档统一设置；紧凑=值紧接在字段名后、无额外间距；对齐=字段名占固定列宽、各字段的值对齐到同一竖线（仅竖排字段有效，多列本就紧凑）。">
+        <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>字段名 ↔ 字段值 距离</div>
+      </Tooltip>
+      <Space size={8}>
+        <Radio.Group size="small" optionType="button" buttonStyle="solid"
+          value={isReportMode
+            ? (field.label_width && field.label_width !== 'none' ? 'align' : 'tight')   // 报告模板：无「跟随」，未设＝实际默认「紧凑」
+            : (field.label_width === undefined ? 'inherit' : field.label_width === 'none' ? 'tight' : 'align')}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === 'inherit') onChange({ label_width: undefined });
+            else if (v === 'tight') onChange({ label_width: 'none' });
+            else onChange({ label_width: (field.label_width && field.label_width !== 'none') ? field.label_width : '8em' });
+          }}
+          options={isReportMode
+            ? [{ label: '紧凑', value: 'tight' }, { label: '对齐', value: 'align' }]
+            : [{ label: '跟随分区', value: 'inherit' }, { label: '紧凑', value: 'tight' }, { label: '对齐', value: 'align' }]} />
+        {field.label_width && field.label_width !== 'none' && (
+          <InputNumber size="small" style={{ width: 92 }} min={1} max={30} step={0.5} addonAfter="em"
+            value={parseFloat(field.label_width) || 8}
+            onChange={(v) => onChange({ label_width: `${v ?? 8}em` })} />
+        )}
+      </Space>
+    </div>
   );
 
   // —— Tab：版式 ——（仅简单值类型；字段整体在版面上的对齐/段前后）
@@ -374,8 +606,9 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
   // 间距统一在「分区头·格式」或「文档样式」里设（应全篇一致）。存量 field_gap 值仍按渲染路径生效，只是不再可编辑。
   const layoutTab = (
     <div>
-      <FormatPanel variant="layout" value={field.style}
+      <FormatPanel variant="layout" value={field.style} alignNoInherit={isReportMode}
         onChange={(st) => onChange({ style: st })} />
+      {labelValueGapControl}
       <div style={{ fontSize: 11, color: '#aaa', marginTop: 6 }}>
         想统一调<b>行距 / 字段间距</b>？请到「分区头 · 格式」或「文档样式」里设——它们应全篇一致，不在单字段配。
       </div>
@@ -384,10 +617,15 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
 
   // —— Tab 2:类型配置（按类别，无配置的类别不出此页）——
   let configTab: React.ReactNode = null;
-  if (category === 'choice' && onReplaceField) {
+  // 选择字段：选项/单选多选/允许自定义 已并入「字段值」Tab（valueTab），不再单出「类型配置」。
+  // 设备字段：本身无类型配置——把「标签/说明」元信息块作为其「类型配置」内容，从而不再单出近乎空白的「基础」Tab。
+  if (field.type === 'record_conclusion') {
+    configTab = <RecordConclusionConfigEditor field={field} onChange={onChange} />;
+  } else if (field.type === 'device_ref') {
     configTab = (
       <Form layout="vertical" size="small">
-        <ChoiceEditor field={field} onReplace={onReplaceField} onChange={onChange} />
+        {basicMetaBlock}
+        <DeviceRefConfigEditor field={field} onChange={onChange} />
       </Form>
     );
   } else if (category === 'matrix') {
@@ -407,8 +645,8 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     configTab = (
       <Form layout="vertical" size="small">
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
-          message="版式·间隔（空白块）"
-          description="纯排版用：在两个字段/分区之间插入固定高度的空白，不产生任何数据、不进 raw_data。要让整页内容居中/钉底，请用分区头「格式 → 垂直对齐」。" />
+          message="间隔（空白块）"
+          description="排版用：在两个字段/分区之间插入一段固定高度的空白，本身不填任何内容。" />
         <Form.Item label="空白高度">
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <Space>
@@ -430,8 +668,13 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
         </Form.Item>
       </Form>
     );
+  } else if (field.type === 'static_content') {
+    configTab = <Form layout="vertical" size="small">
+      <Form.Item label="模板说明 / 资料"><StaticContentEditor field={field} templateId={(template as any).id} inheritedFont={docFont} inheritedSize={docSize} onChange={onChange}
+        onItemFocus={(itemId) => onDetailFocus?.(`__image_item__:${itemId}`)} /></Form.Item>
+    </Form>;
   } else if (field.type === 'image') {
-    // 图片字段不再单独编辑——整组版式/标题/备注/尺寸全在「图片分区」标题栏的「图片版式」里统一设（见组件结尾对 image 的提前返回）。
+    // 图片字段使用下方的轻量专用面板：仅编辑名称（以及项目模板的数据来源），不生成通用配置 Tab。
     configTab = null;
   } else if (field.type === 'report_conclusion_table') {
     const cTbl = field.conclusion_table || {};
@@ -472,9 +715,9 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
       <Form layout="vertical" size="small">
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message="生成报告时自动展开"
-          description="行 = 各项目的检测结论（来自原始记录里标了「作为检测结论」的字段，一个项目可有多个子结论）。多样品时按样品分组（rowspan）。标题在「标签」Tab 设、整表字体/加粗/对齐在「版式」Tab、下方备注在「备注」Tab。" />
+          description="行 = 各项目的检测结论（来自原始记录里标了「作为检测结论」的字段，一个项目可有多个子结论）。多样品时同一样品的多行会合并显示。标题在「标签」Tab 设、整表字体/加粗/对齐在「格式」Tab、下方备注在「备注」Tab。" />
         <Form.Item label="样品列"
-          tooltip="按样品分组显示（样品列 rowspan 合并）。自动＝多样品才显示、单样品自动隐藏；始终显示/不显示＝强制。">
+          tooltip="按样品分组显示（同一样品的多行在样品列合并成一格）。自动＝多样品才显示、单样品自动隐藏；始终显示/不显示＝强制。">
           <Radio.Group optionType="button" buttonStyle="solid" size="small"
             value={field.conclusion_table?.sample_col || 'auto'}
             onChange={(e) => onChange({ conclusion_table: { ...(field.conclusion_table || {}), sample_col: e.target.value } })}
@@ -532,21 +775,30 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
   } else if (field.type === 'report_result_table') {
     configTab = <ReportResultTableCanvas field={field} onChange={onChange} linkedRecord={linkedRecord} />;
   } else if (field.type === 'free_grid') {
-    configTab = <FreeGridCanvas field={field} onChange={onChange} linkedRecord={linkedRecord} />;
+    configTab = <FreeGridCanvas
+      field={field}
+      template={template}
+      onChange={onChange}
+      linkedRecord={linkedRecord}
+      editorMode={editorMode}
+      documentFont={docFont}
+      documentSize={docSize}
+      onCellFocus={(rowId) => onDetailFocus?.(`${field.code}::__detail__:row:${rowId}`)}
+    />;
   } else if (field.type === 'report_equipment_table') {
     configTab = (
       <Form layout="vertical" size="small">
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message="生成报告时自动汇集"
-          description="从关联原始记录中所有 device_ref 字段值（管理编号数组）反查设备库；输出列「设备名称 / 设备型号 / 设备编号 / 溯源日期 / 到期日期」。溯源日期、到期日期均从设备库直接取；缺日期的设备会跳过 + 顶部告警。" />
-        <Form.Item label="数据来源（留空 = 全部 device_ref 字段）">
+          description="从关联原始记录中所有「设备」字段填的设备编号，反查设备库；输出列「设备名称 / 设备型号 / 设备编号 / 溯源日期 / 到期日期」。溯源日期、到期日期均从设备库直接取；缺日期的设备会跳过并在顶部提示。" />
+        <Form.Item label="数据来源（留空 = 全部设备字段）">
           <AntSelect mode="multiple" allowClear style={{ width: '100%' }}
             value={field.equipment_table?.source_field_codes || []}
             onChange={(v) => onChange({ equipment_table: { ...(field.equipment_table || {}), source_field_codes: v as string[] } })}
-            placeholder="选关联原始记录中的某些 device_ref 字段；不选 = 全部"
+            placeholder="选关联原始记录中的某些设备字段；不选 = 全部"
             options={(linkedRecord?.groups || []).flatMap(g => g.fields)
               .filter(f => f.type === 'device_ref')
-              .map(f => ({ value: f.code, label: `${f.label} (${f.code})` }))} />
+              .map(f => ({ value: f.code, label: f.label || '未命名设备字段' }))} />
         </Form.Item>
         <Form.Item label="列">
           <AntSelect mode="multiple" style={{ width: '100%' }}
@@ -594,7 +846,7 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     const gal = field.image_gallery || {};
     const setGal = (patch: any) => onChange({ image_gallery: { ...gal, ...patch } });
     const recImgFields = (linkedRecord?.groups || []).flatMap(g => g.fields).filter(f => f.type === 'image');
-    const imgOptions = recImgFields.map(f => ({ value: f.code, label: `${f.label || f.code} (${f.code})` }));
+    const imgOptions = recImgFields.map(f => ({ value: f.code, label: f.label || '未命名图片字段' }));
     const isManual = Array.isArray(gal.items);
     const items = gal.items || [];
     const setItems = (next: any[]) => setGal({ items: next });
@@ -607,6 +859,8 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     };
     configTab = (
       <Form layout="vertical" size="small">
+        {/* 原「基础」的 标签/显示标题/备注/说明 并入此处顶部——不再单出「基础」Tab */}
+        {basicMetaBlock}
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message="项目模板拥有图片排版，照片来自关联原始记录"
           description="自动：按下面所选 image 字段直接铺排（继承其样式）。手动（推荐）：在此定义图位+排版，每个图位「绑定」一个原始记录 image 字段作为照片来源——生成时照片填进来、排版以本模板为准。" />
@@ -622,7 +876,7 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
         </Form.Item>
         {(gal.title_mode || 'per') === 'shared' && (
           <Form.Item label="共用表内标题">
-            <Input size="small" value={gal.shared_title ?? ''} placeholder="整组共用的表内标题（空＝不显示）"
+            <AutoGrowTextArea size="small" value={gal.shared_title ?? ''} placeholder="整组共用的表内标题（空＝不显示）"
               onChange={(e) => setGal({ shared_title: e.target.value })} />
           </Form.Item>
         )}
@@ -664,7 +918,7 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
                   {/* 排版 */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12, color: '#888', whiteSpace: 'nowrap' }}>排版</span>
-                    <Input size="small" style={{ width: 130 }} placeholder="标题(空=不显示)"
+                    <AutoGrowTextArea size="small" style={{ width: 130 }} placeholder="标题(空=不显示)"
                       value={it.label ?? ''} onChange={(e) => updItem(it.id, { label: e.target.value })} />
                     <Radio.Group size="small" optionType="button" value={it.layout || 'loose'}
                       onChange={(e) => updItem(it.id, { layout: e.target.value })}
@@ -690,21 +944,51 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     const setPT = (patch: any) => onChange({ photo_table: { ...pt, ...patch } });
     configTab = (
       <Form layout="vertical" size="small">
+        {/* 原「基础」的 标签/显示标题/备注/说明 并入此处顶部——不再单出「基础」Tab */}
+        {basicMetaBlock}
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message="原样照片表（首页用）"
           description="模板里只设标准文案（标签 / 说明 / 表头）与位置。照片上传和图片版式（每行张数 / 尺寸）由文员在「生成报告 → 编辑首页」时设置——模板期不编辑图片。" />
         <Form.Item label="说明行·加粗标签" extra="渲染时自动跟一个全角冒号；留空＝不显示标签。">
-          <Input value={pt.caption_label ?? ''} placeholder="如 样品描述"
+          <AutoGrowTextArea value={pt.caption_label ?? ''} placeholder="如 样品描述"
             onChange={(e) => setPT({ caption_label: e.target.value })} />
         </Form.Item>
         <Form.Item label="说明行·普通文字" extra="不加粗，跟在标签后面。">
-          <Input value={pt.caption_text ?? ''} placeholder="如 见原始样品照片。"
+          <AutoGrowTextArea value={pt.caption_text ?? ''} placeholder="如 见原始样品照片。"
             onChange={(e) => setPT({ caption_text: e.target.value })} />
         </Form.Item>
         <Form.Item label="图片表表头" extra="渲染在图片表格首行；留空＝不显示表头行。">
-          <Input value={pt.header ?? ''} placeholder="如 原始样品"
+          <AutoGrowTextArea value={pt.header ?? ''} placeholder="如 原始样品"
             onChange={(e) => setPT({ header: e.target.value })} />
         </Form.Item>
+      </Form>
+    );
+  } else if (field.type === 'report_sample_description_table') {
+    const sd = field.sample_description_table || {};
+    const setSD = (patch: any) => onChange({ sample_description_table: { ...sd, ...patch } });
+    configTab = (
+      <Form layout="vertical" size="small">
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="样品描述表（报告首页）"
+          description="按本报告包含的样品生成“唯一性编号 / 样品描述”两列表。建议将该字段拖到原样照片字段前；生成报告后可进入自由编辑表格，逐个修改样品描述。" />
+        <Form.Item label="第一列表头">
+          <Input value={sd.unique_label ?? ''} placeholder="唯一性编号" onChange={event => setSD({ unique_label: event.target.value })} />
+        </Form.Item>
+        <Form.Item label="第二列表头">
+          <Input value={sd.description_label ?? ''} placeholder="样品描述" onChange={event => setSD({ description_label: event.target.value })} />
+        </Form.Item>
+        <Form.Item label="默认样品描述" extra="生成报告时写入每个样品行，之后文员可以分别修改。">
+          <AutoGrowTextArea value={sd.default_description ?? ''} placeholder="见原始样品照片"
+            onChange={event => setSD({ default_description: event.target.value })} />
+        </Form.Item>
+        <Space size={8} style={{ width: '100%' }}>
+          <Form.Item label="唯一性编号列宽" style={{ flex: 1 }}>
+            <Input value={sd.unique_width ?? ''} placeholder="1fr" onChange={event => setSD({ unique_width: event.target.value })} />
+          </Form.Item>
+          <Form.Item label="样品描述列宽" style={{ flex: 1 }}>
+            <Input value={sd.description_width ?? ''} placeholder="3.5fr" onChange={event => setSD({ description_width: event.target.value })} />
+          </Form.Item>
+        </Space>
       </Form>
     );
   } else if (field.type === 'report_sample_table') {
@@ -782,6 +1066,20 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message="时间范围（如检测周期）"
           description="渲染成「开始 ~ 结束」。每一端点下方按钮：选「自定义」可手填日期；选「委托单字段」等可绑定（如 检测开始日期 / 检测结束日期）。缺一端只显另一端。" />
+        <Space wrap size={16} align="start">
+          <Form.Item label="时间精度" tooltip="开始和结束两端统一按该精度显示。">
+            <Radio.Group size="small" optionType="button" buttonStyle="solid"
+              value={field.date_precision || 'day'}
+              onChange={(e) => onChange({ date_precision: e.target.value === 'day' ? undefined : e.target.value })}
+              options={DATE_PRECISION_OPTIONS} />
+          </Form.Item>
+          <Form.Item label="日期分隔符">
+            <Radio.Group size="small" optionType="button" buttonStyle="solid"
+              value={field.date_separator || '-'}
+              onChange={(e) => onChange({ date_separator: e.target.value === '-' ? undefined : e.target.value })}
+              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }]} />
+          </Form.Item>
+        </Space>
         <Form.Item label="开始日期">
           <CellBindingButton binding={dr.start || { source: 'literal', text: '' }} linkedRecord={lr} onChange={(b) => setDR({ start: b })} />
         </Form.Item>
@@ -792,8 +1090,14 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           <Input style={{ width: 140 }} value={dr.separator ?? ''} placeholder=" ~ "
             onChange={(e) => setDR({ separator: e.target.value })} />
         </Form.Item>
+        {/* 原「基础」的 说明 并入此处——daterange 也收成 字段名/字段值/格式 三页 */}
+        <Form.Item label="录入提示（说明）"
+          tooltip="录入页此字段的灰色提示文字，帮助实验员填写；不进 PDF。留空＝无提示。">
+          <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={field.description || ''}
+            onChange={(e) => onChange({ description: e.target.value || undefined })} />
+        </Form.Item>
         <Form.Item label="字段值样式（字体/字号/加粗/斜体/颜色）" style={{ marginBottom: 0 }}>
-          <FormatPanel variant="text" value={field.value_style}
+          <FormatPanel inheritedFont={docFont} inheritedSize={docSize} variant="text" value={field.value_style}
             onChange={(vs) => onChange({ value_style: vs })} />
         </Form.Item>
       </Form>
@@ -805,6 +1109,8 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
   // 标题是否显示：原始记录数据表＝默认显示（hide_label 缺省=显示、=true 才隐藏）；报告自动表＝默认隐藏（仅 ===false 才显示）。
   const titleShown = (field.type === 'data_matrix' || field.type === 'image') ? !field.hide_label : field.hide_label === false;
   const showTableTextStyle = TABLE_TEXT_STYLE_TYPES.includes(field.type);
+  // 原始记录表格 / 试验数据表格：表头与内容【分开】设 加粗+字体+字号（渲染端 cellStylePair 逐格生效）。
+  const showHeaderBodyTextStyle = field.type === 'free_grid' || field.type === 'data_matrix';
   const figureLayoutTab = (
     <Form layout="vertical" size="small">
       {/* 标题（标签）：非图片表格已移到独立「标签」Tab；此处仅图片表/图（!hasLabelNoteTabs）保留。 */}
@@ -812,15 +1118,15 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
         <>
           <Form.Item label="标题样式（字体/字号/加粗/斜体/颜色）" style={{ marginBottom: 8 }}
             extra={field.type === 'data_matrix' ? '标题的「显示/隐藏」开关在「类型配置」Tab。' : '标题的「显示/隐藏」开关在「基础」Tab。'}>
-            <FormatPanel variant="text" value={field.label_style}
+            <FormatPanel inheritedFont={docFont} inheritedSize={docSize} inheritedBold={true} variant="text" value={field.label_style}
               onChange={(ls) => onChange({ label_style: ls })} />
           </Form.Item>
           {/* 图片标题渲染为表格内表头行（框内），没有"标题↔图距离"可调——故仅非图片类型显示此项 */}
           {field.type !== 'image' && (
             <Form.Item label="标题与图/表的距离"
               tooltip="标题和它下方表/图之间的留白（pt）。留空＝默认紧贴。">
-              <InputNumber min={0} max={60} step={1} style={{ width: 140 }} addonAfter="pt" placeholder="默认"
-                value={field.label_gap ? parseFloat(field.label_gap) : undefined}
+              <InputNumber min={0} max={60} step={1} style={{ width: 140 }} addonAfter="pt"
+                value={field.label_gap ? parseFloat(field.label_gap) : docGapPt}
                 onChange={(v) => onChange({ label_gap: v != null ? `${v}pt` : undefined })} />
             </Form.Item>
           )}
@@ -837,13 +1143,13 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           <Space direction="vertical" size={8} style={{ width: '100%' }}>
             <Space size={8} wrap>
               <span style={{ fontSize: 12, color: '#888' }}>字体</span>
-              <AntSelect size="small" style={{ width: 150 }} placeholder="继承" allowClear
-                value={field.table_style?.font}
+              <AntSelect size="small" style={{ width: 150 }} allowClear
+                value={field.table_style?.font ?? docFont}
                 onChange={(v) => onChange({ table_style: cleanTableStyle({ ...field.table_style, font: v || undefined }) })}
                 options={TABLE_FONT_OPTIONS} />
               <span style={{ fontSize: 12, color: '#888' }}>字号</span>
-              <InputNumber size="small" style={{ width: 92 }} min={6} max={20} step={0.5} addonAfter="pt" placeholder="继承"
-                value={field.table_style?.font_size ? parseFloat(field.table_style.font_size) : undefined}
+              <InputNumber size="small" style={{ width: 92 }} min={6} max={20} step={0.5} addonAfter="pt"
+                value={field.table_style?.font_size ? parseFloat(field.table_style.font_size) : docSize}
                 onChange={(v) => onChange({ table_style: cleanTableStyle({ ...field.table_style, font_size: v != null ? `${v}pt` : undefined }) })} />
             </Space>
             <Space size={20} wrap>
@@ -872,6 +1178,54 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           </Space>
         </Form.Item>
       )}
+      {/* 表头/内容默认文字样式；自由表格画布中设置的单元格格式优先覆盖。 */}
+      {showHeaderBodyTextStyle && (() => {
+        const tsv = field.table_style;
+        const setTS = (patch: Record<string, any>) => onChange({ table_style: cleanTableStyle({ ...tsv, ...patch }) });
+        // 未设本级字体/字号时，直接显示【当前实际生效值】：本级 ＞ 整表 table_style.font/font_size ＞ 文档默认(docFont/docSize)。
+        const fbFont = tsv?.font || docFont;
+        const fbSize = tsv?.font_size ? parseFloat(tsv.font_size) : docSize;
+        const fontRow = (fontVal: string | undefined, sizeVal: string | undefined, onFont: (v?: string) => void, onSize: (v: number | null) => void) => (
+          <Space size={8} wrap>
+            <span style={{ fontSize: 12, color: '#888' }}>字体</span>
+            <AntSelect size="small" style={{ width: 150 }} allowClear
+              value={fontVal ?? fbFont} onChange={(v) => onFont(v || undefined)} options={TABLE_FONT_OPTIONS} />
+            <span style={{ fontSize: 12, color: '#888' }}>字号</span>
+            <InputNumber size="small" style={{ width: 92 }} min={6} max={20} step={0.5} addonAfter="pt"
+              value={sizeVal ? parseFloat(sizeVal) : fbSize} onChange={onSize} />
+          </Space>
+        );
+        return (
+          <>
+            <Form.Item label="表头默认文字（加粗 / 字体 / 字号）"
+              tooltip="作为所有表头格的默认样式；画布中给单元格单独设置的格式优先。字体/字号留空＝跟随文档默认。">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <span style={{ fontSize: 12, color: '#888' }}>加粗
+                  <Switch size="small" style={{ marginLeft: 6 }}
+                    checked={tsv?.header_bold !== false}
+                    onChange={(v) => setTS({ header_bold: v ? undefined : false })} />
+                </span>
+                {fontRow(tsv?.header_font, tsv?.header_font_size,
+                  (v) => setTS({ header_font: v }),
+                  (v) => setTS({ header_font_size: v != null ? `${v}pt` : undefined }))}
+              </Space>
+            </Form.Item>
+            <Form.Item label="内容默认文字（加粗 / 字体 / 字号）"
+              tooltip="作为所有数据/内容格的默认样式；画布中给单元格单独设置的格式优先。字体/字号留空＝跟随文档默认。">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <span style={{ fontSize: 12, color: '#888' }}>加粗
+                  <Switch size="small" style={{ marginLeft: 6 }}
+                    checked={tsv?.body_bold === true}
+                    onChange={(v) => setTS({ body_bold: v ? true : undefined })} />
+                </span>
+                {fontRow(tsv?.body_font, tsv?.body_font_size,
+                  (v) => setTS({ body_font: v }),
+                  (v) => setTS({ body_font_size: v != null ? `${v}pt` : undefined }))}
+              </Space>
+            </Form.Item>
+          </>
+        );
+      })()}
       {/* 备注（题注）：非图片表格已移到独立「备注」Tab；此处仅图片表/图（!hasLabelNoteTabs）保留。 */}
       {!hasLabelNoteTabs && (
         <>
@@ -886,13 +1240,13 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           )}
           <Form.Item label="备注与图/表的距离"
             tooltip="备注和图/表之间的留白（pt）。留空＝默认。需先在「基础」里填了备注信息才有效果。">
-            <InputNumber min={0} max={40} step={1} style={{ width: 140 }} addonAfter="pt" placeholder="默认"
-              value={field.caption_gap ? parseFloat(field.caption_gap) : undefined}
+            <InputNumber min={0} max={40} step={1} style={{ width: 140 }} addonAfter="pt"
+              value={field.caption_gap ? parseFloat(field.caption_gap) : docGapPt}
               onChange={(v) => onChange({ caption_gap: v != null ? `${v}pt` : undefined })} />
           </Form.Item>
           <Form.Item label="备注样式（字体/字号/加粗/斜体/颜色）"
             tooltip="备注文字的样式。缺省 9pt 常规。需先在「基础」里填了备注信息才有效果。">
-            <FormatPanel variant="text" value={field.caption_style}
+            <FormatPanel inheritedFont={docFont} inheritedSize={docSize} variant="text" value={field.caption_style}
               onChange={(cs) => onChange({ caption_style: cs })} />
           </Form.Item>
         </>
@@ -910,29 +1264,34 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
   // —— Tab 3:格式（样式层叠：文档 → 区块 → 字段）——
   // 简单值类型（text/number/date/choice）的格式/绑定已折进「字段」Tab 的 字段名/字段值/版式 三段；
   // 仅非简单值但仍可格式化的类型（计算/设备/引用等）保留独立「格式」「取值绑定」Tab。
-  const formatAllowed = !NO_FORMAT_BINDING.includes(field.type) && !isSimpleValue;
+  const formatAllowed = !NO_FORMAT_BINDING.includes(field.type) && !isSimpleValue && field.type !== 'static_content';
 
   // —— Tab 4:取值绑定（报告专属）——
   const bindingAllowed = isReportMode && !NO_FORMAT_BINDING.includes(field.type) && !isSimpleValue;
 
   const items = [
-    { key: 'basic', label: '基础', children: basicTab },
-    // 简单值类型：字段名 / 字段值 / 版式 三个顶层 Tab（与原来一样在上方分区）
+    // 【不再有独立「基础」Tab】：类别/必填在 Tab 上方常驻行；其余原「基础」内容按类型分流——
+    //   · 简单值(文本/数字/日期/选择)+时间范围：单位/行数/说明/选项 → 各自「字段值」Tab；
+    //   · 设备/图片表/图片组：标签/说明(+显示标题/备注) → 各自「类型配置」Tab（basicMetaBlock）；
+    //   · 间隔(spacer)：标签/说明对空白块无意义，直接丢弃；
+    //   · 表格类(hasLabelNoteTabs)：标签/备注在独立 Tab，基础本就空白。
+    // 简单值类型：字段名 / 字段值 / 格式 三个顶层 Tab（与原来一样在上方分区）
     ...(isSimpleValue ? [
       { key: 'name', label: '字段名', children: nameTab },
       { key: 'value', label: '字段值', children: valueTab },
-      { key: 'layout', label: '版式', children: layoutTab },
+      { key: 'layout', label: '格式', children: layoutTab },
     ] : []),
-    // 时间范围（检测周期）：与简单字段一样给 字段名/字段值/版式 三页；
+    // 时间范围（检测周期）：与简单字段一样给 字段名/字段值/格式 三页；
     // 字段值＝两端日期绑定 + 分隔符 + 值样式（即上面的 configTab），故不再单出「类型配置」页。
     ...(isDateRange ? [
       { key: 'name', label: '字段名', children: nameTab },
       { key: 'value', label: '字段值', children: configTab },
-      { key: 'layout', label: '版式', children: layoutTab },
+      { key: 'layout', label: '格式', children: layoutTab },
     ] : []),
     ...(configTab && !isDateRange ? [{ key: 'config', label: '类型配置', children: configTab }] : []),
-    // 报告自动表/图 + 原始记录数据表：统一「版式」顶层 Tab（标题显隐+样式 / 备注位置/样式 / 对齐 / 段前后间距）
-    ...((FIGURE_LAYOUT_TYPES.includes(field.type) || field.type === 'data_matrix' || field.type === 'image') ? [{ key: 'figure-layout', label: '版式', children: figureLayoutTab }] : []),
+    // 报告自动表/图 + 原始记录数据表 + 原始记录表格：统一「格式」顶层 Tab（标题显隐+样式 / 备注位置/样式 / 对齐 / 段前后间距）
+    // free_grid 属 hasLabelNoteTabs，故此 Tab 里只留「对齐与间距」+「表头/内容文字」（标题在「标签」、备注在「备注」Tab），与数据表格一致。
+    ...((FIGURE_LAYOUT_TYPES.includes(field.type) || field.type === 'data_matrix' || field.type === 'image' || field.type === 'free_grid') ? [{ key: 'figure-layout', label: '格式', children: figureLayoutTab }] : []),
     // 非图片表格：把表格【标题】与【备注】拆成独立 Tab（标签＝表格左上方标题；备注＝表格下方说明）
     ...(hasLabelNoteTabs ? [
       { key: 'label', label: '标签', children: labelTab },
@@ -949,16 +1308,16 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
           <div style={{ marginBottom: 12 }}>
             <span style={{ fontSize: 12, color: '#888', marginRight: 8 }}>字段名（标签）</span>
             <Radio.Group size="small" optionType="button"
-              value={field.label_bold === undefined ? 'inherit' : (field.label_bold ? 'bold' : 'regular')}
-              onChange={(e) => onChange({ label_bold: e.target.value === 'inherit' ? undefined : e.target.value === 'bold' })}
+              value={field.label_bold === undefined ? (docLabelBold ? 'bold' : 'regular') : (field.label_bold ? 'bold' : 'regular')}
+              onChange={(e) => onChange({ label_bold: e.target.value === 'bold' })}
               options={[
-                { value: 'inherit', label: '跟随文档' },
                 { value: 'bold', label: '加粗' },
                 { value: 'regular', label: '正常' },
               ]} />
             <div style={{ fontSize: 11, color: '#aaa', marginTop: 4 }}>单独控制这个字段名是否加粗（如"检测要求/检测结果"）。仿宋等无粗体字体会用描边模拟。</div>
           </div>
-          <FormatPanel value={field.style} onChange={(style) => onChange({ style })} />
+          <FormatPanel inheritedFont={docFont} inheritedSize={docSize} value={field.style} onChange={(style) => onChange({ style })} />
+          {labelValueGapControl}
         </div>
       ),
     }] : []),
@@ -979,47 +1338,245 @@ export default function FieldPropsPanel({ field, template, onChange, onReplaceFi
     }] : []),
   ];
 
-  // 图片字段：整组版式/标题/备注在「图片分区」的「图片版式」+「格式(A)」里统一设（与原始记录一致），字段本身不单独设版式
+  // 图片字段：点击单张图片时只编辑“图片名称”（每张标题模式下作为表内标题）。
+  // 尺寸、排布、边距和文字样式仍全部收敛在图片分区卡中，避免字段级与分区级配置互相覆盖。
   if (field.type === 'image') {
-    // 【项目报告模板】图片字段＝绑定一个原始记录图片来源（一图位一来源）
-    if (isReportMode && caps.linkedRecordBinding) {
-      const recImgFields = (linkedRecord?.groups || []).flatMap(g => g.fields).filter(f => f.type === 'image');
-      const imgOptions = recImgFields.map(f => ({ value: f.code, label: `${f.label || f.code}（${f.code}）` }));
-      const bound = !!field.image_source_code;
-      return (
-        <div style={{ padding: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#555', marginBottom: 6 }}><LinkOutlined /> 绑定图片来源（原始记录）</div>
-          {!linkedRecord && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message="未关联原始记录模板，无法绑定来源。" />}
-          <AntSelect showSearch optionFilterProp="label" allowClear style={{ width: '100%' }} status={bound ? undefined : 'warning'}
-            placeholder="选择原始记录中的图片字段（本图位的照片来源）"
-            value={field.image_source_code || undefined} options={imgOptions}
-            onChange={(v) => onChange({ image_source_code: (v as string) || undefined })} />
-          {!bound && <div style={{ fontSize: 11, color: '#d48806', marginTop: 4 }}>⚠ 未绑定来源，生成报告时本图位为空。</div>}
-          <div style={{ fontSize: 11, color: '#888', marginTop: 10, lineHeight: 1.7 }}>
-            一个图片字段＝一个图位＝绑定一个原始记录图片来源。<br />
-            整组版式（每行几张 / 尺寸 / 独立·粘连 / 表内标题）在分区标题栏的<b>「图片版式」</b>、大标题 / 上方标签 / 下方备注在<b>「格式(A)」</b>——与原始记录图片分区完全一致。图片<b>名称</b>（每张标题模式作表内标题）在左侧字段行改。
-          </div>
-        </div>
-      );
-    }
-    // 【原始记录模板】图片字段不单独编辑（照片录入时上传；名称在字段行改）
+    const canBindImageSource = isReportMode && caps.linkedRecordBinding;
+    const recImgFields = canBindImageSource
+      ? (linkedRecord?.groups || []).flatMap(g => g.fields).filter(f => f.type === 'image')
+      : [];
+    const imgOptions = recImgFields.map(f => ({ value: f.code, label: f.label || '未命名图片字段' }));
+    const bound = !!field.image_source_code;
     return (
-      <div style={{ padding: 4 }}>
-        <Alert type="info" showIcon
-          message="图片字段无需单独设置"
-          description={<div style={{ lineHeight: 1.8 }}>
-            本图片＝图片分区里的一个「图位」。<b>版式、表内标题样式、备注、各种距离、尺寸、独立/粘连、每行几张</b>都在<b>「图片分区」标题栏右侧的「图片版式 / 格式(A)」</b>里<b>统一设置</b>（一处管全分区）。<br />
-            图片的<b>名称</b>（「每张一个标题」模式下作表内标题）请在左侧<b>字段行</b>直接改。
-          </div>} />
+      <div style={{ padding: 8 }}>
+        <Form layout="vertical" size="small">
+          <Form.Item
+            label="图片名称（表内标题）"
+            extra="图片分区使用“每张一个标题”时显示此名称；同时作为数据录入时该图片项的初始名称。"
+          >
+            <AutoGrowTextArea
+              value={field.label || ''}
+              placeholder="请输入图片名称"
+              autoSize={{ minRows: 1, maxRows: 3 }}
+              onChange={(event) => onChange({ label: event.target.value })}
+            />
+          </Form.Item>
+
+          {canBindImageSource && (
+            <Form.Item
+              label={<span><LinkOutlined /> 图片来源（原始记录）</span>}
+              extra="仅决定从关联原始记录的哪个图片分区取图，不控制图片版式。"
+            >
+              {!linkedRecord && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message="未关联原始记录模板，无法绑定来源。" />}
+              <AntSelect
+                showSearch
+                optionFilterProp="label"
+                allowClear
+                style={{ width: '100%' }}
+                status={bound ? undefined : 'warning'}
+                placeholder="选择原始记录图片来源"
+                value={field.image_source_code || undefined}
+                options={imgOptions}
+                onChange={(value) => onChange({ image_source_code: (value as string) || undefined })}
+              />
+              {!bound && <div style={{ fontSize: 11, color: '#d48806', marginTop: 4 }}>⚠ 未绑定来源，生成报告时本图位为空。</div>}
+            </Form.Item>
+          )}
+        </Form>
+
+        <Alert
+          type="info"
+          showIcon
+          message="其他图片设置由分区统一管理"
+          description="每行数量、图片尺寸、边距、单数排布以及表内标题字体和字号，请在图片分区标题栏的“图片版式 / 格式”中设置。"
+        />
       </div>
     );
   }
 
-  // key 含 field.id + category：切换字段 / 切换类别时回到「基础」页，避免停留在已消失的 tab
-  return <Tabs size="small" key={`${field.id}:${category}`} items={items} />;
+  // key 含 field.id + category：切换字段 / 切换类别时回到首个 tab，避免停留在已消失的 tab
+  return (
+    <div>
+      {categoryRow}
+      {historyEnabled && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', marginBottom: 8, background: '#f7f9fc', border: '1px solid #eef0f3', borderRadius: 6 }}>
+          <Tooltip title="恢复当前表格类型的默认结构；字段名、标签、备注和外层格式不变">
+            <Button size="small" icon={<ReloadOutlined />} disabled={!commitReplaceField} onClick={resetTableToDefault}>重置默认</Button>
+          </Tooltip>
+        </div>
+      )}
+      <Tabs size="small" key={`${field.id}:${category}`} items={items} />
+    </div>
+  );
 }
 
 // ============ 字段面板辅助组件 ============
+function RecordConclusionConfigEditor({ field, onChange }: {
+  field: FieldDefinition;
+  onChange: (patch: Partial<FieldDefinition>) => void;
+}) {
+  const cfg = field.record_conclusion || {
+    mode: 'overall' as const,
+    project_name: '检测项目',
+    allow_project_name_override: true,
+    items: [],
+  };
+  const setCfg = (patch: Partial<NonNullable<FieldDefinition['record_conclusion']>>) =>
+    onChange({ record_conclusion: { ...cfg, ...patch } });
+  const updateItem = (index: number, patch: Record<string, any>) => {
+    const items = cfg.items.map((item, i) => i === index ? { ...item, ...patch } : item);
+    setCfg({ items });
+  };
+  const removeItem = (index: number) => setCfg({ items: cfg.items.filter((_, i) => i !== index) });
+  const addItem = () => {
+    const seq = cfg.items.length + 1;
+    setCfg({ items: [...cfg.items, {
+      id: `conclusion_${Date.now()}_${seq}`,
+      code: `item_${seq}`,
+      name_mode: cfg.mode === 'overall' ? 'inherit_project' : 'custom',
+      name: cfg.mode === 'children' ? `子项目${seq}` : undefined,
+      allow_name_override: true,
+      judgment_options: ['客户要求', '标准要求'],
+      conclusion_options: ['符合', '不符合'],
+      judgment_required: true,
+      conclusion_required: true,
+      default_report_enabled: true,
+    }] });
+  };
+  const changeMode = (mode: 'overall' | 'children') => {
+    const existing = cfg.items.length ? cfg.items : [{
+      id: `conclusion_${Date.now()}`, code: 'overall', judgment_required: true, conclusion_required: true, default_report_enabled: true,
+      judgment_options: ['客户要求', '标准要求'], conclusion_options: ['符合', '不符合'],
+    }];
+    const items = mode === 'overall'
+      ? [{ ...existing[0], code: existing[0].code || 'overall', name_mode: 'inherit_project' as const, name: undefined }]
+      : existing.map((item, index) => ({ ...item, name_mode: 'custom' as const, name: item.name || `子项目${index + 1}` }));
+    setCfg({
+      mode,
+      items,
+      ...(mode === 'children' && !cfg.project_summary ? {
+        project_summary: {
+          judgment_enabled: true,
+          conclusion_enabled: true,
+          judgment_requirement: existing[0]?.judgment_requirement,
+          judgment_options: existing[0]?.judgment_options || ['客户要求', '标准要求'],
+          conclusion_options: existing[0]?.conclusion_options || ['符合', '不符合'],
+          judgment_required: false,
+          conclusion_required: false,
+        },
+      } : {}),
+    });
+  };
+  // 旧版 children 配置没有 project_summary，按“两个总项目可选字段均已删除”回放，避免静默改变存量模板。
+  const projectSummary = cfg.project_summary || { judgment_enabled: false, conclusion_enabled: false };
+  const setProjectSummary = (patch: Partial<NonNullable<NonNullable<FieldDefinition['record_conclusion']>['project_summary']>>) =>
+    setCfg({ project_summary: { ...projectSummary, ...patch } });
+
+  return (
+    <Form layout="vertical" size="small">
+      <Alert type="info" showIcon style={{ marginBottom: 12 }}
+        message="报告结论的单一数据来源"
+        description="整体模式在首页生成一行；子项目模式按每个已完成且允许进报告的子项目生成多行。项目名称和子项目名称可在录入时按下方权限修改。" />
+      <Form.Item label="结论展示模式">
+        <Radio.Group optionType="button" buttonStyle="solid" value={cfg.mode}
+          onChange={(event) => changeMode(event.target.value)}
+          options={[{ value: 'overall', label: '整体项目结论' }, { value: 'children', label: '按子项目展开' }]} />
+      </Form.Item>
+      <Form.Item label="报告项目名称" required>
+        <AutoGrowTextArea value={cfg.project_name || ''} placeholder="例如：弯曲性能"
+          onChange={(event) => setCfg({ project_name: event.target.value })} />
+      </Form.Item>
+      <Space wrap style={{ marginBottom: 12 }}>
+        <span>录入时允许修改项目名称</span>
+        <Switch checked={cfg.allow_project_name_override !== false}
+          onChange={(checked) => setCfg({ allow_project_name_override: checked })} />
+        <span style={{ color: '#999', fontSize: 11 }}>系统会自动维护稳定的匹配标识</span>
+      </Space>
+      {cfg.mode === 'children' && <div style={{ padding: 10, marginBottom: 12, border: '1px solid #d6e4ff', borderRadius: 6, background: '#f7faff' }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>总项目字段</div>
+        <div style={{ color: '#7a8599', fontSize: 11, marginBottom: 10 }}>
+          总项目名称始终保留并用作报告项目名称；判定要求和总结论可按模板需要保留或删除。首页检测结论表仍只显示下方子项目。
+        </div>
+        <Space wrap style={{ marginBottom: 10 }}>
+          <span>保留判定要求</span>
+          <Switch size="small" checked={projectSummary.judgment_enabled !== false}
+            onChange={(checked) => setProjectSummary({ judgment_enabled: checked })} />
+          <span>保留总结论</span>
+          <Switch size="small" checked={projectSummary.conclusion_enabled !== false}
+            onChange={(checked) => setProjectSummary({ conclusion_enabled: checked })} />
+        </Space>
+        {projectSummary.judgment_enabled !== false && <>
+          <Form.Item label="默认总项目判定要求" style={{ marginBottom: 8 }}>
+            <AutoGrowTextArea value={projectSummary.judgment_requirement || ''} placeholder="可留空，录入时填写"
+              onChange={(event) => setProjectSummary({ judgment_requirement: event.target.value || undefined })} />
+          </Form.Item>
+          <Form.Item label="总项目判定要求常用选项" style={{ marginBottom: 8 }}>
+            <AntSelect mode="tags" value={projectSummary.judgment_options || ['客户要求', '标准要求']}
+              onChange={(values) => setProjectSummary({ judgment_options: values })} />
+          </Form.Item>
+        </>}
+        {projectSummary.conclusion_enabled !== false && <Form.Item label="总结论选项" style={{ marginBottom: 8 }}>
+          <AntSelect mode="tags" value={projectSummary.conclusion_options || ['符合', '不符合']}
+            onChange={(values) => setProjectSummary({ conclusion_options: values })} />
+        </Form.Item>}
+        <Space wrap>
+          {projectSummary.judgment_enabled !== false && <><span>总项目判定要求必填</span><Switch size="small"
+            checked={projectSummary.judgment_required === true}
+            onChange={(checked) => setProjectSummary({ judgment_required: checked })} /></>}
+          {projectSummary.conclusion_enabled !== false && <><span>总结论必填</span><Switch size="small"
+            checked={projectSummary.conclusion_required === true}
+            onChange={(checked) => setProjectSummary({ conclusion_required: checked })} /></>}
+        </Space>
+      </div>}
+      <Form.Item label="允许整份记录没有已完成项目"
+        tooltip="开启后，所有结论项都标记为未检测/不适用/无法检测时仍可提交审核归档；该方法不会出现在报告检测结论表中。">
+        <Switch checked={cfg.allow_no_completed_items === true}
+          onChange={(checked) => setCfg({ allow_no_completed_items: checked })} />
+      </Form.Item>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+        <b>{cfg.mode === 'overall' ? '整体结论' : '子项目结论'}</b>
+        {cfg.mode === 'children' && <Button size="small" type="dashed" icon={<PlusOutlined />} style={{ marginLeft: 'auto' }} onClick={addItem}>添加子项目</Button>}
+      </div>
+      {cfg.items.map((item, index) => (
+        <div key={item.id} style={{ padding: 10, marginBottom: 10, border: '1px solid #e8e8e8', borderRadius: 6, background: '#fafafa' }}>
+          <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}>
+            <b>{cfg.mode === 'overall' ? '整体项目' : `子项目 ${index + 1}`}</b>
+            {cfg.mode === 'children' && cfg.items.length > 1 && <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={() => removeItem(index)}>删除</Button>}
+          </Space>
+          {cfg.mode === 'children' && <Form.Item label="子项目名称" required style={{ marginBottom: 8 }}>
+            <Input value={item.name || ''} onChange={(event) => updateItem(index, { name: event.target.value })} />
+          </Form.Item>}
+          <Form.Item label="默认判定要求" style={{ marginBottom: 8 }}>
+            <AutoGrowTextArea value={item.judgment_requirement || ''} placeholder="可留空，录入时填写"
+              onChange={(event) => updateItem(index, { judgment_requirement: event.target.value || undefined })} />
+          </Form.Item>
+          <Form.Item label="判定要求常用选项" style={{ marginBottom: 8 }}>
+            <AntSelect mode="tags" value={item.judgment_options || []}
+              onChange={(values) => updateItem(index, { judgment_options: values })} />
+          </Form.Item>
+          <Form.Item label="结论选项" style={{ marginBottom: 8 }}>
+            <AntSelect mode="tags" value={item.conclusion_options || ['符合', '不符合']}
+              onChange={(values) => updateItem(index, { conclusion_options: values })} />
+          </Form.Item>
+          <Space wrap>
+            <span>录入时可改名称</span><Switch size="small" checked={item.allow_name_override !== false}
+              onChange={(checked) => updateItem(index, { allow_name_override: checked })} />
+            <span>判定要求必填</span><Switch size="small"
+              checked={item.judgment_required ?? item.required !== false}
+              onChange={(checked) => updateItem(index, { judgment_required: checked })} />
+            <span>结论必填</span><Switch size="small"
+              checked={item.conclusion_required ?? item.required !== false}
+              onChange={(checked) => updateItem(index, { conclusion_required: checked })} />
+            <span>默认进入报告</span><Switch size="small" checked={item.default_report_enabled !== false}
+              onChange={(checked) => updateItem(index, { default_report_enabled: checked })} />
+          </Space>
+        </div>
+      ))}
+      {!cfg.items.length && <Button block type="dashed" icon={<PlusOutlined />} onClick={addItem}>添加结论项</Button>}
+    </Form>
+  );
+}
+
 /** 报告模式·字段值来源：手填(literal) / 抓取(binding)。本组件按 field.id key 化，切字段重置 intent。 */
 function ReportValueSource({ field, linkedRecord, onChange }: {
   field: FieldDefinition;
@@ -1045,7 +1602,7 @@ function ReportValueSource({ field, linkedRecord, onChange }: {
       </Form.Item>
       {mode === 'manual' ? (
         <Form.Item label="自定义内容" style={{ marginBottom: 8 }} extra="文员直接写的固定文字">
-          <Input.TextArea rows={2} value={literalText}
+          <AutoGrowTextArea autoSize={{ minRows: 2, maxRows: 3 }} value={literalText}
             onChange={(e) => onChange({ binding: { source: 'literal', text: e.target.value } })} />
         </Form.Item>
       ) : (
@@ -1131,7 +1688,7 @@ function ChoiceEditor({
             />
           </Form.Item>
           <Form.Item label="允许「其他（自定义）」">
-            <Switch checked={field.allow_custom || false} onChange={(v) => onChange({ allow_custom: v })} />
+            <Switch checked={field.allow_custom !== false} onChange={(v) => onChange({ allow_custom: v })} />
             <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>
               打开后实验人员可选「其他」并手动输入
             </span>
@@ -1189,7 +1746,7 @@ function OptionsEditor({ options, onChange, placeholder }: { options: string[]; 
       ))}
       <Space.Compact block>
         <Button size="small" icon={<PlusOutlined />} onClick={() => onChange([...options, ''])} type="dashed" style={{ flex: 1 }}>添加选项</Button>
-        <Popover
+        <ClosablePopover
           trigger="click"
           open={batchOpen}
           onOpenChange={(v) => { setBatchOpen(v); if (v) setBatchText(options.filter(Boolean).join('\n')); }}
@@ -1199,16 +1756,13 @@ function OptionsEditor({ options, onChange, placeholder }: { options: string[]; 
               <Input.TextArea rows={8} value={batchText} onChange={(e) => setBatchText(e.target.value)}
                 placeholder={'选项1\n选项2\n选项3'} />
               <div style={{ textAlign: 'right', marginTop: 8 }}>
-                <Space size={6}>
-                  <Button size="small" onClick={() => setBatchOpen(false)}>取消</Button>
-                  <Button size="small" type="primary" onClick={applyBatch}>确定</Button>
-                </Space>
+                <Button size="small" type="primary" onClick={applyBatch}>确定</Button>
               </div>
             </div>
           }
         >
           <Button size="small" type="dashed" icon={<SnippetsOutlined />}>批量粘贴</Button>
-        </Popover>
+        </ClosablePopover>
       </Space.Compact>
     </div>
   );
@@ -1261,7 +1815,7 @@ function OptionRow({ listId, index, value, placeholder, onValueChange, onRemove,
       }}
     >
       <span ref={(n) => { drag(n); }}><HolderOutlined className="fe-drag" /></span>
-      <Input size="small" value={value} placeholder={placeholder}
+      <AutoGrowTextArea size="small" value={value} placeholder={placeholder}
         onChange={(e) => onValueChange(e.target.value)} />
       <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={onRemove} />
     </div>
@@ -1285,10 +1839,13 @@ function CellBindingButton({ binding, linkedRecord, onChange }: {
         open={open}
         value={binding}
         linkedRecord={linkedRecord}
-        // 配【项目模板】映射（已关联原始记录）时，来源只给原始记录的字段/数据（去掉委托单/样品/报告接口/系统等冗余）；
+        // 配【项目模板】映射（已关联原始记录）时，除原始记录外也允许取订单级字段、当前样品和当前分单；
+        // sample/test 均由生成报告时的项目上下文动态解析，不依赖固定样品序号。
         // 首页/封面（linkedRecord=null）只给 自定义 / 委托单字段 / 样品信息 / 报告字段 四类——
         // 样品信息(report_sample)单独成组（取自报告 1.2，非委托单）；去掉样品清单/样品/测试项目/系统等。
-        allowedSources={linkedRecord ? ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header'] : ['literal', 'order', 'report_sample', 'report_meta']}
+        allowedSources={linkedRecord
+          ? ['literal', 'order', 'sample', 'test', 'record_field', 'record_cell', 'record_summary', 'record_header', 'record_meta']
+          : ['literal', 'order', 'report_sample', 'report_meta', 'record_meta']}
         onChange={onChange}
         onClose={() => setOpen(false)}
       />

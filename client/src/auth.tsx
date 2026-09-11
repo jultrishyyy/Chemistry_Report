@@ -63,6 +63,7 @@ axios.interceptors.request.use((config) => {
       if (u.user_name) config.headers.set('X-Demo-User', encodeURIComponent(u.user_name));
       if (u.role) config.headers.set('X-Demo-Role', u.role);                 // 主显示角色（审计标注）
       if (u.roles?.length) config.headers.set('X-Demo-Roles', u.roles.join(',')); // 全部角色（鉴权用权限并集）
+      if (u.permissions?.length) config.headers.set('X-Demo-Permissions', u.permissions.join(','));
       if (u.token) config.headers.set('Authorization', `Bearer ${u.token}`);
     } catch { /* ignore */ }
   }

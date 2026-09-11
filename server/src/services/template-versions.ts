@@ -12,6 +12,7 @@
 import pg from 'pg';
 import { diffFieldDefinitions } from '../../../shared/template-diff.js';
 import type { TemplateFieldMapping } from '../../../shared/types.js';
+import { isRecordFieldTransferable } from '../../../shared/record-field-transfer.js';
 import { rolesHavePermission, type Permission } from '../../../shared/rbac.js';
 
 export { diffFieldDefinitions };
@@ -68,7 +69,7 @@ export async function listAuditLog(pool: pg.Pool, kind: TemplateKind, templateId
 export async function listVersions(pool: pg.Pool, kind: TemplateKind, templateId: number) {
   const { versions } = TABLES[kind];
   const r = await pool.query(
-    `SELECT id, version_no, status, author_name, reviewer_name, review_note,
+    `SELECT id, version_no, status, author_name, submitted_by_name, submitted_by_job_no, submitted_at, reviewer_name, review_note,
             change_summary, diff_from_prev, created_at, updated_at, reviewed_at
      FROM ${versions} WHERE template_id = $1 ORDER BY version_no DESC`,
     [templateId]
@@ -159,12 +160,16 @@ export async function createDraft(
     change_summary?: string; draft_updated_at?: string;
   }
 ) {
-  const { versions } = TABLES[kind];
+  const { base, versions } = TABLES[kind];
+  const archive = await pool.query(`SELECT archive_requested_by FROM ${base} WHERE id = $1`, [templateId]);
+  if (archive.rows[0]?.archive_requested_by) {
+    throw new VersionFlowError('模板正在删除审批中，不可修改内容。请先撤销删除申请。', 409);
+  }
   const open = await getOpenVersion(pool, kind, templateId);
 
   if (open && open.status === 'pending') {
     throw new VersionFlowError(
-      `v${open.version_no} 正在审核中（提交人：${open.author_name}），不可直接修改。请先撤回或等待审核结果。`, 409);
+      `v${open.version_no} 正在审核中（提交人：${open.submitted_by_name || open.author_name}），不可直接修改。请由提交人撤回或等待审核结果。`, 409);
   }
 
   if (open && open.status === 'draft') {
@@ -216,49 +221,54 @@ export async function createDraft(
 }
 
 /** 提交审核：draft → pending */
-export async function submitForReview(pool: pg.Pool, kind: TemplateKind, versionId: number, actorName: string, actorRole?: string, changeSummary?: string) {
-  const { versions } = TABLES[kind];
+export async function submitForReview(
+  pool: pg.Pool, kind: TemplateKind, versionId: number, actorName: string,
+  actorRole?: string, changeSummary?: string, actorJobNo?: string,
+) {
+  const { base, versions } = TABLES[kind];
   const cur = await pool.query(`SELECT * FROM ${versions} WHERE id = $1`, [versionId]);
   if (!cur.rows.length) throw new VersionFlowError('版本不存在', 404);
   const v = cur.rows[0];
-  // 作者本人可提交；审核员（主管）也可代为提交，避免草稿因作者不在线/不存在而卡在 draft 无法进入审核
-  if (v.author_name !== actorName && !isTemplateReviewer(kind, actorRole)) {
-    throw new VersionFlowError('只有该草稿的作者或对应审核角色可以提交审核', 403);
+  const archive = await pool.query(`SELECT archive_requested_by FROM ${base} WHERE id = $1`, [v.template_id]);
+  if (archive.rows[0]?.archive_requested_by) {
+    throw new VersionFlowError('模板正在删除审批中，不可提交审核。请先撤销删除申请。', 409);
   }
+  // 路由层已校验编辑权限。允许同一协作草稿的任一编辑者提交，提交人单独留痕。
   if (v.status !== 'draft' && v.status !== 'rejected') throw new VersionFlowError('当前状态不可提交：' + v.status);
   // rejected 行已冻结为不可变历史：原样重提时复制内容开新版本号行，直接进入 pending
   if (v.status === 'rejected') {
     const max = await pool.query(`SELECT COALESCE(MAX(version_no),0) AS m FROM ${versions} WHERE template_id = $1`, [v.template_id]);
     const ins = await pool.query(
       `INSERT INTO ${versions} (template_id, version_no, field_definitions, layout_options, typst_source,
-                                status, author_name, change_summary)
-       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, 'pending', $6, $7) RETURNING *`,
+                                status, author_name, submitted_by_name, submitted_by_job_no, submitted_at, change_summary)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, 'pending', $6, $7, $8, NOW(), $9) RETURNING *`,
       [v.template_id, max.rows[0].m + 1,
        JSON.stringify(v.field_definitions), JSON.stringify(v.layout_options || {}), v.typst_source,
-       actorName, changeSummary ?? v.change_summary]
+       actorName, actorName, actorJobNo || null, changeSummary ?? v.change_summary]
     );
     return ins.rows[0];
   }
   // 修改说明在「提交审核」时填写：传入则写入本版本（不传则保留草稿期已存的值）
   const upd = await pool.query(
     `UPDATE ${versions} SET status = 'pending', review_note = NULL, reviewer_name = NULL, reviewed_at = NULL,
-            change_summary = COALESCE($2, change_summary), updated_at = NOW()
-     WHERE id = $1 RETURNING *`, [versionId, changeSummary ?? null]
+            submitted_by_name = $2, submitted_by_job_no = $3, submitted_at = NOW(),
+            change_summary = COALESCE($4, change_summary), updated_at = NOW()
+     WHERE id = $1 RETURNING *`, [versionId, actorName, actorJobNo || null, changeSummary ?? null]
   );
   return upd.rows[0];
 }
 
-/** 撤回审核：pending → draft（作者或审核员），撤回后才能继续编辑 */
+/** 撤回审核：pending → draft（仅本次提交人），撤回后才能继续编辑 */
 export async function withdrawVersion(
-  pool: pg.Pool, kind: TemplateKind, versionId: number, actorName: string, actorRole?: string
+  pool: pg.Pool, kind: TemplateKind, versionId: number, actorName: string, actorRole?: string, actorJobNo?: string,
 ) {
   const { versions } = TABLES[kind];
   const cur = await pool.query(`SELECT * FROM ${versions} WHERE id = $1`, [versionId]);
   if (!cur.rows.length) throw new VersionFlowError('版本不存在', 404);
   const v = cur.rows[0];
   if (v.status !== 'pending') throw new VersionFlowError('只有待审核（pending）的版本可以撤回');
-  if (v.author_name !== actorName && !isTemplateReviewer(kind, actorRole)) {
-    throw new VersionFlowError('只有提交人或对应审核角色可以撤回', 403);
+  if (!isSubmitter(v, actorName, actorJobNo)) {
+    throw new VersionFlowError('只有本次提交人可以撤回审核', 403);
   }
   const upd = await pool.query(
     `UPDATE ${versions} SET status = 'draft', updated_at = NOW() WHERE id = $1 RETURNING *`, [versionId]
@@ -270,14 +280,17 @@ export async function withdrawVersion(
 export async function reviewVersion(
   pool: pg.Pool, kind: TemplateKind, versionId: number,
   decision: 'approve' | 'reject', reviewerName: string, note: string | null,
-  reviewerRole?: string
+  reviewerRole?: string, reviewerJobNo?: string, reviewerRoles?: string[],
 ) {
   const { base, versions } = TABLES[kind];
   const cur = await pool.query(`SELECT * FROM ${versions} WHERE id = $1`, [versionId]);
   if (!cur.rows.length) throw new VersionFlowError('版本不存在', 404);
   const v = cur.rows[0];
   if (v.status !== 'pending') throw new VersionFlowError('当前不是待审核状态');
-  // 允许自审：编辑者可审核自己提交的模板版本（取消"编辑者与审核人不能为同一人"限制）
+  // 职责分离：普通审核角色不可审核自己提交的版本；管理员明确例外。
+  if (isSubmitter(v, reviewerName, reviewerJobNo) && !isAdministrator(reviewerRole, reviewerRoles)) {
+    throw new VersionFlowError('提交人不能审核自己提交的版本，请由其他审核人处理', 403);
+  }
   const actor = { name: reviewerName, role: reviewerRole || (kind === 'record' ? 'test_supervisor' : 'report_reviewer') };
 
   if (decision === 'approve') {
@@ -360,7 +373,7 @@ export async function reviewVersion(
  *  ①有未定稿草稿/待审时：
  *     · 目标=当前生效版本 → 内容与生效版一致＝无真实改动 → **直接丢弃草稿**（删除草稿行），回到干净生效态，不留草稿、不送审；
  *     · 目标=历史(superseded)版本 → 内容确实不同 → 把草稿内容重置为该版本（仍是草稿、不送审）。
- *    pending 一律先撤回（放弃该次审核，withdrawVersion 内含"仅提交人/审核员"权限校验）。
+ *    pending 一律先撤回（放弃该次审核；仅本次提交人可执行）。
  *  ②无未定稿 → 克隆该旧版本为新草稿并提交审核（pending），审核通过后生效（历史只追加不破坏）。
  * 存在 rejected 未定稿（冻结历史）时拒绝（先处理）。
  */
@@ -433,9 +446,15 @@ export async function rollbackToVersion(
 }
 
 /** 由一份 field_definitions 构建恒等字段映射（fork 时刻：子 id == 母 id） */
-function buildIdentityMapping(groups: any[] | null | undefined): TemplateFieldMapping {
-  const mapping: TemplateFieldMapping = { groups: {}, fields: {} };
+function buildIdentityMapping(groups: any[] | null | undefined, inheritedGroupIds?: string[]): TemplateFieldMapping {
+  const limited = Array.isArray(inheritedGroupIds);
+  const allowed = new Set(inheritedGroupIds || []);
+  const mapping: TemplateFieldMapping = {
+    groups: {}, fields: {},
+    ...(limited ? { inherited_group_ids: [...allowed] } : {}),
+  };
   for (const g of groups || []) {
+    if (limited && !allowed.has(g.id)) continue;
     if (g.id) mapping.groups[g.id] = g.id;
     for (const f of (g.fields || [])) {
       if (f.id) mapping.fields[f.id] = f.id;
@@ -447,14 +466,31 @@ function buildIdentityMapping(groups: any[] | null | undefined): TemplateFieldMa
 /** Fork：从某模板的某版本派生出新模板（写入母子字段映射 + 审计日志） */
 export async function forkTemplate(
   pool: pg.Pool, kind: TemplateKind, parentTemplateId: number, parentVersionId: number,
-  newName: string, authorName: string, authorRole?: string
+  newName: string, authorName: string, authorRole?: string,
+  options?: {
+    inheritedGroupIds?: string[];
+    afterCreate?: (client: pg.PoolClient, newTemplateId: number, sourceVersion: any) => Promise<void>;
+  },
 ) {
   const { base, versions } = TABLES[kind];
   const pv = await pool.query(`SELECT * FROM ${versions} WHERE id = $1 AND template_id = $2`,
     [parentVersionId, parentTemplateId]);
   if (!pv.rows.length) throw new VersionFlowError('母版本不存在', 404);
   const v = pv.rows[0];
-  const mapping = buildIdentityMapping(v.field_definitions);
+  const mapping = buildIdentityMapping(v.field_definitions, options?.inheritedGroupIds);
+  const inheritedSet = Array.isArray(options?.inheritedGroupIds)
+    ? new Set(options!.inheritedGroupIds)
+    : null;
+  const forkedDefinitions = JSON.parse(JSON.stringify(v.field_definitions || [])).map((group: any) =>
+    inheritedSet?.has(group.id)
+      ? {
+          ...group,
+          family_inherited: true,
+          inheritance_source_template_id: parentTemplateId,
+          inheritance_source_group_id: group.id,
+        }
+      : group,
+  );
   const actor = { name: authorName, role: authorRole };
   const client = await pool.connect();
   try {
@@ -469,12 +505,12 @@ export async function forkTemplate(
       insertParams = [newName, parentTemplateId, parentVersionId, JSON.stringify(mapping)];
     } else {
       // report_templates 还有 template_kind / linked_record_template_id 等元数据需要继承
-      const parent = await client.query(`SELECT template_kind, linked_record_template_id, test_project_codes FROM ${base} WHERE id = $1`, [parentTemplateId]);
+      const parent = await client.query(`SELECT template_kind, linked_record_template_id, test_project_codes, host_manufacturer_id FROM ${base} WHERE id = $1`, [parentTemplateId]);
       const p = parent.rows[0];
-      insertSql = `INSERT INTO ${base} (name, template_kind, linked_record_template_id, test_project_codes,
+      insertSql = `INSERT INTO ${base} (name, template_kind, linked_record_template_id, test_project_codes, host_manufacturer_id,
                                         parent_template_id, parent_version_id, field_mapping)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id`;
-      insertParams = [newName, p.template_kind, p.linked_record_template_id, p.test_project_codes,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id`;
+      insertParams = [newName, p.template_kind, p.linked_record_template_id, p.test_project_codes, p.host_manufacturer_id,
                       parentTemplateId, parentVersionId, JSON.stringify(mapping)];
     }
     const ins = await client.query(insertSql, insertParams);
@@ -486,7 +522,7 @@ export async function forkTemplate(
        VALUES ($1, 1, $2::jsonb, $3::jsonb, $4, 'approved', $5, $5, NOW(), $6) RETURNING id`,
       [
         newTplId,
-        JSON.stringify(v.field_definitions),
+        JSON.stringify(forkedDefinitions),
         JSON.stringify(v.layout_options || {}),
         v.typst_source,
         authorName,
@@ -495,6 +531,7 @@ export async function forkTemplate(
     );
     await client.query(`UPDATE ${base} SET current_version_id = $1 WHERE id = $2`,
       [v1.rows[0].id, newTplId]);
+    await options?.afterCreate?.(client, newTplId, v);
     await logTemplateAudit(client, kind, parentTemplateId, 'fork_out', actor,
       { child_template_id: newTplId, child_name: newName, source_version_no: v.version_no }, parentVersionId);
     await logTemplateAudit(client, kind, newTplId, 'fork_in', actor,
@@ -511,7 +548,7 @@ export async function forkTemplate(
 
 /** Lineage：用递归 CTE 拉整棵祖先 / 后代树 */
 export async function getLineage(pool: pg.Pool, kind: TemplateKind, templateId: number) {
-  const { base } = TABLES[kind];
+  const { base, versions } = TABLES[kind];
   // 祖先（含自己）
   const ancestors = await pool.query(
     `WITH RECURSIVE up AS (
@@ -568,10 +605,17 @@ function genChildId(used: Set<string>, preferred: string): string {
  *   - 子模板自建字段（不在映射键域）永不触碰
  */
 export function computeSyncedFieldDefinitions(
-  parentGroups: any[], childGroups: any[], mapping: TemplateFieldMapping, includeAdded: boolean
+  parentGroups: any[], childGroups: any[], mapping: TemplateFieldMapping, includeAdded: boolean,
+  options: {
+    fieldFilter?: (field: any, group: any) => boolean;
+    syncGroupMetadata?: boolean;
+  } = {},
 ): SyncComputation {
   const fieldMap = mapping?.fields || {};
   const groupMap = mapping?.groups || {};
+  const inheritedGroupIds = Array.isArray(mapping?.inherited_group_ids)
+    ? new Set(mapping.inherited_group_ids)
+    : null;
   // parentFieldId → childFieldId（反查）
   const parentToChild: Record<string, string> = {};
   for (const [childId, parentId] of Object.entries(fieldMap)) parentToChild[parentId] = childId;
@@ -597,15 +641,19 @@ export function computeSyncedFieldDefinitions(
   const stats = { replaced: [] as string[], removed: [] as string[], added: [] as string[] };
   const mappingAdditions: TemplateFieldMapping = { groups: {}, fields: {} };
 
-  // 1) 替换 / 删除映射字段 + 同步映射分区的标题/展示属性（改名也同步）
+  // 1) 替换 / 删除映射字段；调用方可保护专用字段，并关闭分区元数据同步。
   const next = (childGroups || []).map((g: any) => {
     const out: any = {
       ...g,
       fields: (g.fields || []).flatMap((f: any) => {
         const parentId = fieldMap[f.id];
         if (!parentId) return [f];                    // 子模板自建字段：不动
+        // 受保护字段无论来源是否仍存在都保持目标模板原样，避免被误删或覆盖。
+        if (options.fieldFilter && !options.fieldFilter(f, g)) return [f];
         const p = parentFieldById[parentId];
         if (!p) { stats.removed.push(f.label || f.code || f.id); return []; }  // 母版已删
+        const parentGroup = parentGroupById[p.groupId];
+        if (options.fieldFilter && !options.fieldFilter(p.field, parentGroup)) return [f];
         const replaced = { ...p.field, id: f.id };
         if (JSON.stringify(replaced) !== JSON.stringify(f)) stats.replaced.push(replaced.label || replaced.code || f.id);
         return [replaced];
@@ -613,7 +661,7 @@ export function computeSyncedFieldDefinitions(
     };
     // 分区级同步：映射到母版分区时，标题/布局/样式随母版（保留子模板侧 id 与 parent_group_id 归属）
     const pg = groupMap[g.id] ? parentGroupById[groupMap[g.id]] : undefined;
-    if (pg) {
+    if (pg && options.syncGroupMetadata !== false) {
       for (const k of ['label', 'layout', 'hide_title', 'style']) {
         if (JSON.stringify(pg[k]) !== JSON.stringify(g[k])) {
           if (k === 'label') stats.replaced.push(`分区「${pg.label || g.label}」`);
@@ -628,8 +676,11 @@ export function computeSyncedFieldDefinitions(
   if (includeAdded) {
     const mappedParentIds = new Set(Object.values(fieldMap));
     for (const g of parentGroups || []) {
+      // 旧项目组派生数据只继承明确选中的分区；旧版 fork 没有该属性，继续保持全模板同步语义。
+      if (inheritedGroupIds && !inheritedGroupIds.has(g.id)) continue;
       for (const f of (g.fields || [])) {
         if (!f.id || mappedParentIds.has(f.id)) continue;
+        if (options.fieldFilter && !options.fieldFilter(f, g)) continue;
         const newId = genChildId(usedIds, f.id);
         const childField = { ...f, id: newId };
         // 找映射的子分组；没有则按母分组建新分组（id 防撞）
@@ -720,7 +771,10 @@ export async function syncToChildren(
     }
     const childVersion = childCur.rows[0];
     const computed = computeSyncedFieldDefinitions(
-      sourceVersion.field_definitions, childVersion.field_definitions, child.field_mapping, opts.includeAdded
+      sourceVersion.field_definitions, childVersion.field_definitions, child.field_mapping, opts.includeAdded,
+      kind === 'record'
+        ? { fieldFilter: isRecordFieldTransferable, syncGroupMetadata: false }
+        : undefined,
     );
     const changeCount = computed.stats.replaced.length + computed.stats.removed.length + computed.stats.added.length;
 
@@ -753,6 +807,9 @@ export async function syncToChildren(
       ? {
           groups: { ...child.field_mapping.groups, ...computed.mappingAdditions.groups },
           fields: { ...child.field_mapping.fields, ...computed.mappingAdditions.fields },
+          ...(Array.isArray(child.field_mapping.inherited_group_ids)
+            ? { inherited_group_ids: child.field_mapping.inherited_group_ids }
+            : {}),
         }
       : child.field_mapping;
     await pool.query(
@@ -785,12 +842,16 @@ export async function requestArchive(
   pool: pg.Pool, kind: TemplateKind, templateId: number,
   actor: { name: string; role?: string }, note?: string | null
 ) {
-  const { base } = TABLES[kind];
+  const { base, versions } = TABLES[kind];
   const cur = await pool.query(`SELECT id, name, archived_at, archive_requested_by FROM ${base} WHERE id = $1`, [templateId]);
   if (!cur.rows.length) throw new VersionFlowError('模板不存在', 404);
   if (cur.rows[0].archived_at) throw new VersionFlowError('模板已归档', 409);
   if (cur.rows[0].archive_requested_by) {
     throw new VersionFlowError(`已有删除申请（${cur.rows[0].archive_requested_by} 发起），等待审核员审批`, 409);
+  }
+  const pending = await pool.query(`SELECT version_no FROM ${versions} WHERE template_id = $1 AND status = 'pending' LIMIT 1`, [templateId]);
+  if (pending.rows.length) {
+    throw new VersionFlowError(`v${pending.rows[0].version_no} 正在审核中，不可发起删除申请。请先完成审核或撤回审核。`, 409);
   }
   await pool.query(
     `UPDATE ${base} SET archive_requested_by = $1, archive_requested_at = NOW(), archive_request_note = $2 WHERE id = $3`,
@@ -828,7 +889,7 @@ export async function cancelArchiveRequest(
  */
 export async function reviewArchiveRequest(
   pool: pg.Pool, kind: TemplateKind, templateId: number,
-  decision: 'approve' | 'reject', actor: { name: string; role?: string }, note?: string | null
+  decision: 'approve' | 'reject', actor: { name: string; role?: string; roles?: string[] }, note?: string | null
 ) {
   const { base } = TABLES[kind];
   const cur = await pool.query(
@@ -836,8 +897,12 @@ export async function reviewArchiveRequest(
   if (!cur.rows.length) throw new VersionFlowError('模板不存在', 404);
   const row = cur.rows[0];
   if (!row.archive_requested_by) throw new VersionFlowError('没有待审批的删除申请');
-  if (!isTemplateReviewer(kind, actor.role)) throw new VersionFlowError('只有对应审核角色可以审批删除', 403);
-  // 允许自审：申请人可自行批准自己发起的删除申请（取消"申请人与批准人不能为同一人"限制）
+  // 权限由 record/report template 路由按动态 RBAC 的 *.review 权限统一校验；
+  // 这里不再写死内置角色名，否则管理员新增的自定义审核角色会被误拒绝。
+  // 普通审核人不可审核自己发起的删除申请；管理员可处理自己的申请。
+  if (row.archive_requested_by === actor.name && !isAdministrator(actor.role, actor.roles)) {
+    throw new VersionFlowError('申请人不能审核自己发起的删除申请，请由其他审核人处理', 403);
+  }
   if (decision === 'reject') {
     if (!note || !note.trim()) throw new VersionFlowError('驳回必须填写备注');
     await pool.query(
@@ -857,13 +922,26 @@ export function readActor(req: any) {
   try { name = decodeURIComponent(rawName); } catch { /* */ }
   const role = (req.header('X-Demo-Role') || '').trim();                 // 主显示角色（审计标注）
   const roles = (req.header('X-Demo-Roles') || role).split(',').map((s: string) => s.trim()).filter(Boolean); // 全部角色（鉴权）
-  return { name, role, roles };
+  const jobNo = (req.header('X-User-Job') || '').trim();
+  return { name, role, roles, jobNo };
+}
+
+function isSubmitter(version: any, name: string, jobNo?: string): boolean {
+  if (jobNo && version.submitted_by_job_no) return version.submitted_by_job_no === jobNo;
+  return !!name && (version.submitted_by_name || version.author_name) === name;
+}
+
+function isAdministrator(role?: string, roles?: string[]): boolean {
+  return role === 'admin' || (roles || []).includes('admin');
 }
 
 /** 当前请求的角色集合是否拥有某权限（鉴权统一入口，替代写死角色名）。 */
 export function actorHasPermission(req: any, perm: Permission): boolean {
+  const direct = (req.header('X-Demo-Permissions') || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  const normalized = perm === 'report.edit' ? 'report.generate' : perm;
+  if (direct.includes(normalized)) return true;
   const roles = (req.header('X-Demo-Roles') || req.header('X-Demo-Role') || '').split(',').map((s: string) => s.trim()).filter(Boolean);
-  return rolesHavePermission(roles, perm);
+  return rolesHavePermission(roles, normalized as Permission);
 }
 
 /** 该（主显示）角色是否为对应模板类型的审核角色：原始记录模板→测试主管，报告模板→报告审核；admin 通用。 */

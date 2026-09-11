@@ -210,8 +210,8 @@ curl -fsSL https://github.com/typst/typst/releases/download/v0.14.2/typst-x86_64
 tar -xf /tmp/typst.tar.xz -C /tmp
 sudo install /tmp/typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst
 
-# 5. LibreOffice
-sudo apt install -y libreoffice-calc libreoffice-writer
+# 5. 文档处理工具（Ghostscript 用于自动压缩异常偏大的 PDF）
+sudo apt install -y libreoffice-calc libreoffice-writer ghostscript
 
 # 6. 应用本体
 cd demo_v1
@@ -256,6 +256,7 @@ User=<部署用户>
 WorkingDirectory=/path/to/demo_v1
 Environment=PORT=5173
 Environment=HOST=0.0.0.0
+Environment=INTEGRATIONS_PROFILE=server
 Environment=PATH=/usr/bin:/usr/local/bin:/bin
 ExecStart=/usr/bin/pnpm serve
 Restart=on-failure
@@ -271,7 +272,56 @@ sudo systemctl enable --now cdr-demo
 sudo journalctl -u cdr-demo -f       # 看实时日志
 ```
 
-> 不用 systemd 也可临时后台跑：`nohup env PORT=5173 pnpm serve > app.log 2>&1 &`（仅适合临时，重启不自动拉起）。
+> `INTEGRATIONS_PROFILE=server` 必须保留：缺少时应用会安全回退到 `demo/mock`，送审和撤回只会在本地模拟成功，不会调用真实 SOAP 接口。启用前还须按「外部接口统一配置」章节创建并填写 `config/interfaces.server.json`。
+
+### 已部署服务器切换为真实接口模式（推荐覆盖配置）
+
+已有 systemd 服务时，推荐使用 drop-in 覆盖配置，不直接修改原服务文件，避免更新或重新安装服务时丢失：
+
+```bash
+sudo systemctl edit cdr-demo
+```
+
+在编辑器中填写并保存：
+
+```ini
+[Service]
+Environment=INTEGRATIONS_PROFILE=server
+```
+
+然后重新加载并重启：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart cdr-demo
+```
+
+确认运行中的服务确实使用真实接口模式：
+
+```bash
+sudo systemctl show cdr-demo -p Environment
+sudo journalctl -u cdr-demo -n 100 --no-pager | grep -E '\[config\]|报告回传'
+```
+
+输出必须包含 `INTEGRATIONS_PROFILE=server`，启动日志应显示：
+
+```text
+[config] 外部接口配置=server (config/interfaces.server.json)
+[config] 报告取号(1.2)页眉页脚=严格使用 POST /api/external/reports 推送值（不回退示例）
+[config] 业务系统 SOAP(1.4/1.5/1.6)=SOAP(http://172.18.0.97:8003/Lab/Chemistry)
+```
+
+还可以直接检查运行模式：
+
+```bash
+curl -s http://127.0.0.1:5173/api/health
+```
+
+应返回 `"integrations_profile":"server"` 和 `"report_meta_source":"external_interface"`。报告编号和资质属于上游主动推送的入站数据，上游接口地址应配置为 `http(s)://<本系统地址>/api/external/reports`，不需要在 `interfaces.server.json` 中再填写一个远端报告编号地址。
+
+如果仍显示 `demo` 或 `mock(未配 soap_endpoint)`，请检查 `config/interfaces.server.json` 是否存在且 `report_delivery.soap_endpoint` 非空，再重启服务。
+
+> 不用 systemd 也可临时后台跑：`nohup env INTEGRATIONS_PROFILE=server PORT=5173 pnpm serve > app.log 2>&1 &`（仅适合临时，重启不自动拉起）。
 
 ---
 
@@ -355,24 +405,20 @@ sudo systemctl restart cdr-demo     # 重启让 typst 用上本地字体（--ign
 
 ---
 
-## 五、接外部系统（OA 登录 / 报告回传）
+## 五、接外部系统（OA 登录 / SOAP 1.4、1.5、1.6）
 
-默认**不接**外部，走 mock（OA 登录任意账号密码可登；报告回传不真发）——首次部署即可登录验证。接真实环境时再配：
+默认**不接**外部，走 mock（OA 登录任意账号密码可登；SOAP 不真发）——首次部署即可登录验证。接真实环境时统一配置：
 
 ```bash
-cd demo_v1/config
-
-# 外部 OA 登录（接口 5.1）。完整规范见根目录《外部OA登录对接.md》
-cp auth.local.json.example auth.local.json
-#   关键值：common_login_url=http://172.19.0.27/grgtapi/common-api（含前缀！）
-#          app_id=chemistry，pwd_hash=sha1（明文 SHA-1 大写后发）
-
-# 报告回传（接口 1.4，SOAP）。值已据 WSDL 填好
-cp report-delivery.local.json.example report-delivery.local.json
-#   soap_endpoint=http://172.18.0.97:8003/Lab/Chemistry，method=PushReportFile
+cd demo_v1
+cp config/interfaces.server.json.example config/interfaces.server.json
+# 编辑同一文件中的 auth、report_delivery 和 public_base_url；
+# report_delivery 同时配置 1.4 AcceptReportFromDiGui、1.5 CancelFlowFromDiGui、
+# 1.6 UpdateMaterialTaskState。启动时必须设置 INTEGRATIONS_PROFILE=server。
+pnpm migrate
 ```
 
-改完重启服务。启动日志会打印当前模式：`[config] OA 登录=真实(...)` / `报告回传(1.4)=SOAP(...)`，或 `mock(...)`。
+改完重启服务。启动日志会打印当前模式：`[config] OA 登录=真实(...)` / `业务系统 SOAP(1.4/1.5/1.6)=SOAP(...)`，或 `mock(...)`。
 
 **必须确认服务器到外部系统的网络连通**（在服务器上直测）：
 
@@ -477,6 +523,7 @@ journalctl -u cdr-demo -f
 | 现象 | 原因 / 处理 |
 |---|---|
 | 报告 PDF 缺字 / 版面错乱 | `fonts/` 没把字体文件拷过来。补齐后重启。 |
+| 报告 PDF 异常达到几十 MB | 确认已安装 `ghostscript`（`gs --version`）并重启服务；系统会重新生成旧缓存，且只在优化结果确实更小时替换。 |
 | 启动报数据库连接失败 | `config/database.local.json` 的 user/password 与 PG 角色不一致；或 PG 未启动（`sudo systemctl status postgresql`）。 |
 | 访问只有接口、没有页面 | 没跑 `pnpm build`（前端未构建，后端无 `client/dist` 可托管）。 |
 | 外网访问不到 | 防火墙没放行端口（`sudo ufw allow 5173/tcp`），或公司网络策略限制。 |

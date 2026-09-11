@@ -1,4 +1,4 @@
-import type { FieldDefinition, MatrixSummaryRowDef, MatrixSummaryColDef } from '../../../../shared/types';
+import type { FieldDefinition, MatrixSummaryRowDef, MatrixSummaryColDef, SectionRole } from '../../../../shared/types';
 
 /**
  * 工程师可见的「字段类别」（6 类）。
@@ -9,7 +9,27 @@ import type { FieldDefinition, MatrixSummaryRowDef, MatrixSummaryColDef } from '
  *       * 单选 ↔ select
  *       * 选项挂子字段 ↔ variant_list
  */
-export type FieldCategory = 'text' | 'number' | 'date' | 'daterange' | 'choice' | 'image' | 'matrix' | 'free_grid' | 'device' | 'spacer' | 'report_conclusion' | 'report_result' | 'report_equipment' | 'report_images' | 'report_photo_table' | 'report_sample_table';
+export type FieldCategory = 'text' | 'number' | 'date' | 'daterange' | 'choice' | 'image' | 'matrix' | 'free_grid' | 'device' | 'spacer' | 'static_content' | 'record_conclusion' | 'report_conclusion' | 'report_result' | 'report_equipment' | 'report_images' | 'report_photo_table' | 'report_sample_table' | 'report_sample_description_table';
+
+/** free_grid 默认表：行表头＝「试样」+试样编号(1/2/3)，列表头＝参数1/2/3，数据格＝数字录入格。
+ *  列宽：试样列 auto（窄，随内容）、参数列 1fr（等宽）；行高走标准表格内边距——与报告结果表一致。 */
+function buildDefaultFreeTable(): NonNullable<FieldDefinition['free_table']> {
+  const gc = ['c1', 'c2', 'c3', 'c4'], gr = ['r1', 'r2', 'r3', 'r4'];
+  const header_cells: Record<string, true> = {}, input_cells: Record<string, true> = {};
+  const cells: Record<string, string> = {}, cell_types: Record<string, 'text' | 'number' | 'choice'> = {};
+  // 首行＝列表头：试样 | 参数1 | 参数2 | 参数3
+  const colHeaders = ['试样', '参数1', '参数2', '参数3'];
+  gc.forEach((c, ci) => { header_cells[`r1::${c}`] = true; cells[`r1::${c}`] = colHeaders[ci]; });
+  // 首列（试样编号）：固定序号 1/2/3，且整列＝行表头（灰底，和「试样」角、新增行首列一致）；数据格＝数字录入格
+  ['r2', 'r3', 'r4'].forEach((r, i) => {
+    cells[`${r}::c1`] = String(i + 1);
+    header_cells[`${r}::c1`] = true;
+    ['c2', 'c3', 'c4'].forEach(c => { input_cells[`${r}::${c}`] = true; cell_types[`${r}::${c}`] = 'number'; });
+  });
+  const columns = [{ id: 'c1', label: '', width: 'auto' }, { id: 'c2', label: '' }, { id: 'c3', label: '' }, { id: 'c4', label: '' }];
+  // 行高 5pt：与数据矩阵表（不设 cell_inset_y 时用 Typst 默认 5pt）一致，避免默认行高偏大
+  return { columns, rows: gr.map(id => ({ id })), cells, header_cells, input_cells, cell_types, cell_inset_y: '5pt' };
+}
 
 /** 编辑器模式（与 FieldEditor/index.tsx 的 EditorMode 一致；此处独立声明以避免循环依赖）。 */
 export type EditorMode = 'record' | 'report-cover' | 'report-project';
@@ -33,22 +53,43 @@ export const FIELD_CATEGORIES: FieldCategoryEntry[] = [
   { key: 'date',   label: '日期',       icon: '📅', hint: '日期选择' },
   { key: 'daterange', label: '时间范围', icon: '📆', editors: ['report-cover', 'report-project'], hint: '【报告用】渲染「开始 ~ 结束」（如检测周期）。两端各可手填日期，或绑定字段（如委托单 检测开始/结束日期）' },
   { key: 'choice', label: '选择',       icon: '●',  hint: '单选 / 多选 / 可自定义；每个选项还能挂子字段' },
-  { key: 'image',  label: '图片',       icon: '📷', editors: ['record', 'report-cover'], hint: '上传图片（原始记录样品照片 / 首页录入的样品照片）' },
-  { key: 'matrix', label: '数据表格',   icon: '▦',  editors: ['record'], hint: '样品×参数 的试验数据表，可配平均/最大等汇总行' },
-  { key: 'free_grid', label: '自由表格', icon: '⊞',  editors: ['record', 'report-project'], hint: '像 Excel 一样的自由网格：自定义行列、任意合并单元格（含表头）。记录用：标「录入格」录入时填值；报告用：每格可「绑定原始记录」自动取值' },
+  { key: 'image',  label: '图片',       icon: '📷', editors: ['record', 'report-cover', 'report-project'], hint: '记录中用于录入图片；报告首页用于直接上传；项目报告中用于绑定原始记录图片分区' },
+  { key: 'matrix', label: '旧版·数据表格', icon: '▦', editors: [], hint: '存量兼容类型；新模板统一使用自由表格' },
+  { key: 'free_grid', label: '自由表格', icon: '⊞',  editors: ['record', 'report-project'], hint: '自定义行列和合并格；原始记录中设置录入格，项目报告中逐格绑定原始记录数据' },
   { key: 'device', label: '测试设备',   icon: '🔧', editors: ['record'], hint: '从设备库按管理编号查询；生成报告时自动展开为设备表' },
   { key: 'spacer', label: '间隔（空白）', icon: '↕',  hint: '纯版式的空白块，在字段/分区之间留白（封面排版常用）；可调高度，不产生数据' },
+  { key: 'static_content', label: '说明 / 资料', icon: 'ⓘ', editors: ['record'], hint: '模板固定说明文字、图片或附件；录入时原位只读展示，不写入检测数据' },
+  { key: 'record_conclusion', label: '旧版·项目结论', icon: '✅', editors: [], hint: '存量兼容类型；新模板请使用“结论”分区中的独立字段' },
   { key: 'report_conclusion', label: '报告·结论汇总表', icon: '📋', editors: ['report-cover'],   hint: '【报告首页用】检测结论汇总表，行 = 项目，自动展开' },
   { key: 'report_result',     label: '报告·检测结果表', icon: '🧪', editors: ['report-project'], hint: '【项目报告用】画布式表格，每格绑定到原始记录的字段/矩阵单元/汇总' },
   { key: 'report_equipment',  label: '报告·设备表',     icon: '⚙️', editors: ['report-project'], hint: '【项目报告用】自动汇集原始记录中的设备引用 + 查设备库' },
-  { key: 'report_images',     label: '报告·图片表',     icon: '🖼️', editors: ['report-project'], hint: '【项目报告用】抓原始记录 image 字段，按"检测前/中/后"布局' },
+  // 旧 report_image_gallery 仅为存量模板兼容；新项目统一使用 section_role='images' + image 字段，
+  // 因此不再出现在新增字段菜单中（历史字段打开时仍可识别和迁移）。
+  { key: 'report_images',     label: '旧版·报告图片表', icon: '🖼️', editors: [], hint: '存量兼容类型；新模板请使用“图片记录”分区中的图片字段' },
   { key: 'report_photo_table', label: '报告·原样照片表', icon: '🏷️', editors: ['report-cover'], hint: '【报告首页用】文员直接上传的原样照片表：加粗标签+说明行 + 带表头图片表（如"样品描述：见原始样品照片。" + "原始样品"）' },
+  { key: 'report_sample_description_table', label: '报告·样品描述表', icon: '▤', editors: ['report-cover'], hint: '【报告首页用】两列显示“唯一性编号 / 样品描述”，默认描述为“见原始样品照片”，生成报告后可自由修改；建议放在原样照片前。' },
   { key: 'report_sample_table', label: '报告·样品信息表', icon: '🧾', editors: ['report-cover'], hint: '【报告首页用】自动从委托单样品列出 样品编号/样品名称/零件号，放在检测结论表之前。系统按实际样品数自动切换：多样品出表、单样品自动折叠（由首页「样品名称/零件号」字段直接显示）。一套模板通吃单/多样品' },
 ];
 
 /** 当前编辑器可插入的字段类别（按 editors 白名单过滤；缺省的类别三处都可见）。 */
 export function categoriesForEditor(editorMode: EditorMode): FieldCategoryEntry[] {
   return FIELD_CATEGORIES.filter(c => !c.editors || c.editors.includes(editorMode));
+}
+
+/**
+ * 分区内可新增的字段：
+ * - 图片字段只能放在图片分区，确保整组版式、动态集合和报告拉取逻辑始终生效；
+ * - 图片分区仍允许文字说明和空白间隔；
+ * - 非图片分区不再出现“图片”，避免产生无法按整组渲染的孤立图位。
+ */
+export function categoriesForGroup(editorMode: EditorMode, sectionRole?: SectionRole): FieldCategoryEntry[] {
+  const categories = categoriesForEditor(editorMode);
+  if (sectionRole === 'images') {
+    // 报告首页的样品描述表需要与原样照片放在同一分区，并允许拖到照片前；
+    // 原始记录/项目模板中该类别本身不在白名单，因此不会误出现在其它编辑器。
+    return categories.filter(category => ['image', 'text', 'spacer', 'report_sample_description_table'].includes(category.key));
+  }
+  return categories.filter(category => category.key !== 'image');
 }
 
 /**
@@ -106,6 +147,10 @@ export function categoryOfField(f: FieldDefinition): FieldCategory {
       return 'device';
     case 'spacer':
       return 'spacer';
+    case 'static_content':
+      return 'static_content';
+    case 'record_conclusion':
+      return 'record_conclusion';
     case 'report_conclusion_table':
       return 'report_conclusion';
     case 'report_result_table':
@@ -118,6 +163,8 @@ export function categoryOfField(f: FieldDefinition): FieldCategory {
       return 'report_photo_table';
     case 'report_sample_table':
       return 'report_sample_table';
+    case 'report_sample_description_table':
+      return 'report_sample_description_table';
     default:
       return 'text';
   }
@@ -169,13 +216,39 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
     case 'daterange':
       return { ...base, type: 'daterange', label: '检测周期', date_range: { separator: ' ~ ' } };
     case 'choice':
-      return { ...base, type: 'select', options: ['选项1', '选项2'], allow_custom: false };
+      return { ...base, type: 'select', options: ['选项1', '选项2'], allow_custom: true };
     case 'image':
       return { ...base, type: 'image' };
     case 'device':
-      return { ...base, type: 'device_ref', label: '测试设备', description: '从设备库按管理编号 / 仪器名称搜索' };
+      return { ...base, type: 'device_ref', label: '测试设备', description: '从设备库按管理编号 / 仪器名称搜索',
+        device_ref_config: { preset_asset_codes: [], selection_mode: 'multiple', allow_library_search: true } };
     case 'spacer':
       return { ...base, type: 'spacer', label: '间隔', hide_label: true, spacer_height: '1cm' };
+    case 'static_content':
+      return { ...base, type: 'static_content', label: '说明 / 资料', hide_label: true, static_kind: 'text', static_text: '请在此填写操作说明。', static_display: 'both' };
+    case 'record_conclusion':
+      return {
+        ...base,
+        code: `report_conclusion_${idSeed.replace(/^\D+/, '') || Date.now()}`,
+        type: 'record_conclusion',
+        label: '报告结论',
+        required: true,
+        record_conclusion: {
+          mode: 'overall',
+          project_name: '检测项目',
+          allow_project_name_override: true,
+          items: [{
+            id: `conclusion_${idSeed}`,
+            code: 'overall',
+            name_mode: 'inherit_project',
+            judgment_options: ['客户要求', '标准要求'],
+            conclusion_options: ['符合', '不符合'],
+            judgment_required: true,
+            conclusion_required: true,
+            default_report_enabled: true,
+          }],
+        },
+      };
     case 'report_conclusion':
       // hide_label:false → 默认显示标题＝字段 label（居左、跟随模板字体，走标准 figure/wrapFigure）。
       return { ...base, type: 'report_conclusion_table', label: '检测结论', hide_label: false,
@@ -209,14 +282,14 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
     case 'report_sample_table':
       return { ...base, type: 'report_sample_table', label: '样品信息表', hide_label: true,
         sample_table: { columns: ['index', 'name', 'model'] } };
-    case 'free_grid': {
-      // 默认：首行 + 首列＝表头，其余＝数字录入格（number 为录入格默认类型，无需显式存）
-      const gc = ['c1', 'c2', 'c3', 'c4'], gr = ['r1', 'r2', 'r3', 'r4'];
-      const header_cells: Record<string, true> = {}, input_cells: Record<string, true> = {};
-      gr.forEach((r, ri) => gc.forEach((c, ci) => { if (ri === 0 || ci === 0) header_cells[`${r}::${c}`] = true; else input_cells[`${r}::${c}`] = true; }));
-      return { ...base, type: 'free_grid', label: '自由表格',
-        free_table: { columns: gc.map(id => ({ id, label: '' })), rows: gr.map(id => ({ id })), cells: {}, header_cells, input_cells } };
-    }
+    case 'report_sample_description_table':
+      return { ...base, type: 'report_sample_description_table', label: '样品描述：', hide_label: false,
+        sample_description_table: {
+          unique_label: '唯一性编号', description_label: '样品描述',
+          default_description: '见原始样品照片', unique_width: '1fr', description_width: '3.5fr',
+        } };
+    case 'free_grid':
+      return { ...base, type: 'free_grid', label: '原始记录表格', free_table: buildDefaultFreeTable() };
     case 'matrix':
       return {
         ...base,
@@ -237,7 +310,8 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
 /**
  * 切换字段类别时生成完整字段对象（去除与新类别无关的属性，避免脏数据）。
  *
- * 对「选择」类别特殊处理：保留 options / allow_custom / variants；
+ * 对「选择」类别特殊处理：仅在原字段本身也是选择类别时保留选项配置；
+ * 从文字/数字等其它类别切回选择时必须使用全新配置，不能让旧选项“复活”。
  * 并接受 subOption 参数进一步细化为 select / checkbox / variant_list 其中一种。
  */
 export function rebuildFieldForCategory(
@@ -267,6 +341,7 @@ function rebuildFieldForCategoryInner(
     description: field.description,
     default_value: field.default_value,
     semantic_role: field.semantic_role,
+    conclusion_role: field.conclusion_role,
   };
 
   switch (cat) {
@@ -275,11 +350,13 @@ function rebuildFieldForCategoryInner(
     case 'number':
       return { ...common, type: 'number', unit: field.unit };
     case 'date':
-      return { ...common, type: 'date' };
+      return { ...common, type: 'date', date_precision: field.date_precision, date_separator: field.date_separator };
     case 'choice': {
-      const prevOpts = field.options?.length ? [...field.options] : ['选项1'];
-      const prevVariants = field.type === 'variant_list' && field.variants?.length ? field.variants : [];
-      const allow_custom = field.allow_custom ?? false;
+      const wasChoice = categoryOfField(field) === 'choice';
+      const prevOpts = wasChoice && field.options?.length ? [...field.options] : ['选项1'];
+      const prevVariants = wasChoice && field.type === 'variant_list' && field.variants?.length ? field.variants : [];
+      // 选择字段统一默认允许“其他（自定义）”；只有用户明确关闭并保存 false 时才禁用。
+      const allow_custom = wasChoice ? (field.allow_custom ?? true) : true;
       if (subOption === 'multi') {
         return { ...common, type: 'checkbox', options: prevOpts, allow_custom };
       }
@@ -295,11 +372,35 @@ function rebuildFieldForCategoryInner(
     case 'image':
       return { ...common, type: 'image' };
     case 'daterange':
-      return { ...common, type: 'daterange', date_range: field.date_range || { separator: ' ~ ' } };
+      return { ...common, type: 'daterange', date_precision: field.date_precision, date_separator: field.date_separator, date_range: field.date_range || { separator: ' ~ ' } };
     case 'device':
-      return { ...common, type: 'device_ref' };
+      return { ...common, type: 'device_ref',
+        device_ref_config: field.type === 'device_ref'
+          ? (field.device_ref_config || { preset_asset_codes: [], selection_mode: 'multiple', allow_library_search: true })
+          : { preset_asset_codes: [], selection_mode: 'multiple', allow_library_search: true } };
     case 'spacer':
       return { ...common, type: 'spacer', hide_label: true, spacer_height: field.spacer_height || '1cm' };
+    case 'static_content':
+      return {
+        ...common, type: 'static_content', hide_label: true,
+        static_kind: (field.static_kind as any) === 'attachments' ? 'table' : (field.static_kind || (field.static_content?.some(block => block.kind === 'image') ? 'images' : field.static_content?.some(block => (block as any).kind === 'attachment') ? 'table' : 'text')),
+        static_text: field.static_text ?? field.static_content?.filter(block => block.kind === 'text').map(block => block.text || '').join('\n'),
+        static_images: field.static_images || field.static_content?.filter(block => block.kind === 'image').map(({ id, name, url, rel_path, mime_type, size_bytes }) => ({ id, name, url, rel_path, mime_type, size_bytes })),
+        static_table: field.static_table,
+        static_display: field.static_display || 'both',
+      };
+    case 'record_conclusion':
+      return {
+        ...common,
+        type: 'record_conclusion',
+        label: label === '新字段' ? '报告结论' : label,
+        required: field.required ?? true,
+        record_conclusion: field.record_conclusion || {
+          mode: 'overall', project_name: '检测项目', allow_project_name_override: true,
+          items: [{ id: `conclusion_${Date.now()}`, code: 'overall', name_mode: 'inherit_project',
+            judgment_options: ['客户要求', '标准要求'], conclusion_options: ['符合', '不符合'], judgment_required: true, conclusion_required: true, default_report_enabled: true }],
+        },
+      };
     case 'report_conclusion':
       return { ...common, type: 'report_conclusion_table',
         conclusion_table: field.conclusion_table || { columns: ['index', 'project', 'result'] } };
@@ -332,6 +433,12 @@ function rebuildFieldForCategoryInner(
     case 'report_sample_table':
       return { ...common, type: 'report_sample_table', hide_label: true,
         sample_table: field.sample_table || { columns: ['index', 'name', 'model'] } };
+    case 'report_sample_description_table':
+      return { ...common, type: 'report_sample_description_table',
+        sample_description_table: field.sample_description_table || {
+          unique_label: '唯一性编号', description_label: '样品描述', default_description: '见原始样品照片',
+          unique_width: '1fr', description_width: '3.5fr',
+        } };
     case 'matrix': {
       const nextCode = field.type === 'data_matrix' && field.matrix
         ? code
@@ -357,12 +464,8 @@ function rebuildFieldForCategoryInner(
       };
     }
     case 'free_grid': {
-      if (field.free_table) return { ...common, type: 'free_grid', label: label === '新字段' ? '自由表格' : label, free_table: field.free_table };
-      const gc = ['c1', 'c2', 'c3', 'c4'], gr = ['r1', 'r2', 'r3', 'r4'];
-      const header_cells: Record<string, true> = {}, input_cells: Record<string, true> = {};
-      gr.forEach((r, ri) => gc.forEach((c, ci) => { if (ri === 0 || ci === 0) header_cells[`${r}::${c}`] = true; else input_cells[`${r}::${c}`] = true; }));
-      return { ...common, type: 'free_grid', label: label === '新字段' ? '自由表格' : label,
-        free_table: { columns: gc.map(id => ({ id, label: '' })), rows: gr.map(id => ({ id })), cells: {}, header_cells, input_cells } };
+      if (field.free_table) return { ...common, type: 'free_grid', label: label === '新字段' ? '原始记录表格' : label, free_table: field.free_table };
+      return { ...common, type: 'free_grid', label: label === '新字段' ? '原始记录表格' : label, free_table: buildDefaultFreeTable() };
     }
   }
 }

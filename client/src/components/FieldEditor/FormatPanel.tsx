@@ -31,12 +31,21 @@ interface Props {
   inheritedFieldGap?: string;
   /** 隐藏分区级「字段间距」(block_spacing) 行：报告编辑器改为【文档样式默认 + 每字段单独设】，分区不再有字段间距（保留定位/距底）。 */
   hideFieldGap?: boolean;
+  /** 当前【继承生效】的字体（typst family，如 'Songti SC'）。未设本级字体时，下拉【直接显示这个实际字体】
+   *  （所见即所得），而非"跟随默认/继承"。未传＝回退显示「默认字体」。 */
+  inheritedFont?: string;
+  /** 当前【继承生效】的字号（pt 数值，如 10）。未设本级字号时，字号框【直接显示这个实际字号】。未传＝显示占位。 */
+  inheritedSize?: number;
+  /** 当前【继承生效】的粗细（true=加粗）。未设本级 weight 时，加粗控件【直接显示 加粗/正常】而非"跟随"。缺省 false=正常。 */
+  inheritedBold?: boolean;
+  /** 对齐控件去掉「默认（继承）」项：未设时直接显示实际生效值「左」（渲染默认靠左），只留 左/中/右。报告字段格式用。 */
+  alignNoInherit?: boolean;
 }
 
 // 仅列出 demo_v1/fonts/ 里已打包的字体（系统只用这个目录渲染，跨服务器一致）。
 // 加字体：把 .ttf 放进 fonts/ 并在此加一行（value=typst family 名）。详见 fonts/README.md。
-const FONTS = [
-  { value: '', label: '继承' },
+export const REPORT_FONTS = [
+  { value: '', label: '默认字体' },
   { value: 'Songti SC', label: '宋体' },
   { value: 'SimHei', label: '黑体' },
   { value: 'KaiTi', label: '楷体' },
@@ -47,8 +56,11 @@ const FONTS = [
   { value: 'Times New Roman', label: 'Times New Roman' },
 ];
 
-export default function FormatPanel({ value, onChange, block, variant = 'full', inheritedFieldGap, hideFieldGap }: Props) {
+export default function FormatPanel({ value, onChange, block, variant = 'full', inheritedFieldGap, hideFieldGap, inheritedFont, inheritedSize, inheritedBold, alignNoInherit }: Props) {
   const s = value || {};
+  // 字体/字号未设本级时，直接显示【继承生效的实际值】（所见即所得），而非"跟随默认/继承"占位。
+  const fontOptions = REPORT_FONTS.map(f => f.value === '' ? { value: '', label: '默认字体' } : f);
+  const shownFont = s.font ?? inheritedFont ?? '';
   // 「恢复继承」：只清本级某一个属性，回到上层默认（区别于底部「清除本级样式」的全清）。
   const resetBtn = (key: keyof StyleOverride) => (
     <Tooltip title="恢复继承（清除本级此项，回到上层默认）">
@@ -76,15 +88,15 @@ export default function FormatPanel({ value, onChange, block, variant = 'full', 
       {showFont && (
         <Space size={6} wrap>
           <span style={{ fontSize: 12, color: '#888', width: 32 }}>字体</span>
-          <Select size="small" style={{ width: 180 }} value={s.font ?? ''}
-            onChange={(v) => set({ font: v || undefined })} options={FONTS} />
+          <Select size="small" style={{ width: 180 }} value={shownFont}
+            onChange={(v) => set({ font: v || undefined })} options={fontOptions} />
         </Space>
       )}
       {showText && (
         <Space size={6} wrap>
           <span style={{ fontSize: 12, color: '#888', width: 32 }}>字号</span>
           <InputNumber size="small" style={{ width: 90 }} min={6} max={48} step={0.5}
-            value={numFromLen(s.size)} addonAfter="pt" placeholder="继承"
+            value={numFromLen(s.size) ?? inheritedSize} addonAfter="pt" placeholder="默认"
             onChange={(v) => set({ size: v ? `${v}pt` : undefined })} />
         </Space>
       )}
@@ -94,7 +106,7 @@ export default function FormatPanel({ value, onChange, block, variant = 'full', 
             <span style={{ fontSize: 12, color: '#888', width: 32 }}>行间距</span>
           </Tooltip>
           <InputNumber size="small" style={{ width: 84 }} min={0.4} max={3} step={0.05}
-            value={numFromLen(s.line_height)} addonAfter="em" placeholder="继承"
+            value={numFromLen(s.line_height)} addonAfter="em" placeholder="默认"
             onChange={(v) => set({ line_height: v ? `${v}em` : undefined })} />
           {s.line_height != null && resetBtn('line_height')}
         </Space>
@@ -111,14 +123,13 @@ export default function FormatPanel({ value, onChange, block, variant = 'full', 
       )}
       {showText && (
         <Space size={6} wrap>
-          <Tooltip title="跟随=继承上层（上层若加粗则仍加粗）；正常=强制不加粗（取消上层的加粗）；加粗=强制加粗">
+          <Tooltip title="该文字是否加粗——直接显示当前生效状态；点选即覆盖本级设置。">
             <span style={{ fontSize: 12, color: '#888', width: 32 }}>加粗</span>
           </Tooltip>
           <Radio.Group size="small" optionType="button"
-            value={s.weight ?? 'inherit'}
-            onChange={(e) => set({ weight: e.target.value === 'inherit' ? undefined : e.target.value })}
+            value={s.weight ?? (inheritedBold ? 'bold' : 'regular')}
+            onChange={(e) => set({ weight: e.target.value })}
             options={[
-              { value: 'inherit', label: '跟随' },
               { value: 'bold', label: '加粗' },
               { value: 'regular', label: '正常' },
             ]} />
@@ -139,12 +150,12 @@ export default function FormatPanel({ value, onChange, block, variant = 'full', 
         <Space size={6} wrap>
           <span style={{ fontSize: 12, color: '#888', width: 32 }}>对齐</span>
           <Radio.Group size="small" optionType="button" buttonStyle="solid"
-            value={s.align ?? 'inherit'}
+            value={alignNoInherit ? (s.align ?? 'left') : (s.align ?? 'inherit')}
             onChange={(e) => set({ align: e.target.value === 'inherit' ? undefined : e.target.value })}
-            options={[
-              { value: 'inherit', label: '继承' }, { value: 'left', label: '左' },
-              { value: 'center', label: '中' }, { value: 'right', label: '右' },
-            ]} />
+            options={alignNoInherit
+              ? [{ value: 'left', label: '左' }, { value: 'center', label: '中' }, { value: 'right', label: '右' }]
+              : [{ value: 'inherit', label: '默认' }, { value: 'left', label: '左' },
+                 { value: 'center', label: '中' }, { value: 'right', label: '右' }]} />
         </Space>
       )}
       {showSpacing && (
@@ -184,7 +195,7 @@ export default function FormatPanel({ value, onChange, block, variant = 'full', 
               </Tooltip>
               <InputNumber size="small" style={{ width: 96 }} min={0} max={120} step={2}
                 value={numFromLen(s.block_spacing)} addonAfter="pt"
-                placeholder={inheritedFieldGap ? `继承 ${inheritedFieldGap}` : '继承'}
+                placeholder={inheritedFieldGap ? `默认 ${inheritedFieldGap}` : '默认'}
                 onChange={(v) => set({ block_spacing: v != null ? `${v}pt` : undefined })} />
               {s.block_spacing != null && resetBtn('block_spacing')}
             </Space>

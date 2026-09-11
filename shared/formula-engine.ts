@@ -14,14 +14,18 @@ export type FormulaType =
   | 'nd_sum'
   | 'multi_conclusion'
   | 'round_format'
+  | 'visual'
   | 'custom';
 
 export interface Formula {
+  sample_scope?: 'all' | 'selected';
+  /** 矩阵迁移专用：保留旧公式逐步计算时的 decimals 语义。 */
+  preserve_legacy_precision?: true;
   type: FormulaType;
   sources?: string[];
   params?: Record<string, any>;
   decimals?: number;
-  /** custom 类型：算术表达式（支持 + - * / ( ) 数字 变量），变量名 = sources 数组下标对应的 v1, v2, v3... */
+  /** custom 类型：安全数学表达式（支持四则、幂、百分号及白名单函数），变量名 = sources 数组下标对应的 v1, v2, v3... */
   expression?: string;
 }
 
@@ -30,16 +34,14 @@ export const FORMULA_TYPES: { type: FormulaType; label: string; description: str
   { type: 'sum', label: '总和', description: '多个字段求和' },
   { type: 'max', label: '最大值', description: '多个字段取最大' },
   { type: 'min', label: '最小值', description: '多个字段取最小' },
-  { type: 'threshold', label: '阈值判定', description: '字段值与阈值比较，输出合格/不合格' },
-  { type: 'range', label: '范围判定', description: '字段值是否在上下限范围内' },
   { type: 'unit_convert', label: '单位换算', description: '字段值乘以系数' },
   { type: 'percentage', label: '百分比', description: '分子/分母 × 100' },
   { type: 'text_concat', label: '文本拼接', description: '多个字段用分隔符拼接' },
   { type: 'zh_en_map', label: '中英文映射', description: '根据映射表转换值' },
   { type: 'nd_sum', label: 'N.D. 视为 0 求和', description: 'N.D. 视为 0 后求和' },
-  { type: 'multi_conclusion', label: '多结论判定', description: '任一不合格则整体不合格' },
   { type: 'round_format', label: '取整/格式化', description: '保留小数位 + 千分位' },
-  { type: 'custom', label: '自定义表达式', description: '用 v1/v2/v3... 等变量写算术表达式（支持 + - * / 括号）' },
+  { type: 'visual', label: '可视化计算', description: '无需代码搭建四则运算' },
+  { type: 'custom', label: '自定义公式', description: '用点选格子插入变量，按 Excel 风格编写安全数学公式' },
 ];
 
 function getNumericValues(sources: string[], data: Record<string, any>): number[] {
@@ -156,12 +158,70 @@ export function execute(formula: Formula, data: Record<string, any>): any {
       }
       return Number(rounded);
     }
+    case 'visual': {
+      const mode = params.visual_mode || 'calculation';
+      if (mode === 'condition') {
+        const conditions = Array.isArray(params.conditions) ? params.conditions : [];
+        if (!sources.length || conditions.length < sources.length) return null;
+        const compare = (raw: any, condition: any): boolean => {
+          const left = Number(raw);
+          const right = Number(condition?.value);
+          if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+          switch (condition?.operator || '>=') {
+            case '>=': return left >= right;
+            case '>': return left > right;
+            case '<=': return left <= right;
+            case '<': return left < right;
+            case '==': return left === right;
+            case '!=': return left !== right;
+            default: return false;
+          }
+        };
+        const results = sources.map((source, index) => compare(data[source], conditions[index]));
+        const passed = params.logic === 'any' ? results.some(Boolean) : results.every(Boolean);
+        return passed ? (params.pass ?? '合格') : (params.fail ?? '不合格');
+      }
+
+      const values = sources.map(source => Number(data[source]));
+      if (!values.length || values.some(value => !Number.isFinite(value))) return null;
+      const operators: string[] = Array.isArray(params.operators) ? params.operators : [];
+      let result = values[0];
+      for (let index = 1; index < values.length; index++) {
+        const value = values[index];
+        switch (operators[index - 1] || '+') {
+          case '+': result += value; break;
+          case '-': result -= value; break;
+          case '*': result *= value; break;
+          case '/':
+            if (value === 0) return null;
+            result /= value;
+            break;
+          default: return null;
+        }
+      }
+      const factor = Number(params.factor ?? 1);
+      const offset = Number(params.offset ?? 0);
+      if (!Number.isFinite(factor) || !Number.isFinite(offset)) return null;
+      result = result * factor + offset;
+      return decimals !== undefined ? Number(result.toFixed(decimals)) : result;
+    }
     case 'custom': {
       const expr = (formula.expression || '').trim();
       if (!expr) return null;
       // sources 数组下标 -> v1, v2, v3 变量
       const vars: Record<string, any> = {};
       sources.forEach((srcCode, i) => {
+        vars[`v${i + 1}`] = data[srcCode];
+      });
+      // 自由表格可把点选格子显示为 A1、B2 等易读变量名；实际依赖仍以稳定
+      // 单元格 id 保存，行列调整后不会丢失公式关系。
+      const aliases = params.source_aliases && typeof params.source_aliases === 'object'
+        ? params.source_aliases as Record<string, string>
+        : {};
+      sources.forEach((srcCode, i) => {
+        const alias = aliases[srcCode];
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias || '')) vars[alias] = data[srcCode];
+        // v1/v2… 永远可用，作为地址变化后的稳定兜底。
         vars[`v${i + 1}`] = data[srcCode];
       });
       const r = evalArithmetic(expr, vars);
@@ -171,6 +231,16 @@ export function execute(formula: Formula, data: Record<string, any>): any {
     default:
       return null;
   }
+}
+
+/**
+ * 公式链内部计算专用：显示精度不能参与后续计算。
+ *
+ * 历史 Formula.decimals 同时承担过“结果显示位数”，因此嵌套公式会把上游约数继续计算。
+ * round_format 的 decimals 是公式本身的显式取整语义，必须保留；其它类型均在链内移除。
+ */
+export function executeWithFullPrecision(formula: Formula, data: Record<string, any>): any {
+  return execute(formula.type === 'round_format' || formula.preserve_legacy_precision ? formula : { ...formula, decimals: undefined }, data);
 }
 
 export function extractDeps(formula: Formula): string[] {

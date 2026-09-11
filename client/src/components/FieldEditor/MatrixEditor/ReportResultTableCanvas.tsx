@@ -7,11 +7,12 @@
  *  - 数据源画布：tabs（关联原始记录的每个矩阵 / 其他字段 / 自定义等）→ 点击源即绑定
  */
 import { useState } from 'react';
-import { Button, Tag, Tooltip, Input, InputNumber, Segmented, Switch, Radio, Popover } from 'antd';
+import { Button, Tag, Tooltip, Input, InputNumber, Segmented, Switch, Radio } from 'antd';
 import { PlusOutlined, ArrowUpOutlined, ArrowDownOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { FieldDefinition, RecordTemplate, CellBinding } from '../../../../../shared/types';
 import BindingPickerModal, { BindingSummary } from '../../ReportEditor/BindingPickerModal';
 import HeaderConfigCard from './HeaderConfigCard';
+import ClosablePopover from '../../ClosablePopover';
 
 interface Props {
   field: FieldDefinition;
@@ -20,9 +21,9 @@ interface Props {
 }
 
 // P-Map-11：项目检测结果表只暴露【原始记录】来源（统一 BindingPicker），其余（委托单/样品/测试/报告接口/系统）属首页。
-const RESULT_TABLE_SOURCES = ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header'];
+const RESULT_TABLE_SOURCES = ['literal', 'order', 'sample', 'test', 'record_field', 'record_cell', 'record_summary', 'record_header'];
 // 表头（标题/备注）绑定只用原始记录里"按 code 取的"来源——字段 / 表头单位；不含具体某格/某汇总值（那是数据格的事）。
-const HEADER_SOURCES = ['literal', 'record_field', 'record_header'];
+const HEADER_SOURCES = ['literal', 'order', 'sample', 'test', 'record_field', 'record_header'];
 // P-Map-13c：统计行/列(逐行/列绑定)＝紫(与原始记录"其他/统计"统一)；汇总行/列(跨)＝橙。区分两类。
 const C_STATS = '#f9f0ff';
 
@@ -482,6 +483,16 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
   const headerSources = headerIsBandCol ? [...HEADER_SOURCES, 'record_sample_index', 'record_sample_label'] : HEADER_SOURCES;
   const modalBandMatrix = (targetInBand || headerIsBandCol) ? band?.matrix_code : undefined;
 
+  const tableColumns = [...(cfg.columns || []), ...(cfg.summary_cols || [])];
+  const tableColumnWidths = tableColumns.map(column => column.width || '');
+  const sharedTableColumnWidth = tableColumnWidths.length
+    && tableColumnWidths.every(width => width === tableColumnWidths[0]) && /fr$/.test(tableColumnWidths[0])
+    ? parseFloat(tableColumnWidths[0]) : undefined;
+  const tableRowHeights = (cfg.rows || []).map(row => row.height || '');
+  const sharedTableRowHeight = tableRowHeights.length
+    && tableRowHeights.every(height => height === tableRowHeights[0]) && /pt$/.test(tableRowHeights[0])
+    ? parseFloat(tableRowHeights[0]) : undefined;
+
   return (
     <div>
       {/* ─── 表格版式（跨页/行距/对齐/空值，与数据表格同口径）─── */}
@@ -506,6 +517,23 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
             <InputNumber size="small" style={{ width: 70 }} min={0} max={40} step={1} placeholder="默认"
               value={cfg.cell_inset_y ? parseFloat(cfg.cell_inset_y) : undefined}
               onChange={(v) => update({ cell_inset_y: v == null ? undefined : `${v}pt` })} /> pt
+          </span>
+        </Tooltip>
+        <Tooltip title="一次设置全部数据列和汇总列；后续仍可在单列配置卡中覆盖。清空则全部恢复自动。">
+          <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>整表列宽：
+            <InputNumber size="small" style={{ width: 82 }} min={0.3} max={12} step={0.1}
+              placeholder={new Set(tableColumnWidths).size > 1 ? '不一致' : '自动'} value={sharedTableColumnWidth}
+              onChange={(value) => update({
+                columns: cfg.columns.map(column => ({ ...column, width: value == null ? undefined : `${value}fr` })),
+                summary_cols: (cfg.summary_cols || []).map(column => ({ ...column, width: value == null ? undefined : `${value}fr` })),
+              })} /> fr
+          </span>
+        </Tooltip>
+        <Tooltip title="一次设置全部数据行的最小行高；后续仍可在单行配置卡中覆盖。清空则恢复自适应。">
+          <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>整表行高：
+            <InputNumber size="small" style={{ width: 82 }} min={8} max={240} step={2}
+              placeholder={new Set(tableRowHeights).size > 1 ? '不一致' : '自适应'} value={sharedTableRowHeight}
+              onChange={(value) => update({ rows: cfg.rows.map(row => ({ ...row, height: value == null ? undefined : `${value}pt` })) })} /> pt
           </span>
         </Tooltip>
         <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>空值符：
@@ -564,7 +592,7 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
         {band && (
           <div style={{ fontSize: 11, color: '#52c41a', flexBasis: '100%', lineHeight: 1.6 }}>
             试样轴已自动出「试样编号」(1,2,3…递增)；点上方「参数{band.axis === 'col' ? '行' : '列'}」加参数，每格点一下在下方选「所有试样·某参数」绑定。
-            <b>数据按试样自动对位，无需手动转置</b>（原始记录试样是行还是列都不影响）。按<b>实际录入的试样数</b>自动展开（只展开试样，汇总不计入）。
+            <b>数据按试样自动对位</b>（原始记录试样是行还是列都不影响）。按<b>实际录入的试样数</b>自动展开（只展开试样，汇总不计入）。
           </div>
         )}
       </div>
@@ -654,7 +682,7 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
                   return (
                     <th key={c.id} style={{ ...th, background: '#f2f5fb', color: '#888', cursor: 'pointer' }}
                       title="试样序号：随录入试样自动 1,2,3…；点开可设这一列（所有试样列）的列宽">
-                      <Popover trigger={['click', 'contextMenu']} placement="bottom" title="试样列宽（应用到所有试样列）"
+                      <ClosablePopover trigger={['click', 'contextMenu']} placement="bottom" title="试样列宽（应用到所有试样列）"
                         content={
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 0' }}>
                             <span style={{ fontSize: 12, color: '#555' }}>列宽</span>
@@ -668,7 +696,7 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
                           {c.label || '试样序号（自动设置）'}
                           <div style={{ fontSize: 9, color: '#bbb', lineHeight: 1, fontWeight: 400 }}>自动 1,2,3… · 点设列宽</div>
                         </div>
-                      </Popover>
+                      </ClosablePopover>
                     </th>
                   );
                 }
@@ -806,7 +834,7 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
                     return (
                       <td key={c.id} style={{ ...td, textAlign: 'center', background: '#f2f5fb', color: '#888', fontWeight: 500, cursor: 'pointer' }}
                         title="试样序号：随录入试样自动 1,2,3…；点开可设这一行（所有试样行）的行高">
-                        <Popover trigger={['click', 'contextMenu']} placement="bottom" title="试样行高（应用到所有试样行）"
+                        <ClosablePopover trigger={['click', 'contextMenu']} placement="bottom" title="试样行高（应用到所有试样行）"
                           content={
                             <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 0' }}>
                               <span style={{ fontSize: 12, color: '#555' }}>行高</span>
@@ -817,7 +845,7 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
                             </div>
                           }>
                           <div>1,2,3…<div style={{ fontSize: 9, color: '#bbb', lineHeight: 1 }}>自动 · 点设行高</div></div>
-                        </Popover>
+                        </ClosablePopover>
                       </td>
                     );
                   }
@@ -1015,5 +1043,5 @@ export default function ReportResultTableCanvas({ field, onChange, linkedRecord 
 }
 
 
-const th: React.CSSProperties = { border: '1px solid #e2e8f0', padding: '8px 10px', background: '#f2f5fb', color: '#26334d', fontWeight: 500, verticalAlign: 'top' };
-const td: React.CSSProperties = { border: '1px solid #e8edf3', padding: '8px 10px', verticalAlign: 'middle' };
+const th: React.CSSProperties = { border: '1px solid #e2e8f0', padding: '6px 8px', background: '#f2f5fb', color: '#26334d', fontWeight: 500, verticalAlign: 'top' };
+const td: React.CSSProperties = { border: '1px solid #e8edf3', padding: '6px 8px', verticalAlign: 'middle' };

@@ -1,8 +1,7 @@
 import { useEffect, useState, useRef, useCallback, forwardRef, useImperativeHandle } from 'react';
-import { debounce } from 'lodash';
 import axios from 'axios';
 import MonacoTypstEditor from './MonacoEditor';
-import PdfPreview, { type PdfPreviewApi } from './PdfPreview';
+import PdfPreview, { type PdfPointHighlight, type PdfPreviewApi } from './PdfPreview';
 import { compileTypst } from './typst-compiler';
 
 export interface TypstViewerProps {
@@ -29,7 +28,23 @@ export interface PosMarker {
 
 export interface TypstViewerHandle {
   /** 正向跳转：按字段 code（回退分区 id）滚动 PDF 到对应位置 */
-  scrollToMarker: (fieldCode: string, groupId?: string) => void;
+  scrollToMarker: (fieldCode: string, groupId?: string, highlight?: PdfPointHighlight) => void;
+  /** 左侧取消选中字段时，同步清除 PDF 的持续定位标记。 */
+  clearMarkerHighlight: () => void;
+}
+
+const BLOCK_FIELD_TYPES = new Set([
+  'data_matrix', 'free_grid', 'image',
+  'report_result_table', 'report_equipment_table', 'report_sample_table',
+  'report_conclusion_table', 'report_photo_table', 'report_image_gallery', 'report_sample_description_table',
+]);
+
+/** 编辑器统一把字段类型翻译成 PDF 定位样式：图表只标起点，普通字段显示浅色范围。 */
+export function markerHighlightForField(field?: { label?: string; type?: string } | null): PdfPointHighlight {
+  return {
+    label: field?.label ? `当前：${field.label}` : '当前编辑字段',
+    mode: field?.type && BLOCK_FIELD_TYPES.has(field.type) ? 'block' : 'text',
+  };
 }
 
 function injectData(source: string, data?: Record<string, any>): string {
@@ -60,7 +75,8 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
   mode = 'split',
   onChange,
   height = '600px',
-  debounceMs = 500,
+  // 图片尺寸/旋转等可视版式调整需要尽快反映；180ms 仍能合并连续文字输入。
+  debounceMs = 180,
   enableSync = false,
   onMarkerClick,
   downloadName = 'document.pdf',
@@ -68,54 +84,98 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
   const [pdfUrl, setPdfUrl] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [compiling, setCompiling] = useState(false);
+  const [compiledSource, setCompiledSource] = useState<string | null>(null);
+  const finalSource = injectData(source, data);
+  const latestSourceRef = useRef(finalSource);
+  latestSourceRef.current = finalSource;
+  const previewPending = compiling || compiledSource !== finalSource;
+  // 输入连续变更时会同时存在多次编译；只允许最后一次请求写入预览，
+  // 否则早先的空值 PDF 晚返回会把刚选中的下拉值覆盖掉。
+  const compileSequenceRef = useRef(0);
   const markersRef = useRef<PosMarker[]>([]);
   const pdfApiRef = useRef<PdfPreviewApi | null>(null);
+  const activeMarkerFocusRef = useRef<{
+    fieldCode: string;
+    groupId?: string;
+    highlight?: PdfPointHighlight;
+    pendingScroll: boolean;
+  } | null>(null);
   const onMarkerClickRef = useRef(onMarkerClick);
   onMarkerClickRef.current = onMarkerClick;
 
-  const doCompile = useCallback(async (src: string, payload?: Record<string, any>) => {
-    setCompiling(true);
+  const applyMarkerFocus = useCallback((focus: NonNullable<typeof activeMarkerFocusRef.current>, scroll: boolean) => {
+    const ms = markersRef.current;
+    const m = ms.find(x => x.kind === 'field' && x.code === focus.fieldCode)
+      ?? (focus.groupId ? ms.find(x => x.kind === 'group' && x.code === focus.groupId) : undefined);
+    if (!m || !pdfApiRef.current) return false;
+    const next = ms
+      .filter(x => x.page === m.page && x.y > m.y + 2)
+      .sort((a, b) => a.y - b.y)[0];
+    const visual: PdfPointHighlight = {
+      mode: m.kind === 'group' ? 'group' : 'text',
+      heightPt: next ? next.y - m.y : undefined,
+      ...focus.highlight,
+    };
+    if (scroll) pdfApiRef.current?.scrollToPdfPoint(m.page, m.y, visual);
+    else pdfApiRef.current?.highlightPdfPoint(m.page, m.y, visual);
+    return true;
+  }, []);
+
+  const doCompile = useCallback(async (finalSrc: string, sequence: number) => {
+    const current = () => sequence === compileSequenceRef.current && latestSourceRef.current === finalSrc;
     try {
-      const finalSrc = injectData(src, payload);
       const url = await compileTypst(finalSrc);
+      if (!current()) return;
       setPdfUrl(url);
+      setCompiledSource(finalSrc);
       setError(null);
       if (enableSync) {
         // 与编译同一 source 查询位置标记；失败仅降级跳转功能，不影响预览
         try {
           const res = await axios.post('/api/typst/query', { source: finalSrc });
+          if (!current()) return;
           markersRef.current = res.data?.markers || [];
+          const active = activeMarkerFocusRef.current;
+          if (active) {
+            const found = applyMarkerFocus(active, active.pendingScroll);
+            if (found) active.pendingScroll = false;
+          }
         } catch {
+          if (!current()) return;
           markersRef.current = [];
         }
       }
     } catch (e: any) {
+      if (!current()) return;
       const msg = e.response?.data?.message || e.message || 'Compilation failed';
       setError(msg);
     } finally {
-      setCompiling(false);
+      if (current()) setCompiling(false);
     }
-  }, [enableSync]);
-
-  const debouncedCompile = useRef(
-    debounce((src: string, payload?: Record<string, any>) => {
-      doCompile(src, payload);
-    }, debounceMs)
-  ).current;
+  }, [enableSync, applyMarkerFocus]);
 
   useEffect(() => {
-    debouncedCompile(source, data);
-    return () => debouncedCompile.cancel();
-  }, [source, data, debouncedCompile]);
+    // Invalidate immediately, including the debounce window and component teardown.
+    const sequence = ++compileSequenceRef.current;
+    setCompiling(true);
+    setError(null);
+    markersRef.current = [];
+    pdfApiRef.current?.clearHighlight();
+    const timer = setTimeout(() => doCompile(finalSource, sequence), debounceMs);
+    return () => { clearTimeout(timer); ++compileSequenceRef.current; };
+  }, [finalSource, debounceMs, doCompile]);
 
   useImperativeHandle(ref, () => ({
-    scrollToMarker: (fieldCode: string, groupId?: string) => {
-      const ms = markersRef.current;
-      const m = ms.find(x => x.kind === 'field' && x.code === fieldCode)
-        ?? (groupId ? ms.find(x => x.kind === 'group' && x.code === groupId) : undefined);
-      if (m) pdfApiRef.current?.scrollToPdfPoint(m.page, m.y);
+    scrollToMarker: (fieldCode: string, groupId?: string, highlight?: PdfPointHighlight) => {
+      const focus = { fieldCode, groupId, highlight, pendingScroll: true };
+      activeMarkerFocusRef.current = focus;
+      if (applyMarkerFocus(focus, true)) focus.pendingScroll = false;
     },
-  }), []);
+    clearMarkerHighlight: () => {
+      activeMarkerFocusRef.current = null;
+      pdfApiRef.current?.clearHighlight();
+    },
+  }), [applyMarkerFocus]);
 
   // 反向跳转：Ctrl/⌘ + 点击 → 同页中点击点上方最近的标记（无则取该页第一个 / 前页最后一个）
   const handlePdfClick = useCallback((page: number, _xPt: number, yPt: number, ev: MouseEvent) => {
@@ -127,11 +187,25 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
       if (m.page > page || (m.page === page && m.y > yPt + 2)) continue; // 只看点击点之前的标记
       if (!best || m.page > best.page || (m.page === best.page && m.y >= best.y)) best = m;
     }
-    if (best) onMarkerClickRef.current?.(best);
+    if (best) {
+      const next = ms
+        .filter(x => x.page === best!.page && x.y > best!.y + 2)
+        .sort((a, b) => a.y - b.y)[0];
+      pdfApiRef.current?.highlightPdfPoint(best.page, best.y, {
+        mode: best.kind === 'group' ? 'group' : 'text',
+        heightPt: next ? next.y - best.y : undefined,
+      });
+      activeMarkerFocusRef.current = {
+        fieldCode: best.kind === 'field' ? best.code : '',
+        groupId: best.kind === 'group' ? best.code : undefined,
+        pendingScroll: false,
+      };
+      onMarkerClickRef.current?.(best);
+    }
   }, []);
 
   // 下载渲染后的 PDF（用 compile 得到的 blob URL；下载文件名给一个 ASCII 兜底 + 真实名）。
-  const downloadBtn = (pdfUrl && !error && downloadName !== null) ? (
+  const downloadBtn = (pdfUrl && !error && !previewPending && downloadName !== null) ? (
     <a href={pdfUrl} download={downloadName || 'document.pdf'} title="下载渲染后的 PDF"
       style={{
         position: 'absolute', top: 4, right: 8, zIndex: 11,
@@ -154,7 +228,12 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
         url={pdfUrl}
         height={height}
         apiRef={pdfApiRef}
+        onApiReady={() => {
+          const focus = activeMarkerFocusRef.current;
+          if (focus && applyMarkerFocus(focus, focus.pendingScroll)) focus.pendingScroll = false;
+        }}
         onPdfClick={enableSync ? handlePdfClick : undefined}
+        onHighlightClear={() => { activeMarkerFocusRef.current = null; }}
       />
     );
   };
@@ -163,7 +242,7 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
     // height 落到外层容器：height="100%" 等百分比值需有定高父级才能解析（否则预览塌缩成 0、不滚动/不渲染）。
     return (
       <div style={{ position: 'relative', height }}>
-        {compiling && <div style={{ position: 'absolute', top: 8, right: 110, zIndex: 10, fontSize: 12, color: '#1890ff' }}>编译中...</div>}
+        {previewPending && !error && <div role="status" style={{ position: 'absolute', top: 8, right: 12, zIndex: 10, fontSize: 12, padding: '4px 8px', background: '#fffbe6', color: '#874d00' }}>PDF 更新中{pdfUrl ? '，当前显示上一版' : ''}…</div>}
         {downloadBtn}
         {renderPdf()}
       </div>
@@ -190,7 +269,7 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
         />
       </div>
       <div style={{ flex: 1, minWidth: 0, position: 'relative', borderLeft: '1px solid #d9d9d9' }}>
-        {compiling && <div style={{ position: 'absolute', top: 8, right: 110, zIndex: 10, fontSize: 12, color: '#1890ff' }}>编译中...</div>}
+        {previewPending && !error && <div role="status" style={{ position: 'absolute', top: 8, right: 12, zIndex: 10, fontSize: 12, padding: '4px 8px', background: '#fffbe6', color: '#874d00' }}>PDF 更新中{pdfUrl ? '，当前显示上一版' : ''}…</div>}
         {downloadBtn}
         {renderPdf()}
       </div>

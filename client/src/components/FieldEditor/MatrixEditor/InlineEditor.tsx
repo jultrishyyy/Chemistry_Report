@@ -3,7 +3,7 @@
  * 按 Enter 或失焦提交；按 Escape 取消
  */
 import { useState, useRef, useEffect } from 'react';
-import { Input } from 'antd';
+import AutoGrowTextArea from '../../AutoGrowTextArea';
 
 interface Props {
   value: string;
@@ -31,14 +31,16 @@ export default function InlineEditor({ value, onCommit, onCancel, style, placeho
   };
 
   return (
-    <Input
+    <AutoGrowTextArea
       ref={ref}
       size="small"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
-      onPressEnter={commit}
       onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onCancel(); } }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
+        if (e.key === 'Escape') { e.stopPropagation(); onCancel(); }
+      }}
       placeholder={placeholder}
       style={{ width: '100%', minWidth: 60, ...style }}
     />

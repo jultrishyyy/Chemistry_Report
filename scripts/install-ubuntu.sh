@@ -31,6 +31,9 @@ PNPM_VERSION="${PNPM_VERSION:-10.25.0}" # pnpm 版本（与 package.json package
 TYPST_VERSION="${TYPST_VERSION:-v0.14.2}"
 SETUP_SYSTEMD="${SETUP_SYSTEMD:-1}"     # 1=安装 systemd 服务并开机自启；0=跳过
 SERVICE_NAME="${SERVICE_NAME:-cdr-demo}"
+# Ubuntu 一键安装面向真实服务器，缺省必须使用 server 接口配置；如确实只部署演示环境，
+# 可显式传 INTEGRATIONS_PROFILE=demo。不能依赖应用自身缺省值，否则会静默进入 mock。
+INTEGRATIONS_PROFILE="${INTEGRATIONS_PROFILE:-server}"
 
 # 国内镜像加速（默认开启，适合内网/国内服务器；CN_MIRROR=0 用官方源）
 CN_MIRROR="${CN_MIRROR:-1}"
@@ -46,6 +49,11 @@ RUN_USER="$(id -un)"
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[警告] %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[错误] %s\033[0m\n' "$*" >&2; exit 1; }
+
+case "$INTEGRATIONS_PROFILE" in
+  server|demo) ;;
+  *) die "INTEGRATIONS_PROFILE 只能是 server 或 demo（当前：$INTEGRATIONS_PROFILE）" ;;
+esac
 
 # 以 root 运行时不需要 sudo；普通用户则要求 sudo。SUDO 变量统一前缀提权命令。
 if [ "$(id -u)" -eq 0 ]; then
@@ -74,6 +82,7 @@ echo "  服务端口   : $APP_PORT"
 echo "  数据库     : $DB_NAME (用户 $DB_USER)"
 echo "  Node 版本  : $NODE_MAJOR.x    pnpm: $PNPM_VERSION    Typst: $TYPST_VERSION ($ARCH)"
 echo "  systemd    : $([ "$SETUP_SYSTEMD" = 1 ] && echo "是 ($SERVICE_NAME)" || echo "否")"
+echo "  外部接口   : $INTEGRATIONS_PROFILE"
 
 # ----------------------------- 换国内镜像源（可选）--------------------------
 if [ "$CN_MIRROR" = 1 ]; then
@@ -160,12 +169,18 @@ else
   typst --version
 fi
 
-# ----------------------------- 5. LibreOffice -------------------------------
+# ----------------------------- 5. 文档处理工具 ------------------------------
 if command -v soffice >/dev/null 2>&1; then
   log "5/9 LibreOffice 已存在，跳过"
 else
   log "5/9 安装 LibreOffice (calc + writer, headless)"
   $SUDO apt-get install -y libreoffice-calc libreoffice-writer
+fi
+if command -v gs >/dev/null 2>&1; then
+  log "5/9 Ghostscript 已存在，跳过"
+else
+  log "5/9 安装 Ghostscript（异常大 PDF 自动压缩）"
+  $SUDO apt-get install -y ghostscript
 fi
 
 # ----------------------------- 6. 字体检查 ----------------------------------
@@ -200,10 +215,21 @@ cat > config/database.local.json <<EOF
 }
 EOF
 
-# OA 登录 / 报告回传：默认保持 mock（不强制接外部，首启可任意账号登录）。
-# 接真实环境时再按《部署说明-Ubuntu.md》第 5 步从 *.example 复制并填值。
-[ -f config/auth.local.json ] || echo "  (提示) 未配 config/auth.local.json → OA 登录走 mock（任意账号密码可登）。接真实 OA 见部署说明。"
-[ -f config/report-delivery.local.json ] || echo "  (提示) 未配 config/report-delivery.local.json → 报告回传(1.4)走 mock（不真发）。"
+# 外部接口统一由 interfaces.{server|demo}.json 管理。Ubuntu 生产安装默认 server；
+# 已存在的服务器配置必须保留，重跑安装脚本不能覆盖现场地址/账号配置。
+if [ "$INTEGRATIONS_PROFILE" = "server" ]; then
+  if [ ! -f config/interfaces.server.json ]; then
+    [ -f config/interfaces.server.json.example ] || die "缺少 config/interfaces.server.json.example，无法创建真实接口配置"
+    cp config/interfaces.server.json.example config/interfaces.server.json
+    warn "已创建 config/interfaces.server.json，请核对 public_base_url、OA 地址和 SOAP 地址是否为本服务器现场值。"
+  else
+    echo "  ✓ 保留现有 config/interfaces.server.json（不覆盖现场配置）"
+  fi
+  node -e "const c=JSON.parse(require('fs').readFileSync('config/interfaces.server.json','utf8')); if(!String(c?.report_delivery?.soap_endpoint||'').trim()) throw new Error('report_delivery.soap_endpoint 不能为空')" \
+    || die "config/interfaces.server.json 非法，或真实 SOAP 地址 report_delivery.soap_endpoint 为空（禁止以 server 名义静默进入 mock）"
+else
+  echo "  演示安装：使用 config/interfaces.demo.json，OA / SOAP 均为 mock"
+fi
 
 log "7/9 执行数据库迁移 (建表)"
 pnpm migrate
@@ -226,7 +252,7 @@ if [ "$SETUP_SYSTEMD" = 1 ]; then
   NODE_DIR="$(dirname "$(command -v node)")"
   $SUDO tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<EOF
 [Unit]
-Description=化学部检测报告系统 (CDR Demo)
+Description=化学部检测报告系统
 After=network.target postgresql.service
 Wants=postgresql.service
 
@@ -236,6 +262,7 @@ User=${RUN_USER}
 WorkingDirectory=${PROJECT_DIR}
 Environment=PORT=${APP_PORT}
 Environment=HOST=0.0.0.0
+Environment=INTEGRATIONS_PROFILE=${INTEGRATIONS_PROFILE}
 Environment=PATH=${NODE_DIR}:/usr/local/bin:/usr/bin:/bin
 ExecStart=${PNPM_BIN} serve
 Restart=on-failure
@@ -245,7 +272,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now "${SERVICE_NAME}"
+  $SUDO systemctl enable "${SERVICE_NAME}"
+  # 服务可能已在运行；必须 restart 才会读取刚写入的 INTEGRATIONS_PROFILE。
+  $SUDO systemctl restart "${SERVICE_NAME}"
   sleep 2
   $SUDO systemctl --no-pager --full status "${SERVICE_NAME}" || true
 else
@@ -268,13 +297,14 @@ cat <<EOF
 后续运维：
   查看日志   : $([ "$SETUP_SYSTEMD" = 1 ] && echo "${SUDO:+$SUDO }journalctl -u ${SERVICE_NAME} -f" || echo "见下方手动启动")
   重启服务   : $([ "$SETUP_SYSTEMD" = 1 ] && echo "${SUDO:+$SUDO }systemctl restart ${SERVICE_NAME}" || echo "—")
-  手动启动   : cd ${PROJECT_DIR} && PORT=${APP_PORT} pnpm serve
+  手动启动   : cd ${PROJECT_DIR} && INTEGRATIONS_PROFILE=${INTEGRATIONS_PROFILE} PORT=${APP_PORT} pnpm serve
   更新代码后 : pnpm install && pnpm migrate && pnpm build$([ "$SETUP_SYSTEMD" = 1 ] && echo " && ${SUDO:+$SUDO }systemctl restart ${SERVICE_NAME}")
 
-接外部系统（OA 登录 / 报告回传 1.4）：默认 mock。接真实环境请见
-《部署说明-Ubuntu.md》第 5 节，配置 config/auth.local.json 与
-config/report-delivery.local.json（或用 AUTH_* / DELIVERY_* 环境变量），
-并确认服务器能访问 OA(172.19.0.27) 与回传 WSDL(172.18.0.97:8003)。
+外部接口模式：${INTEGRATIONS_PROFILE}
+  server：实际读取 config/interfaces.server.json，调用真实 OA / SOAP；报告页眉页脚严格读取上游 POST /api/external/reports 推送值，不回退示例。
+  demo  ：使用 config/interfaces.demo.json，OA / SOAP 均为 mock（仅显式传 INTEGRATIONS_PROFILE=demo 时启用）。
+运行后可访问 http://${IP:-<服务器IP>}:${APP_PORT}/api/health；server 模式应返回 integrations_profile=server、report_meta_source=external_interface。
+真实服务器应确认能访问 OA(172.19.0.27) 与回传 WSDL(172.18.0.97:8003)。
 
 ⚠️ 数据库密码当前为：${DB_PASSWORD}
    生产环境请用 DB_PASSWORD='强密码' 重新运行，或手动改库密码 + config/database.local.json。

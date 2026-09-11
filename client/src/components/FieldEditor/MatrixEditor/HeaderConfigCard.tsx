@@ -12,10 +12,11 @@
  * 编码 (code) 由系统自动生成并保证唯一，不在任何 UI 暴露。
  */
 import { useEffect, useState } from 'react';
-import { Popover, Form, Input, InputNumber, Switch, Select as AntSelect, Button, Space, Divider, Segmented } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
+import { Popover, Form, InputNumber, Switch, Select as AntSelect, Button, Space, Divider, Segmented } from 'antd';
+import { CheckOutlined, CloseOutlined } from '@ant-design/icons';
 import type { CellBinding, RecordTemplate } from '../../../../../shared/types';
 import BindingPickerModal, { BindingSummary } from '../../ReportEditor/BindingPickerModal';
+import AutoGrowTextArea from '../../AutoGrowTextArea';
 
 /** 卡片操作的通用表头形状；调用方负责映射到各自的存储字段（如参数列的 unit*） */
 export interface HeaderCfgValue {
@@ -70,7 +71,10 @@ interface Props {
   children: React.ReactNode;
 }
 
-const DEFAULT_BINDING_SOURCES = ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header'];
+const DEFAULT_BINDING_SOURCES = [
+  'literal', 'order', 'sample', 'test',
+  'record_field', 'record_cell', 'record_summary', 'record_header',
+];
 
 export default function HeaderConfigCard({
   title, value, showGroup, noteFixedOnly, showUnit, unitPlaceholder, labelPlaceholder, showDefault, defaultChoices, showDecimals, allowBinding, linkedRecord, bindingSources, closeOnOutsideClick, open, onClose, onSave, actions, extra, children,
@@ -177,21 +181,21 @@ export default function HeaderConfigCard({
     (s === 'label' ? setLabelBinding : s === 'unit' ? setUnitBinding : setNoteBinding)(b);
 
   const content = (
-    <div data-headercard="1" style={{ width: 290 }} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
+    <div data-headercard="1" style={{ width: 290, maxHeight: 'calc(100vh - 150px)', overflowY: 'auto', overscrollBehavior: 'contain', paddingRight: 2 }} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
       <Form layout="vertical" size="small">
         <Form.Item label="标题" style={{ marginBottom: 10 }}>
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={labelPlaceholder || '显示名称'} />
+          <AutoGrowTextArea value={label} onChange={(e) => setLabel(e.target.value)} placeholder={labelPlaceholder || '显示名称'} />
         </Form.Item>
         {showGroup && (
           <Form.Item label="分组表头" style={{ marginBottom: 10 }}
             tooltip="多级表头：相邻、填了同一个分组名的列，会在 PDF 表头合并到这个上层标题下。留空 = 不分组">
-            <Input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="留空 = 不分组" />
+            <AutoGrowTextArea value={group} onChange={(e) => setGroup(e.target.value)} placeholder="留空 = 不分组" />
           </Form.Item>
         )}
         {showUnit && (
           <Form.Item label="单位" style={{ marginBottom: 10 }}
             tooltip="以小括号显示在表头文字后。留空 = 继承镜像数据矩阵该列的单位">
-            <Input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder={unitPlaceholder || '留空 = 继承矩阵列'} />
+            <AutoGrowTextArea value={unit} onChange={(e) => setUnit(e.target.value)} placeholder={unitPlaceholder || '留空 = 继承矩阵列'} />
           </Form.Item>
         )}
         <Form.Item label="备注" style={{ marginBottom: 10 }}
@@ -199,7 +203,7 @@ export default function HeaderConfigCard({
             ? '以小括号显示在表头文字后，如「长度 (mm)」。报告表是展示型、无录入，故为固定文字。'
             : '以小括号显示在表头文字后，如「测量值 (mm)」。可以是固定文字（如单位），也可以配几个选项让实验员录入时选（如 客户要求 / 标准要求）'}>
           {noteFixedOnly ? (
-            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="如 mm / 客户要求（留空 = 无）" />
+            <AutoGrowTextArea value={note} onChange={(e) => setNote(e.target.value)} placeholder="如 mm / 客户要求（留空 = 无）" />
           ) : (
           <Space direction="vertical" style={{ width: '100%' }} size={6}>
             <Segmented
@@ -217,7 +221,7 @@ export default function HeaderConfigCard({
               ]}
             />
             {noteMode === 'fixed' && (
-              <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="如 ℃ / mm" />
+              <AutoGrowTextArea value={note} onChange={(e) => setNote(e.target.value)} placeholder="如 ℃ / mm" />
             )}
             {noteMode === 'options' && (
               <>
@@ -249,7 +253,7 @@ export default function HeaderConfigCard({
                 placeholder="从选项中选默认值"
                 options={(defaultChoices || []).map(o => ({ value: o, label: o }))} />
             ) : (
-              <Input value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} placeholder="留空 = 无默认值" />
+              <AutoGrowTextArea value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} placeholder="留空 = 无默认值" />
             )}
           </Form.Item>
         )}
@@ -268,7 +272,6 @@ export default function HeaderConfigCard({
       {extra && <div style={{ marginTop: 8 }}>{extra}</div>}
       <Space style={{ marginTop: 8 }}>
         <Button type="primary" size="small" icon={<CheckOutlined />} onClick={handleSave}>确定</Button>
-        <Button size="small" onClick={onClose}>取消</Button>
       </Space>
       {actions && actions.length > 0 && (
         <>
@@ -299,7 +302,14 @@ export default function HeaderConfigCard({
     )}
     <Popover
       content={content}
-      title={title}
+      title={
+        <div style={{ minWidth: 290, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ flex: 1 }}>{title}</span>
+          <Button type="text" size="small" icon={<CloseOutlined />} aria-label="关闭配置卡" title="关闭"
+            onClick={(event) => { event.stopPropagation(); onClose(); }}
+            style={{ marginRight: -6, color: '#8a94a6' }} />
+        </div>
+      }
       // 受控显示：仅由双击表头打开、确定/取消/底部操作/Esc/切换到别的表头关闭。
       // trigger={[]} + 无 onOpenChange ⇒ 完全受控，不随 hover/外部点击开关——
       // 否则点右下角公式/符号选择面板时卡片会误关（本次修复点）。

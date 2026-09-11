@@ -7,15 +7,19 @@
  *
  * 页面特定的部分（首页的页眉页脚 UI / 项目的关联记录 + binding 校验 / 各自的预览 typst）留在各页。
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, type SetStateAction } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { message, Modal } from 'antd';
 import axios from 'axios';
 import { dedupeTemplateIdentity } from '../../../../shared/matrix-flatten';
 import type { RecordTemplate } from '../../../../shared/types';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
+import { useAutoSave } from '../../hooks/useAutoSave';
+import { useEditorHistory } from '../../hooks/useEditorHistory';
 import { migrateGalleryGroups } from '../../components/FieldEditor/migrateImageGallery';
 import type { TypstViewerHandle } from '../../components/TypstViewer';
+import { useAuth } from '../../auth';
+import { useExclusiveEditLease } from '../../hooks/useCollaboration';
 
 const API = '/api';
 
@@ -32,11 +36,14 @@ export interface ReportEditorOpts {
 export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEditorOpts) {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { has } = useAuth();
   const id = searchParams.get('id');
   /** 只读查看某个历史版本 */
   const viewVersionId = searchParams.get('version_id');
+  const permissionPreview = searchParams.get('readonly') === '1' || !has('report_template.edit');
 
-  const [template, setTemplate] = useState<RecordTemplate>(emptyTemplate);
+  const templateHistory = useEditorHistory<RecordTemplate>(emptyTemplate);
+  const { value: template, setValue: setTemplate, replaceBaseline: replaceHistoryBaseline } = templateHistory;
   const [meta, setMeta] = useState<any>(null);
   const [viewingVersion, setViewingVersion] = useState<{ version_no: number; status: string } | null>(null);
   /** 版本流元信息（顶栏 TemplateVersionPanel 用） */
@@ -49,7 +56,11 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
   /** 版本流动作（提交/撤回/审核）后重跑加载，使编辑/只读态与最新 open_draft 一致 */
   const [reloadToken, setReloadToken] = useState(0);
   const reload = () => setReloadToken((t) => t + 1);
-  const readonly = !!viewVersionId || !!pendingReview;
+  const lease = useExclusiveEditLease({
+    resourceType: 'report_template', resourceId: id,
+    enabled: !!id && !permissionPreview && !viewVersionId && !pendingReview,
+  });
+  const readonly = permissionPreview || !!viewVersionId || !!pendingReview || lease.loading || !lease.acquired;
   /** 草稿乐观锁：保存时回传草稿 updated_at */
   const draftUpdatedAtRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -60,11 +71,24 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
   const [selectRequest, setSelectRequest] = useState<{ kind: 'field' | 'group'; code: string; token: number } | null>(null);
   // 未保存改动守卫。只读态（历史版本/送审中）不可能有用户改动，直接豁免——加载期规范化不误报。
   const savedSnapRef = useRef(snapTemplate(emptyTemplate));
-  const { confirmLeave } = useUnsavedGuard(() => !readonly && snapTemplate(template) !== savedSnapRef.current);
+  const baselineReadyRef = useRef(!id);
   // 保存/快照始终取「最新」模板状态（ref 每次渲染同步）——避免输入控件 onBlur 提交与点「保存」
   // 竞态时，handleSave 闭包里的旧 template 被保存、快照也停在旧内容，离开时仍误弹"未保存"。
   const templateRef = useRef(template);
   templateRef.current = template;
+  const replaceTemplateBaseline = useCallback((action: SetStateAction<RecordTemplate>) => {
+    replaceHistoryBaseline(previous => {
+      const next = typeof action === 'function'
+        ? (action as (current: RecordTemplate) => RecordTemplate)(previous)
+        : action;
+      savedSnapRef.current = snapTemplate(next);
+      baselineReadyRef.current = true;
+      return next;
+    });
+  }, [replaceHistoryBaseline]);
+  const isDirty = () => baselineReadyRef.current && !readonly
+    && snapTemplate(templateRef.current) !== savedSnapRef.current;
+  const { confirmLeave } = useUnsavedGuard(isDirty);
 
   const setVersionFrom = (data: any) =>
     setVersionMeta({ current_version_no: data?.current_version_no, open_draft: data?.open_draft });
@@ -80,6 +104,7 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
 
   useEffect(() => {
     if (!id) return;
+    baselineReadyRef.current = false;
     setLoading(true);
     // 只读查看历史版本
     if (viewVersionId) {
@@ -96,7 +121,7 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
             groups: migrateGalleryGroups(v.data.field_definitions || emptyTemplate.groups),
             layout_options: v.data.layout_options || {},
           };
-          setTemplate(tmpl);
+          replaceTemplateBaseline(tmpl);
           setViewingVersion({ version_no: v.data.version_no, status: v.data.status });
           savedSnapRef.current = snapTemplate(tmpl);
           onLoaded?.(m.data);
@@ -116,7 +141,7 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
         let layoutOptions = res.data.layout_options || {};
         // 未定稿处理：草稿/被退回→加载其内容继续编辑（可编辑）；待审核→只读展示送审版本
         const od = res.data.open_draft;
-        if (od && (od.status === 'draft' || od.status === 'rejected')) {
+        if (!permissionPreview && od && (od.status === 'draft' || od.status === 'rejected')) {
           try {
             const dv = await axios.get(`${API}/report-templates/${id}/versions/${od.id}`);
             groups = dv.data.field_definitions || groups;
@@ -124,7 +149,7 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
             message.info(`已加载未生效的${od.status === 'rejected' ? '被退回版本' : '草稿'} v${od.version_no}（${od.author_name}）继续编辑`);
           } catch { /* 草稿拉不到就退回已生效版本 */ }
           setPendingReview(null);
-        } else if (od && od.status === 'pending') {
+        } else if (!permissionPreview && od && od.status === 'pending') {
           try {
             const dv = await axios.get(`${API}/report-templates/${id}/versions/${od.id}`);
             groups = dv.data.field_definitions || groups;
@@ -140,16 +165,16 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
           id: res.data.id, name: res.data.name, version: res.data.version,
           groups, layout_options: layoutOptions,
         });
-        setTemplate(tmpl);
+        replaceTemplateBaseline(tmpl);
         savedSnapRef.current = snapTemplate(tmpl);
-        if (fixes) message.info(`已自动修复 ${fixes} 处历史重复字段标识，点「保存」可永久固化`);
+        if (fixes) message.info(`已自动修复 ${fixes} 处历史数据项冲突，点「保存」可永久固化`);
         onLoaded?.(res.data);
       })
       .catch(() => message.error('加载失败'))
       .finally(() => setLoading(false));
     // onLoaded/emptyTemplate 在各页是稳定引用；仅按 id/version/reloadToken 重载
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, viewVersionId, reloadToken]);
+  }, [id, viewVersionId, reloadToken, permissionPreview]);
 
   /**
    * 历史版本只读视图里「恢复此版本」：
@@ -192,8 +217,14 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
     });
   };
 
-  const handleSave = async (): Promise<boolean> => {
+  const handleSave = async (options: { silent?: boolean } = {}): Promise<boolean> => {
     if (!id) return false;
+    templateHistory.closeGroup();
+    // 仅取得/释放编辑权而没有改动时不创建一个内容完全相同的新草稿。
+    if (!isDirty()) {
+      await refreshVersionMeta();
+      return true;
+    }
     setSaving(true);
     try {
       const t = templateRef.current;   // 最新状态（防 onBlur 提交与点保存的竞态）
@@ -202,16 +233,22 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
         field_definitions: t.groups,
         layout_options: t.layout_options || {},
         draft_updated_at: draftUpdatedAtRef.current || undefined,
-      });
+      }, { headers: lease.headers });
       draftUpdatedAtRef.current = res.data?.updated_at || null;
       const warns = res.data?.binding_warnings || [];
       if (warns.length) message.warning(`保存成功，但有 ${warns.length} 处数据绑定失效，请检查标红项`);
-      else message.success('保存成功（草稿，提交审核通过后生效）');
+      else if (!options.silent) message.success('保存成功（草稿，提交审核通过后生效）');
       savedSnapRef.current = snapTemplate(t);
-      refreshVersionMeta();
+      baselineReadyRef.current = true;
+      // “结束编辑”释放锁后要立刻显示可提交的草稿，不能等待后台刷新碰运气。
+      await refreshVersionMeta();
       return true;
     } catch (e: any) {
-      if (e.response?.status === 409) {
+      if (e.response?.data?.code === 'duplicate_name') {
+        message.error(e.response.data.error);   // 同名冲突：普通提示，非「保存冲突」并发锁
+      } else if (e.response?.status === 423) {
+        message.warning(e.response?.data?.error || '该模板已由其他用户占用编辑，当前为只读');
+      } else if (e.response?.status === 409) {
         Modal.confirm({
           title: '保存冲突',
           content: e.response?.data?.error || '草稿已被其他人修改或正在审核中。',
@@ -228,11 +265,22 @@ export function useReportTemplateEditor({ emptyTemplate, onLoaded }: ReportEdito
     }
   };
 
+  useAutoSave({
+    enabled: baselineReadyRef.current && !loading && !saving && !readonly && !!id,
+    isDirty,
+    save: () => handleSave({ silent: true }),
+  });
+
   return {
-    id, navigate, readonly, pendingReview, reload, rollbackTo,
-    template, setTemplate, meta, viewingVersion, versionMeta, refreshVersionMeta,
+    id, navigate, readonly, permissionPreview, pendingReview, lease, reload, rollbackTo,
+    template, setTemplate, replaceTemplateBaseline,
+    historyEvents: { onPointerDownCapture: templateHistory.closeGroup, onFocusCapture: templateHistory.closeGroup },
+    undo: templateHistory.undo, redo: templateHistory.redo, reset: templateHistory.reset,
+    canUndo: templateHistory.canUndo, canRedo: templateHistory.canRedo, canReset: templateHistory.canReset,
+    meta, viewingVersion, versionMeta, refreshVersionMeta,
     loading, saving, mockPreview, setMockPreview,
     viewerRef, selectRequest, setSelectRequest,
     handleSave, confirmLeave,
+    collaborationChanges: isDirty() ? ['报告模板内容（未保存）'] : [],
   };
 }

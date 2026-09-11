@@ -14,8 +14,8 @@ import { loginViaCommonLogin, isMockLogin } from '../services/external-auth.js';
 // ⚠️ TEMP_LOGIN_WHITELIST（临时登录白名单·试运行阶段，后续整体删除）——见 server/src/temp-login-whitelist/index.ts
 import { isLoginAllowed, TEMP_LOGIN_DENIED_MESSAGE } from '../temp-login-whitelist/index.js';
 import {
-  ALL_ROLES, ROLE_LABELS, PERMISSION_LABELS, ROLE_PERMISSIONS,
-  permissionsForRoles, isRole, type Role, type Permission, type AppUser,
+  ALL_PERMISSIONS, PERMISSION_LABELS,
+  normalizePermissions, permissionsForRoles, type Role, type Permission, type AppUser, type RoleDefinition,
 } from '../../../shared/rbac.js';
 
 const router = Router();
@@ -23,9 +23,31 @@ const router = Router();
 function rowToUser(r: any): AppUser {
   return {
     job_no: r.job_no, user_name: r.user_name, depart_name: r.depart_name,
-    roles: (r.roles || []).filter(isRole) as Role[], active: r.active,
+    roles: (r.roles || []).filter((role: any) => typeof role === 'string') as Role[], active: r.active,
     last_login_at: r.last_login_at, created_at: r.created_at,
   };
+}
+
+async function roleDefinitions(db: { query: (sql: string, values?: any[]) => Promise<any> } = pool): Promise<RoleDefinition[]> {
+  const result = await db.query(
+    `SELECT code, label, description, permissions, builtin
+       FROM role_definitions ORDER BY builtin DESC, created_at, code`,
+  );
+  return result.rows.map((row: any) => ({
+    code: row.code,
+    label: row.label,
+    description: row.description,
+    permissions: normalizePermissions(row.permissions),
+    builtin: !!row.builtin,
+  }));
+}
+
+function roleMatrix(definitions: RoleDefinition[]): Record<string, Permission[]> {
+  return Object.fromEntries(definitions.map(definition => [definition.code, definition.permissions]));
+}
+
+async function userPermissions(user: AppUser): Promise<Permission[]> {
+  return permissionsForRoles(user.roles, roleMatrix(await roleDefinitions()));
 }
 
 async function getUser(jobNo: string): Promise<AppUser | null> {
@@ -46,13 +68,14 @@ export function requirePermission(perm: Permission) {
     const u = await currentUser(req);
     if (!u) { res.status(401).json({ error: '未登录' }); return; }
     if (!u.active) { res.status(403).json({ error: '账号已停用' }); return; }
-    if (!permissionsForRoles(u.roles).includes(perm)) { res.status(403).json({ error: '无权限', need: perm }); return; }
+    const normalized = perm === 'report.edit' ? 'report.generate' : perm;
+    if (!(await userPermissions(u)).includes(normalized)) { res.status(403).json({ error: '无权限', need: normalized }); return; }
     (req as any).appUser = u;
     next();
   };
 }
 
-const withPerms = (u: AppUser) => ({ ...u, permissions: permissionsForRoles(u.roles) });
+const withPerms = async (u: AppUser) => ({ ...u, permissions: await userPermissions(u) });
 
 /** POST /api/auth/login — body {loginName, pwd, appId?}：校验身份→本地建档→返回用户+权限。 */
 router.post('/login', async (req: Request, res: Response) => {
@@ -80,7 +103,7 @@ router.post('/login', async (req: Request, res: Response) => {
     );
     const au = rowToUser(r.rows[0]);
     console.log('[auth] 本地管理员旁路登录 job=%s', adminName);
-    res.json({ ...withPerms(au), token: '', modify_pwd_tips: '' });
+    res.json({ ...(await withPerms(au)), token: '', modify_pwd_tips: '' });
     return;
   }
 
@@ -120,7 +143,7 @@ router.post('/login', async (req: Request, res: Response) => {
     console.log('[auth] 部门自动授权 admin job=%s dept=%s', jobNo, dept);
   }
   if (!u.active) { res.status(403).json({ error: '账号已停用，请联系管理员' }); return; }
-  res.json({ ...withPerms(u), token: id.token, modify_pwd_tips: id.modifyPwdTips || '' });
+  res.json({ ...(await withPerms(u)), token: id.token, modify_pwd_tips: id.modifyPwdTips || '' });
 });
 
 /**
@@ -159,30 +182,87 @@ router.post('/sso', async (req: Request, res: Response) => {
   const u = rowToUser(upserted.rows[0]);
   if (!u.active) { res.status(403).json({ error: '账号已停用，请联系管理员' }); return; }
   console.log('[auth sso] 免登成功 job=%s name=%s', jobNo, u.user_name);
-  res.json({ ...withPerms(u), token: '' });
+  res.json({ ...(await withPerms(u)), token: '' });
 });
 
 /** GET /api/auth/me — 按 X-User-Job 返回当前用户 + 权限。 */
 router.get('/me', async (req: Request, res: Response) => {
   const u = await currentUser(req);
   if (!u) { res.status(401).json({ error: '未登录' }); return; }
-  res.json(withPerms(u));
+  res.json(await withPerms(u));
 });
 
 /** GET /api/auth/meta — 角色/权限元数据(供「用户管理」页渲染) + 登录模式(前端据此决定是否显示演示账号提示)。 */
-router.get('/meta', (_req: Request, res: Response) => {
-  res.json({ roles: ALL_ROLES, role_labels: ROLE_LABELS, permission_labels: PERMISSION_LABELS, role_permissions: ROLE_PERMISSIONS, login_mock: isMockLogin() });
+router.get('/meta', async (_req: Request, res: Response) => {
+  const definitions = await roleDefinitions();
+  res.json({
+    roles: definitions.map(role => role.code),
+    role_definitions: definitions,
+    role_labels: Object.fromEntries(definitions.map(role => [role.code, role.label])),
+    permission_labels: PERMISSION_LABELS,
+    role_permissions: roleMatrix(definitions),
+    permissions: ALL_PERMISSIONS,
+    login_mock: isMockLogin(),
+  });
+});
+
+/** 管理员新增角色。代码由服务端生成，避免名称修改影响用户已分配角色。 */
+router.post('/roles', requirePermission('user.manage'), async (req: Request, res: Response) => {
+  const label = typeof req.body?.label === 'string' ? req.body.label.trim().slice(0, 80) : '';
+  const description = typeof req.body?.description === 'string' ? req.body.description.trim().slice(0, 300) : null;
+  const permissions = normalizePermissions(req.body?.permissions);
+  if (!label) { res.status(400).json({ error: '请输入角色名称' }); return; }
+  const duplicate = await pool.query('SELECT 1 FROM role_definitions WHERE label=$1', [label]);
+  if (duplicate.rows.length) { res.status(409).json({ error: '角色名称已存在' }); return; }
+  const code = `custom_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+  const result = await pool.query(
+    `INSERT INTO role_definitions (code, label, description, permissions, builtin)
+     VALUES ($1,$2,$3,$4,FALSE) RETURNING code, label, description, permissions, builtin`,
+    [code, label, description, permissions],
+  );
+  res.status(201).json({ ...result.rows[0], permissions: normalizePermissions(result.rows[0].permissions) });
+});
+
+/** 所有角色（含内置角色）均可调整名称、说明与权限。 */
+router.put('/roles/:code', requirePermission('user.manage'), async (req: Request, res: Response) => {
+  const code = String(req.params.code || '');
+  const current = await pool.query('SELECT * FROM role_definitions WHERE code=$1', [code]);
+  if (!current.rows.length) { res.status(404).json({ error: '角色不存在' }); return; }
+  const label = typeof req.body?.label === 'string' ? req.body.label.trim().slice(0, 80) : current.rows[0].label;
+  const description = typeof req.body?.description === 'string'
+    ? req.body.description.trim().slice(0, 300)
+    : current.rows[0].description;
+  const permissions = Array.isArray(req.body?.permissions)
+    ? normalizePermissions(req.body.permissions)
+    : normalizePermissions(current.rows[0].permissions);
+  if (!label) { res.status(400).json({ error: '角色名称不能为空' }); return; }
+  if (code === 'admin' && !permissions.includes('user.manage')) {
+    res.status(409).json({ error: '管理员角色必须保留“用户与角色管理”权限' }); return;
+  }
+  const duplicate = await pool.query('SELECT 1 FROM role_definitions WHERE label=$1 AND code<>$2', [label, code]);
+  if (duplicate.rows.length) { res.status(409).json({ error: '角色名称已存在' }); return; }
+  const result = await pool.query(
+    `UPDATE role_definitions SET label=$1, description=$2, permissions=$3, updated_at=NOW()
+      WHERE code=$4 RETURNING code, label, description, permissions, builtin`,
+    [label, description, permissions, code],
+  );
+  res.json({ ...result.rows[0], permissions: normalizePermissions(result.rows[0].permissions) });
 });
 
 /** GET /api/auth/users — 列出所有用户(仅 user.manage)。 */
 router.get('/users', requirePermission('user.manage'), async (_req: Request, res: Response) => {
   const r = await pool.query('SELECT * FROM users ORDER BY created_at, job_no');
-  res.json(r.rows.map((row) => withPerms(rowToUser(row))));
+  const definitions = await roleDefinitions();
+  const matrix = roleMatrix(definitions);
+  res.json(r.rows.map((row) => {
+    const user = rowToUser(row);
+    return { ...user, permissions: permissionsForRoles(user.roles, matrix) };
+  }));
 });
 
 /** PUT /api/auth/users/:jobNo — 改角色/启停(仅 user.manage)。body {roles?, active?} */
 router.put('/users/:jobNo', requirePermission('user.manage'), async (req: Request, res: Response) => {
-  const { jobNo } = req.params;
+  const jobNo = String(req.params.jobNo || '');
   const exist = await getUser(jobNo);
   if (!exist) { res.status(404).json({ error: '用户不存在' }); return; }
 
@@ -190,7 +270,9 @@ router.put('/users/:jobNo', requirePermission('user.manage'), async (req: Reques
   const sets: string[] = [];
   const vals: any[] = [];
   if (Array.isArray(roles)) {
-    const clean = [...new Set(roles.filter((x: any) => typeof x === 'string' && isRole(x)))];
+    const definitions = await roleDefinitions();
+    const valid = new Set(definitions.map(role => role.code));
+    const clean = [...new Set(roles.filter((x: any) => typeof x === 'string' && valid.has(x)))];
     sets.push(`roles=$${sets.length + 1}`); vals.push(clean);
   }
   if (typeof active === 'boolean') { sets.push(`active=$${sets.length + 1}`); vals.push(active); }
@@ -206,7 +288,27 @@ router.put('/users/:jobNo', requirePermission('user.manage'), async (req: Reques
 
   vals.push(jobNo);
   const r = await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE job_no=$${vals.length} RETURNING *`, vals);
-  res.json(withPerms(rowToUser(r.rows[0])));
+  res.json(await withPerms(rowToUser(r.rows[0])));
+});
+
+/** 删除本地用户；外部身份仍存在时，下次登录会重新建档为无角色用户。 */
+router.delete('/users/:jobNo', requirePermission('user.manage'), async (req: Request, res: Response) => {
+  const actor = (req as any).appUser as AppUser;
+  const jobNo = String(req.params.jobNo || '');
+  if (jobNo === actor.job_no) { res.status(409).json({ error: '不能删除当前登录用户' }); return; }
+  const target = await getUser(jobNo);
+  if (!target) { res.status(404).json({ error: '用户不存在' }); return; }
+  if (target.roles.includes('admin') && target.active) {
+    const others = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM users WHERE 'admin'=ANY(roles) AND active AND job_no<>$1`,
+      [jobNo],
+    );
+    if ((others.rows[0]?.n || 0) === 0) {
+      res.status(409).json({ error: '不能删除最后一个有效管理员' }); return;
+    }
+  }
+  await pool.query('DELETE FROM users WHERE job_no=$1', [jobNo]);
+  res.status(204).end();
 });
 
 // ───────────────────────── 角色申请 / 审核（自助申请 → user.manage 审核分配）─────────────────────────
@@ -215,7 +317,9 @@ router.put('/users/:jobNo', requirePermission('user.manage'), async (req: Reques
 router.post('/role-requests', async (req: Request, res: Response) => {
   const u = await currentUser(req);
   if (!u) { res.status(401).json({ error: '未登录' }); return; }
-  const roles = [...new Set((Array.isArray(req.body?.roles) ? req.body.roles : []).filter((x: any) => typeof x === 'string' && isRole(x)))] as Role[];
+  const valid = new Set((await roleDefinitions()).map(role => role.code));
+  const roles = [...new Set((Array.isArray(req.body?.roles) ? req.body.roles : [])
+    .filter((x: any) => typeof x === 'string' && valid.has(x)))] as Role[];
   if (!roles.length) { res.status(400).json({ error: '请选择要申请的角色' }); return; }
   // 去掉已拥有的角色
   const wanted = roles.filter((r) => !u.roles.includes(r));
@@ -283,7 +387,8 @@ router.post('/role-requests/:id/review', requirePermission('user.manage'), async
       const target = await client.query('SELECT * FROM users WHERE job_no=$1 FOR UPDATE', [rr.job_no]);
       if (!target.rows.length) { await client.query('ROLLBACK'); res.status(404).json({ error: '申请人已不存在' }); return; }
       const cur: string[] = target.rows[0].roles || [];
-      const merged = [...new Set([...cur, ...((rr.requested_roles || []).filter(isRole))])];
+      const valid = new Set((await roleDefinitions(client)).map(role => role.code));
+      const merged = [...new Set([...cur, ...((rr.requested_roles || []).filter((role: any) => valid.has(role)))])];
       await client.query('UPDATE users SET roles=$1 WHERE job_no=$2', [merged, rr.job_no]);
     }
     await client.query(

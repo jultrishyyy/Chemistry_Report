@@ -42,7 +42,8 @@ export function errorHandler(err: any, req: Request, res: Response, _next: NextF
   });
   if (res.headersSent) return;        // 已开始发响应（如 PDF 流）就不能再改状态码
   // 请求体 JSON 解析失败（express.json 抛 SyntaxError，status=400）→ 明确告知调用方是请求格式问题，而非服务器内部错误
-  const isBodyParse = err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && err?.status === 400);
+  const isBodyParse = err?.type === 'entity.parse.failed'
+    || (err instanceof SyntaxError && (err as SyntaxError & { status?: number }).status === 400);
   if (isBodyParse) { res.status(400).json({ ok: false, error: '请求体 JSON 解析失败' }); return; }
   // 其余未捕获异常一律服务器内部错误（不泄露内部细节，详情见服务端日志）。统一 {ok:false,error} 形态。
   res.status(err?.status || 500).json({ ok: false, error: 'Internal Server Error' });

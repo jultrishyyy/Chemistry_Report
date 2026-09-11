@@ -11,7 +11,7 @@ export interface TemplateListRow {
   parent_template_id?: number | null;
   last_activity?: string;
   updated_at: string;
-  open_draft?: { status: string; author_name: string } | null;
+  open_draft?: { status: string; author_name: string; reviewer_name?: string | null } | null;
   children?: TemplateListRow[];
   [k: string]: any;
 }
@@ -66,7 +66,7 @@ export function filterTemplateRows<T extends TemplateListRow>(
 
 /** 高级搜索条件（两个列表页共用；全部前端过滤，列表数据已整页加载） */
 export interface TemplateSearchCriteria {
-  keyword?: string;                                  // 名称 / 对应项目名称 模糊
+  keyword?: string;                                  // 名称 / 对应项目 / 关联原始记录 / 修改人 / 审核人 模糊
   status?: 'approved' | 'draft' | 'pending' | 'rejected';   // 流转状态（approved = 无未定稿）
   author?: string;                                   // 修改人：当前版本作者 或 未定稿作者
   range?: [string | null, string | null] | null;     // 最近修改时间范围（ISO，含端点）
@@ -82,7 +82,13 @@ export function applyTemplateSearch<T extends TemplateListRow>(rows: T[], c: Tem
   if (kw) {
     out = out.filter((r) =>
       String(r.name || '').toLowerCase().includes(kw) ||
-      String(r.project_name || '').toLowerCase().includes(kw));
+      String(r.project_name || '').toLowerCase().includes(kw) ||
+      String(r.linked_record_template_name || '').toLowerCase().includes(kw) ||
+      String(r.linked_record_project_name || '').toLowerCase().includes(kw) ||
+      String(r.current_author || '').toLowerCase().includes(kw) ||
+      String(r.current_reviewer || '').toLowerCase().includes(kw) ||
+      String(r.open_draft?.author_name || '').toLowerCase().includes(kw) ||
+      String(r.open_draft?.reviewer_name || '').toLowerCase().includes(kw));
   }
   if (c.status) {
     out = c.status === 'approved'
