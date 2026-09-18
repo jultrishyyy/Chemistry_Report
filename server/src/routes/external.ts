@@ -15,13 +15,17 @@
 import { Router, Request, Response } from 'express';
 import { parseOrderInfos, type ExternalOrder } from '../services/external-orders.js';
 import { parseReportInfos, matchRequisitionScope, buildReportMetaFromReq, dateOnly } from '../services/external-report-info.js';
-import { generateAndStoreReport } from './reports.js';
+import { buildHeaderFooterConfig, generateAndStoreReport } from './reports.js';
 import { compileTypst } from '../services/typst-compiler.js';
 import { submitReportToDiGui, cancelReportFlowFromDiGui } from '../services/external-report-delivery.js';
 import { parseReportFeedback } from '../services/external-report-feedback.js';
 import { returnReportForEdit, returnReportToDataEntry, markReportApproved } from '../services/rework-ops.js';
 
 import { pool } from '../db.js';
+import { availableReportAssignments, splitReportMethodMatches } from '../../../shared/report-generation-selection';
+import { pickReportImageData } from '../../../shared/report-image-state';
+import { applyReportMetaSnapshot, reportMetaSnapshotMatches } from '../../../shared/report-meta-snapshot';
+import { renderContentDoc } from '../../../shared/typst-generator';
 
 const router = Router();
 
@@ -34,6 +38,40 @@ function readActor(req: Request): string | null {
 /** 当前登录账号工号（前端 X-User-Job 头，与 auth.ts RBAC 鉴权同源）。 */
 function readJobNo(req: Request): string {
   return (req.header('X-User-Job') || '').trim();
+}
+
+/**
+ * Keep editable, not-yet-delivered reports aligned with their interface 1.2 row.
+ * Submitted/approved PDFs are archival evidence and are deliberately left untouched.
+ */
+async function syncGeneratedReportMeta(row: any, actor: string | null = null): Promise<boolean> {
+  if (!row?.report_id) return false;
+  const found = await pool.query(
+    'SELECT id, content_doc, content_doc_original, external_status FROM reports WHERE id=$1',
+    [row.report_id],
+  );
+  const report = found.rows[0];
+  if (!report?.content_doc || ['submitted_external', 'external_approved'].includes(report.external_status)) return false;
+  if (row.delivery_status === 'sent' && report.external_status !== 'external_revision') return false;
+  const meta = buildReportMetaFromReq(row);
+  if (reportMetaSnapshotMatches(report.content_doc, meta)) return false;
+  const headerFooter = buildHeaderFooterConfig(meta);
+  const current = applyReportMetaSnapshot(report.content_doc, meta, headerFooter);
+  const original = report.content_doc_original
+    ? applyReportMetaSnapshot(report.content_doc_original, meta, headerFooter)
+    : current;
+  await pool.query(
+    `UPDATE reports SET report_no=$2, content_doc=$3::jsonb, content_doc_original=$4::jsonb,
+       final_typst=$5, stale=false, version=version+1 WHERE id=$1`,
+    [report.id, row.report_number, JSON.stringify(current), JSON.stringify(original), renderContentDoc(current)],
+  );
+  await pool.query(
+    `INSERT INTO report_audit_log (report_id, action, actor_name, diff, note)
+     VALUES ($1,'edit',$2,'[]'::jsonb,$3)`,
+    [report.id, actor, '同步接口 1.2 报告编号、校验码、签发日期及报告/资质备注'],
+  );
+  await pool.query('UPDATE report_requisitions SET stale=false, updated_at=NOW() WHERE id=$1', [row.id]);
+  return true;
 }
 
 /**
@@ -61,10 +99,10 @@ async function matchRequisitionWithOrderScope(row: any, selections = Array.isArr
     pool, row.order_no, expandedScope,
     selections,
   );
-  return match.map((entry: any) => ({
+  return splitReportMethodMatches(match.map((entry: any) => ({
     ...entry,
     default_enabled: defaultPairs.has(`${entry.sample_name || ''}||${entry.project_name || ''}`),
-  }));
+  })));
 }
 
 /** 读旧 payload 里某测试项目的关联模板集（兼容旧单值 linked_template_id）。 */
@@ -254,10 +292,10 @@ async function autoGenerateRequisition(reqRow: any, actor: string | null): Promi
   const customer_name = ord.rows[0]?.customer_name || '';
   const received_at = ord.rows[0]?.received_at || '';
   const draftRes = await pool.query(
-    'SELECT content_doc FROM reports WHERE order_no=$1 AND is_cover_draft=true LIMIT 1', [reqRow.order_no]);
+    'SELECT content_doc FROM reports WHERE order_no=$1 AND cover_template_id=$2 AND is_cover_draft=true LIMIT 1', [reqRow.order_no, cover_template_id]);
   const coverGroupsOverride = draftRes.rows[0]?.content_doc?.cover?.groups || null;
   // 首页原样照片（image 分区存于 ctx.record_raw_data，不随 groups 走）——单独 carry
-  const coverCtxPhotos = draftRes.rows[0]?.content_doc?.cover?.ctx?.record_raw_data || null;
+  const coverCtxPhotos = pickReportImageData(draftRes.rows[0]?.content_doc?.cover);
 
   const batch = await pool.query(
     `INSERT INTO report_batches (order_no, cover_template_id, split_mode, created_by)
@@ -279,7 +317,8 @@ async function autoGenerateRequisition(reqRow: any, actor: string | null): Promi
     project_assignments: assignments,
     mock_context: { customer_name, received_at, sample_name: reqRow.sample_name || '' },
     report_meta: buildReportMetaFromReq(reqRow), cover_groups_override: coverGroupsOverride,
-    cover_ctx_photos: coverCtxPhotos, report_samples, actor,
+    cover_ctx_photos: coverCtxPhotos, report_samples,
+    report_scope_samples: Array.isArray(reqRow.scope?.samples) ? reqRow.scope.samples : [], actor,
   });
   const frozenSelections = assignments.map((a: any) => ({
     scope_key: a.scope_key,
@@ -342,7 +381,9 @@ router.post('/reports', async (req: Request, res: Response) => {
       let auto_report_id: number | null = null;
       try {
         const cur = await pool.query('SELECT * FROM report_requisitions WHERE sys_number=$1', [rq.sys_number]);
+        const metadata_synced = await syncGeneratedReportMeta(cur.rows[0], actor);
         auto_report_id = await autoGenerateRequisition(cur.rows[0], actor);
+        if (metadata_synced) warnings.push(`取号单 ${rq.sys_number} 的报告编号、校验码、签发日期及备注已同步到未送审报告`);
       } catch (ge: any) {
         warnings.push(`取号单 ${rq.sys_number} 自动生成失败（不影响接收）：${ge?.message || String(ge)}`);
       }
@@ -397,8 +438,12 @@ router.post('/report-modify', async (req: Request, res: Response) => {
       // 接口 1.3 RefreshReportInfo 官方字段（仅这 6 个）：SysNumber/ReportNumber/RecordState/SecondAuditDate/ModifyType/Remark
       const remark = (item?.Remark ?? null) || null;             // 修改备注＝退回原因
       const issueDate = dateOnly(item?.SecondAuditDate) || null;  // 签发时间 → issue_date（去时分秒）
-      const recordState = (item?.RecordState ?? null) || null;    // 外部审核状态（草稿/审核中/审核通过/审核不通过）
+      const recordState = String(item?.RecordState ?? '').trim() || null;
       if (!sys) { results.push({ sys_number: sys, ok: false, error: 'SysNumber 必填' }); continue; }
+      if (mtRaw && !modifyType) { results.push({ sys_number: sys, ok: false, error: 'ModifyType 仅支持 data_entry 或 report_edit' }); continue; }
+      if (recordState && !['草稿', '审核中', '审核通过', '审核不通过'].includes(recordState)) {
+        results.push({ sys_number: sys, ok: false, error: 'RecordState 必须为草稿、审核中、审核通过或审核不通过' }); continue;
+      }
       try {
         await client.query('BEGIN');
         // 1) 改号 + 1.3 元数据：ReportNumber/SecondAuditDate/RecordState/Remark 给了才更新
@@ -452,17 +497,17 @@ router.post('/report-modify', async (req: Request, res: Response) => {
         //    审核通过 → external_approved（签发完成，终态）；审核不通过（未显式给 ModifyType）→ 语义等价
         //    report_edit：退回文员改报告（external_revision + 建 scope=report 工单）。草稿/审核中/无报告 →
         //    仅记录元数据（record_state 已在上面的 UPDATE 落库）。
-        if (reportId && deliveryStatus === 'sent' && (newRecordState === '审核通过' || newRecordState === '审核不通过')) {
+        if (reportId && (recordState === '审核通过' || recordState === '审核不通过' || recordState === '草稿')) {
           const rep = await client.query('SELECT id, order_no, report_no, record_data_ids, external_status FROM reports WHERE id=$1', [reportId]);
           const report = rep.rows[0];
           // 外部结论只能作用于本系统已经成功送出的报告。没有经过 submitted_external
           // 状态的一律只记录外部元数据，不能反向把未送审报告锁成“审核通过”。
-          if (report?.external_status !== 'submitted_external') {
+          if (report?.external_status !== 'submitted_external' && !(deliveryStatus === 'sent' && report?.external_status === 'none')) {
             await client.query('COMMIT');
             results.push({ sys_number: sys, ok: true, report_number: newNo, issue_date: newIssueDate, record_state: newRecordState, regenerate_needed: false, warning: '外部回执未对应本系统已送审状态，仅记录元数据' });
             continue;
           }
-          if (newRecordState === '审核通过') {
+          if (recordState === '审核通过') {
             await markReportApproved(client, reportId, { externalRef: null });
             // 审核通过＝终态：取号单不再是"待重新生成"（上面的 UPDATE 因 report_id 非空置了 stale=true，这里回退）
             await client.query('UPDATE report_requisitions SET stale=false, updated_at=NOW() WHERE sys_number=$1', [sys]);
@@ -472,7 +517,7 @@ router.post('/report-modify', async (req: Request, res: Response) => {
           }
           // 审核不通过
           await returnReportForEdit(client, report, {
-            reason: remark || '外部审核不通过', suggestion: remark, raisedByName: actor, raisedByRole: 'external',
+            reason: remark || (recordState === '草稿' ? '外部流程退回草稿' : '外部审核不通过'), suggestion: remark, raisedByName: actor, raisedByRole: 'external',
           });
           await client.query('COMMIT');
           results.push({ sys_number: sys, ok: true, report_number: newNo, issue_date: newIssueDate, record_state: newRecordState, modify_type: 'report_edit', external_status: 'external_revision', regenerate_needed: true });
@@ -548,6 +593,10 @@ router.get('/requisitions', async (req: Request, res: Response) => {
         WHERE rq.order_no=$1 ORDER BY rq.report_number`, [order_no]);
     const rows: any[] = [];
     for (const row of r.rows) {
+      // 修复历史报告快照，并覆盖“接口 1.2 重复推送后报告仍显示旧校验码/备注”的情况。
+      // 已送审、已批准报告由审签流程冻结，不在列表查询时改写。
+      const metadata_synced = await syncGeneratedReportMeta(row);
+      if (metadata_synced) row.stale = false;
       const match = await matchRequisitionWithOrderScope(
         row, Array.isArray(row.template_selections) ? row.template_selections : [],
       );
@@ -578,8 +627,12 @@ router.get('/requisitions', async (req: Request, res: Response) => {
             project_template_version_id: pair?.[1]?.project_template_version_id ?? null,
           };
         })
-        : row.template_selections;
-      rows.push({ ...row, template_selections: displaySelections, match_result: match, data_rework_open, report_rework });
+        : match.flatMap((entry: any) => {
+          const choice = (row.template_selections || []).find((s: any) => s.scope_key === entry.scope_key)
+            || (row.template_selections || []).find((s: any) => s.scope_key === entry.base_scope_key);
+          return choice ? [{ ...choice, scope_key: entry.scope_key }] : [];
+        });
+      rows.push({ ...row, template_selections: displaySelections, match_result: match, data_rework_open, report_rework, metadata_synced });
     }
     res.json(rows);
   } catch (e: any) {
@@ -700,7 +753,7 @@ router.put('/requisitions/:id/generation-config', async (req: Request, res: Resp
 });
 
 /**
- * 按取号单生成报告（文员在工作台补齐 assignments 后调用）。
+ * 按取号单当前可用范围直接生成报告；assignments 可选，用于调整范围或覆盖默认模板。
  * body：{ order_no, cover_template_id, cover_page_template_id?, items:[{requisition_id, assignments:[{record_data_id, project_template_id, title?, page_break?}]}] }
  * 复用 reports.ts 的 generateAndStoreReport（与手动拆分同口径），report_no=报告编号、页眉页脚用该取号单元数据。
  */
@@ -713,15 +766,17 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
   const actor = readActor(req);
   try {
     const ord = await pool.query('SELECT customer_name, received_at, payload FROM work_orders WHERE order_no=$1', [order_no]);
+    const coverTemplate = await pool.query('SELECT host_manufacturer_id FROM report_templates WHERE id=$1', [cover_template_id]);
+    const coverManufacturerId = coverTemplate.rows[0]?.host_manufacturer_id;
     const customer_name = ord.rows[0]?.customer_name || '';
     const received_at = ord.rows[0]?.received_at || '';
     // 首页草稿 carry-over：本订单若有文员编辑过的首页草稿，取其已编辑 cover groups，
     // 套用到每份取号报告的首页（结构/样式/手改值 carry，binding/结论按各报告 scope 重解析）。
     const draftRes = await pool.query(
-      'SELECT content_doc FROM reports WHERE order_no=$1 AND is_cover_draft=true LIMIT 1', [order_no]);
+      'SELECT content_doc FROM reports WHERE order_no=$1 AND cover_template_id=$2 AND is_cover_draft=true LIMIT 1', [order_no, cover_template_id]);
     const coverGroupsOverride = draftRes.rows[0]?.content_doc?.cover?.groups || null;
     // 首页原样照片（image 分区存于 ctx.record_raw_data，不随 groups 走）——单独 carry
-    const coverCtxPhotos = draftRes.rows[0]?.content_doc?.cover?.ctx?.record_raw_data || null;
+    const coverCtxPhotos = pickReportImageData(draftRes.rows[0]?.content_doc?.cover);
     const batch = await pool.query(
       `INSERT INTO report_batches (order_no, cover_template_id, split_mode, created_by)
        VALUES ($1,$2,'requisition',$3) RETURNING id`,
@@ -733,50 +788,21 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
       const rq = await pool.query('SELECT * FROM report_requisitions WHERE id=$1 AND order_no=$2', [it.requisition_id, order_no]);
       if (!rq.rows.length) { out.push({ requisition_id: it.requisition_id, ok: false, error: '取号单不存在' }); continue; }
       const row = rq.rows[0];
-      if (!row.generation_configured_at) {
-        out.push({ requisition_id: row.id, ok: false, error: '请先确认本报告的样品、项目和项目模板配置' });
-        continue;
+      const savedSelections = Array.isArray(row.template_selections) ? row.template_selections : [];
+      const requested = Array.isArray(it.assignments) ? it.assignments : [];
+      const choices = new Map<string, any>(savedSelections.map((choice: any) => [String(choice.scope_key), choice]));
+      for (const choice of requested) if (choice?.scope_key) {
+        const key = String(choice.scope_key);
+        choices.set(key, { ...choices.get(key), ...choice });
       }
-      const frozenSelections = Array.isArray(row.template_selections) ? row.template_selections : [];
-      const configured = frozenSelections.filter((x: any) => x?.enabled !== false && x?.scope_key && x?.record_data_id && x?.project_template_id);
-      if (!configured.length) {
-        out.push({ requisition_id: row.id, ok: false, error: '报告配置中没有纳入可生成的项目' }); continue;
+      const freshMatch = await matchRequisitionWithOrderScope(row, [...choices.values()]);
+      const assignments = availableReportAssignments(freshMatch, [...choices.values()], coverManufacturerId);
+      if (!assignments.length) {
+        out.push({ requisition_id: row.id, ok: false, error: '当前报告范围暂无可生成的已审核记录和生效项目模板' }); continue;
       }
-      const freshMatch = await matchRequisitionWithOrderScope(row, frozenSelections);
-      const requested = (Array.isArray(it.assignments) ? it.assignments : [])
-        .filter((a: any) => a && a.record_data_id && a.project_template_id);
-      const configuredKeys = new Set(configured.map((a: any) => `${a.scope_key}:${a.record_data_id}:${a.project_template_id}`));
-      const requestedKeys = new Set(requested.map((a: any) => `${a.scope_key}:${a.record_data_id}:${a.project_template_id}`));
-      if (configuredKeys.size !== requestedKeys.size || [...configuredKeys].some(k => !requestedKeys.has(k))) {
-        out.push({ requisition_id: row.id, ok: false, error: '生成内容与已确认的报告配置不一致，请刷新后重新生成' }); continue;
-      }
-      const assignments: any[] = [];
-      let invalidSelection = '';
-      for (let i = 0; i < requested.length; i++) {
-        const a = requested[i];
-        const entry = freshMatch.find(m => m.scope_key === a.scope_key);
-        const matchedAssignment = entry?.assignments?.find((x: any) =>
-          Number(x.record_data_id) === Number(a.record_data_id)
-          && x.record_data_status === 'reviewed');
-        const candidate = matchedAssignment?.project_template_candidates?.find((x: any) =>
-          Number(x.id) === Number(a.project_template_id));
-        if (!entry || !matchedAssignment || !candidate) {
-          invalidSelection = `第 ${i + 1} 个项目模板与原始记录或报告范围不匹配`;
-          break;
-        }
-        assignments.push({
-          scope_key: a.scope_key,
-          record_data_id: Number(a.record_data_id),
-          project_template_id: Number(a.project_template_id),
-          project_template_version_id: candidate.version_id,
-          enabled: true, title: a.title || undefined, page_break: a.page_break !== false, _order: i,
-        });
-      }
-      if (invalidSelection) {
-        out.push({ requisition_id: row.id, ok: false, error: invalidSelection });
-        continue;
-      }
-      if (!assignments.length) { out.push({ requisition_id: row.id, ok: false, error: '没有可生成的项目（请先补齐样品/项目/原始记录关联）' }); continue; }
+      // Freeze only the assignments actually used; preserve explicit exclusions for later regeneration.
+      const frozenSelections = [...choices.values()].filter((choice: any) => choice.enabled === false)
+        .concat(assignments.map(assignment => ({ ...assignment, selected_by: actor, selected_at: new Date().toISOString() })));
       // 文员侧锁：实验室数据退回(data_entry)未重审通过前不能重新生成（待重审后自动解锁）。
       const prevReportId: number | null = row.report_id;
       if (prevReportId && await hasOpenDataEntryRework(pool, prevReportId)) {
@@ -785,11 +811,10 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
       }
       // 报告编号接口下发的是默认范围；实际取用本订单完整样品清单，按本次已选项目收敛。
       const selectedScopes = new Set(assignments.map((a: any) => String(a.scope_key)));
-      const selectedSampleNames = new Set(freshMatch
-        .filter((m: any) => selectedScopes.has(String(m.scope_key)))
-        .map((m: any) => m.sample_name));
+      const selectedMatches = freshMatch.filter((m: any) => selectedScopes.has(String(m.scope_key)));
       const scopeSamples: any[] = (Array.isArray(ord.rows[0]?.payload?.samples) ? ord.rows[0].payload.samples : [])
-        .filter((s: any) => selectedSampleNames.has(s?.name));
+        .filter((s: any) => selectedMatches.some((m: any) => m.sample_external_id != null
+          ? String(m.sample_external_id) === String(s?.id) : m.sample_name === s?.name));
       const report_samples = scopeSamples.map((smp: any, i: number) => ({
         no: (smp?.sort_no != null && String(smp.sort_no).trim()) || String(i + 1),
         name: smp?.name ?? '',
@@ -804,7 +829,8 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
         project_assignments: assignments,
         mock_context: { customer_name, received_at, sample_name: row.sample_name || '' },
         report_meta: buildReportMetaFromReq(row), cover_groups_override: coverGroupsOverride,
-        cover_ctx_photos: coverCtxPhotos, report_samples, actor,
+        cover_ctx_photos: coverCtxPhotos, report_samples,
+        report_scope_samples: Array.isArray(row.scope?.samples) ? row.scope.samples : [], actor,
       });
       // 历史版本：旧报告行保留，标记被新报告取代（superseded_by 指向新版），列表只显示当前版。
       if (prevReportId && prevReportId !== result.report_id) {
@@ -831,20 +857,25 @@ router.post('/requisitions/generate', async (req: Request, res: Response) => {
  */
 router.post('/requisitions/:id/deliver', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
+  const client = await pool.connect();
   try {
-    const rq = await pool.query('SELECT * FROM report_requisitions WHERE id=$1', [id]);
+    await client.query('BEGIN');
+    const rq = await client.query('SELECT * FROM report_requisitions WHERE id=$1 FOR UPDATE', [id]);
     if (!rq.rows.length) { res.status(404).json({ error: '取号单不存在' }); return; }
     const row = rq.rows[0];
     if (!row.report_id) { res.status(400).json({ error: '该取号单尚未生成报告，不能回传' }); return; }
     // 文员侧锁：实验室数据退回修改中（data_entry 工单未关闭）不能回传，须等数据重审通过+重新生成。
-    if (await hasOpenDataEntryRework(pool, row.report_id)) {
+    if (await hasOpenDataEntryRework(client, row.report_id)) {
       res.status(409).json({ error: '实验室数据退回修改中，待重新审核通过并重新生成后才能回传' }); return;
     }
 
-    const rep = await pool.query('SELECT final_typst, external_status FROM reports WHERE id=$1', [row.report_id]);
+    const rep = await client.query('SELECT final_typst, external_status FROM reports WHERE id=$1 FOR UPDATE', [row.report_id]);
     if (!rep.rows.length || !rep.rows[0].final_typst) { res.status(400).json({ error: '报告内容缺失，无法编译 PDF' }); return; }
     if (rep.rows[0].external_status === 'external_approved') {
       res.status(409).json({ error: '报告已外部审核通过，不能再次送审' }); return;
+    }
+    if (row.delivery_status === 'sent' && rep.rows[0].external_status === 'submitted_external') {
+      res.status(409).json({ error: '报告已送审，请勿重复送审' }); return;
     }
 
     const compiled = await compileTypst(rep.rows[0].final_typst);
@@ -853,29 +884,34 @@ router.post('/requisitions/:id/deliver', async (req: Request, res: Response) => 
     const jobNo = readJobNo(req);
     const result = await submitReportToDiGui(row.sys_number, pdfBase64, jobNo);
 
-    await pool.query(
+    await client.query(
       `UPDATE report_requisitions
          SET delivery_status=$2, delivered_at=CASE WHEN $2='sent' THEN NOW() ELSE delivered_at END,
              delivery_error=$3, updated_at=NOW()
        WHERE id=$1`,
       [id, result.ok ? 'sent' : 'failed', result.ok ? null : (result.error || '回传失败')],
     );
-    if (!result.ok) { res.status(502).json({ ok: false, error: result.error || '回传失败' }); return; }
+    if (!result.ok) { await client.query('COMMIT'); res.status(502).json({ ok: false, error: result.error || '回传失败' }); return; }
     // 回传成功 → 报告进入"已回传外部待审"态（P-Flow-2 状态机起点）
-    await pool.query(`UPDATE reports SET external_status='submitted_external', stale=false WHERE id=$1`, [row.report_id]);
+    await client.query(`UPDATE reports SET external_status='submitted_external', stale=false WHERE id=$1`, [row.report_id]);
     // 若本报告处于"报告退回(scope=report)"修改态：送审即视为已处理，关闭工单 + 清取号单 stale → 回到终态。
-    await pool.query(
+    await client.query(
       `UPDATE rework_tickets SET status='resolved', resolved_at=NOW(),
          resolution_note=COALESCE(resolution_note, '报告已修改并重新送审')
        WHERE report_id=$1 AND scope='report' AND status <> 'resolved'`,
       [row.report_id],
     );
-    await pool.query('UPDATE report_requisitions SET stale=false, updated_at=NOW() WHERE id=$1', [id]);
+    await client.query("UPDATE report_requisitions SET stale=false, record_state='审核中', updated_at=NOW() WHERE id=$1", [id]);
+    await client.query('COMMIT');
     res.json({ ok: true, ref: result.ref });
   } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {});
     await pool.query('UPDATE report_requisitions SET delivery_status=$2, delivery_error=$3, updated_at=NOW() WHERE id=$1',
       [id, 'failed', e?.message || String(e)]).catch(() => {});
     res.status(500).json({ error: e?.message || String(e) });
+  } finally {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
   }
 });
 

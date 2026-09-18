@@ -1,3 +1,4 @@
+import { revealInScrollPanes } from '../../utils/scrollWithin';
 /**
  * 报告结构化编辑（P2）
  *
@@ -8,14 +9,14 @@
  * 实现要点：改值 = 把该字段/单元格的 binding 改为 {source:'literal', text}，
  * 再调 /preview-content-doc（不入库）实时预览，保存走 PUT {content_doc}（服务端重渲染）。
  */
-import { useEffect, useState, useRef, useMemo, useCallback, Fragment, type ReactNode } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback, Fragment, type CSSProperties, type ReactNode } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Button, message, Spin, Tag, Space, Alert, Input, InputNumber, Card, Empty, Tooltip, Divider, Dropdown, List,
   Select as AntSelect, Upload, Segmented, ColorPicker, Modal, Checkbox, DatePicker, Popover,
 } from 'antd';
 import {
-  SaveOutlined, ArrowLeftOutlined, PlusOutlined, DeleteOutlined, RollbackOutlined,
+  ArrowLeftOutlined, PlusOutlined, DeleteOutlined, RollbackOutlined,
   WarningOutlined, ArrowUpOutlined, ArrowDownOutlined, LinkOutlined,
   BoldOutlined, ItalicOutlined, AlignLeftOutlined, AlignCenterOutlined, AlignRightOutlined, BgColorsOutlined, SettingOutlined,
   VerticalAlignBottomOutlined, UnorderedListOutlined, DoubleLeftOutlined, EyeOutlined, DownloadOutlined,
@@ -26,6 +27,12 @@ import type { FieldDefinition, FieldGroup, CellBinding, StyleOverride } from '..
 import FormatPanel, { REPORT_FONTS } from '../../components/FieldEditor/FormatPanel';
 import { isSignatureGroup } from '../../components/FieldEditor/section-presets';
 import TypstViewer, { markerHighlightForField, type TypstViewerHandle } from '../../components/TypstViewer';
+import ReportSourceDataPanel from '../../components/ReportEditor/ReportSourceDataPanel';
+import { reportTableClipboard } from '../../utils/reportTableClipboard';
+import { readReportPhoto } from '../../utils/reportPhotoClipboard';
+import { hideAutomaticSampleTable } from '../../../../shared/report-table-visibility';
+import { signaturePosition, SIGNATURE_POSITION_OPTIONS } from '../../../../shared/signature-position';
+import { collectReportSourceChanges } from '../../../../shared/report-source-review';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 import { useAuth } from '../../auth';
 import AutoGrowTextArea from '../../components/AutoGrowTextArea';
@@ -49,6 +56,7 @@ import ImageSectionNotes from '../../components/FieldEditor/ImageSectionNotes';
 import { migrateGalleryGroups } from '../../components/FieldEditor/migrateImageGallery';
 import { parseSpreadsheetClipboard, serializeSpreadsheetClipboard } from '../../utils/spreadsheetClipboard';
 import { findImageCollection, imageCollectionFromLegacy, imageCollectionKey, type RecordImageCollection } from '../../../../shared/image-collection';
+import { pickReportImageData } from '../../../../shared/report-image-state';
 import { prepareImageForUpload } from '../../utils/imageProcessing';
 import ImageProcessButton from '../../components/ImageProcessButton';
 import RecordImageCollectionEditor from '../../components/RecordImageCollectionEditor';
@@ -58,7 +66,7 @@ import ReportParagraphEditor from '../../components/ReportEditor/ReportParagraph
 import ReportCellTextArea from '../../components/ReportEditor/ReportCellTextArea';
 import ReportRichText from '../../components/ReportEditor/ReportRichText';
 import ReportContinuousText from '../../components/ReportEditor/ReportContinuousText';
-import { canEditContinuousText, hasContinuousText, continuousTextValue, insertContinuousFigure } from '../../../../shared/report-continuous-text';
+import { canEditContinuousText, continuousTextValue, insertContinuousFigure } from '../../../../shared/report-continuous-text';
 import { canContinueReportBlocks, enterBesideReportBlock, removeReportBlock, removeReportBlockWithFocus, reportTextEndPosition } from '../../../../shared/report-block-navigation';
 import { reportTextRuns, reportTextRunValue, updateReportTextRun } from '../../../../shared/report-text-runs';
 import { moveReportFigure } from '../../../../shared/report-figure-move';
@@ -69,12 +77,14 @@ import ReportPaperViewport from '../../components/ReportEditor/ReportPaperViewpo
 import ReportFigureEdges from '../../components/ReportEditor/ReportFigureEdges';
 import ReportFigureTools, { ReportFigureToolsContext } from '../../components/ReportEditor/ReportFigureTools';
 import { reportFigureClickTarget } from '../../components/ReportEditor/reportFigureClick';
+import { useReportPhotoFocus } from '../../components/ReportEditor/useReportPhotoFocus';
 import { reportProjectHeadingValue } from '../../../../shared/report-project-heading';
 import { reportImageTitleStyle } from '../../../../shared/report-image-title-style';
 import { continueImageSection } from '../../../../shared/report-image-continuation';
 import { deleteBlankBesideFigure } from '../../../../shared/report-blank-boundary';
 import { reportEditableTable, editReportTable } from '../../../../shared/report-editable-table';
-import { detachReportFigureNotes } from '../../../../shared/report-detached-notes';
+import ReportSectionHeading from '../../components/ReportEditor/ReportSectionHeading';
+import { removeLegacyImageNotes, detachReportFigureNotes } from '../../../../shared/report-detached-notes';
 import { insertReportTableAxis, deleteReportTableAxis, resizeReportTableMerge, mergeReportTableRange, deleteReportTableRange, resizeReportTable } from '../../../../shared/report-table-structure';
 import { ReportInsertionContext, type ReportInsertionTarget, type ReportInsertAction } from '../../components/ReportEditor/ReportInsertionContext';
 import ReportImagePreview from '../../components/ReportEditor/ReportImagePreview';
@@ -95,17 +105,21 @@ interface Section {
   ctx: any;
 }
 
-function sectionThemeValues(section: Section): { font: string; size: number; figureGapPt: number } {
+function sectionThemeValues(section: Section): { font: string; size: number; figureGapPt: number; fieldGap: string; sectionGap: string } {
   const theme = (section.layout_options?.theme_config || {}) as Record<string, any>;
-  const size = reportBodyLayout(theme).size;
+  const layout = reportBodyLayout(theme);
+  const size = layout.size;
   const raw = theme.line_gap;
   let figureGapPt = 0.6 * size;
   if (typeof raw === 'number') figureGapPt = raw * size;
   else if (typeof raw === 'string' && raw.endsWith('em')) figureGapPt = (parseFloat(raw) || 0.6) * size;
   else if (typeof raw === 'string' && raw.endsWith('pt')) figureGapPt = parseFloat(raw) || figureGapPt;
-  return { font: theme.font || 'Songti SC', size, figureGapPt: Math.round(figureGapPt * 10) / 10 };
+  return { font: theme.font || 'Songti SC', size, figureGapPt: Math.round(figureGapPt * 10) / 10,
+    fieldGap: layout.fieldGap, sectionGap: layout.sectionGap };
 }
 interface ContentDoc {
+  source_review_revision?: string;
+  source_reviews?: string[];
   cover: Section;
   projects: Section[];
 }
@@ -193,7 +207,7 @@ function normalizeContentDoc(cd: any, independentNotes = false): any {
       return { ...group, fields: group.fields.map((field: any) => field === legacy
         ? { ...field, image_gallery: { ...cfg, source_field_codes: sourceCodes } } : field) };
     });
-    const normalized = migrateGalleryGroups(groups);
+    const normalized = removeLegacyImageNotes(migrateGalleryGroups(groups));
     return { ...obj, groups: independentNotes ? detachReportFigureNotes(normalized) : normalized };
   };
   return { ...cd, cover: mgGroups(cd.cover), projects: (cd.projects || []).map(mgGroups) };
@@ -219,7 +233,6 @@ function PhotoLayoutEditor({ field, ctx, orderNo, kind, headerExtra, onMutate, o
 }) {
   const hasSource = kind === 'gallery';
   const isImageField = kind === 'image_field';   // 首页 image 字段：配置散落在 field 顶层（image_*），照片在 field.image_photos
-  const hasCaption = kind === 'photo_table';      // 仅原样照片表带「加粗标签 + 说明文字」说明行
   const cfgKey = hasSource ? 'image_gallery' : 'photo_table';
   // 统一 cfg 视图：image_field 映射到 field 顶层 image_* 属性；其余读 field[cfgKey] 子对象。
   const cfg: any = isImageField
@@ -346,10 +359,7 @@ function PhotoLayoutEditor({ field, ctx, orderNo, kind, headerExtra, onMutate, o
             <span style={{ fontSize: 12, color: '#888' }}>共用标题</span>
             <AutoGrowTextArea size="small" style={{ width: 180 }} placeholder="表内标题(空=不显示)" value={sharedTitle}
               onChange={(e) => setSharedTitle(e.target.value)} />
-            {hasCaption && <>
-              <AutoGrowTextArea size="small" style={{ width: 130 }} placeholder="加粗标签(如样品描述)" value={cfg.caption_label ?? ''} onChange={(e) => setCfg({ caption_label: e.target.value })} />
-              <AutoGrowTextArea size="small" style={{ width: 180 }} placeholder="说明文字(如见原始样品照片。)" value={cfg.caption_text ?? ''} onChange={(e) => setCfg({ caption_text: e.target.value })} />
-            </>}
+
           </div>
           {hasSource ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -473,7 +483,7 @@ function ImageFieldEditor({ field, orderNo, onMutate }: { field: FieldDefinition
 function SampleTableEditor({ field, ctx, onMutate }: { field: FieldDefinition; ctx: any; onMutate: (fn: (f: FieldDefinition) => void) => void }) {
   const cfg: any = field.sample_table || {};
   const samples: any[] = Array.isArray(ctx?.order_samples) ? ctx.order_samples : [];
-  const autoCollapse = (cfg.mode || 'auto') === 'auto' && samples.length <= 1; // 单样品 auto：出报告时自动折叠本表
+  const autoCollapse = (cfg.mode || 'always') === 'auto' && samples.length <= 1; // 单样品 auto：出报告时自动折叠本表
   const notice = samples.length === 1
     ? <Alert type={autoCollapse ? 'info' : 'warning'} showIcon style={{ marginBottom: 6 }}
         message={autoCollapse
@@ -484,6 +494,9 @@ function SampleTableEditor({ field, ctx, onMutate }: { field: FieldDefinition; c
 }
 
 export default function ReportInstanceEditor() {
+  const [showSourceData, setShowSourceData] = useState(false);
+  const [sourcePdf, setSourcePdf] = useState(false);
+  const [sourceTarget, setSourceTarget] = useState<{ index: number; code?: string; token: number }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { has } = useAuth();
@@ -501,9 +514,13 @@ export default function ReportInstanceEditor() {
   const docRef = useRef<ContentDoc | null>(null);
   docRef.current = doc;
   const [original, setOriginal] = useState<ContentDoc | null>(null);
+  const [sourceSnapshot, setSourceSnapshot] = useState<ContentDoc | null>(null);
   const [meta, setMeta] = useState<{ report_no?: string; order_no?: string; version?: number; edited?: boolean; coverOnly?: boolean; warnings?: any[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const saveInFlight = useRef(false);
+  const downloadInFlight = useRef(false);
+  const [saveFailed, setSaveFailed] = useState(false);
   const [dirty, setDirty] = useState(false);
   const savedDocSnapshotRef = useRef('');
   const baselineReadyRef = useRef(false);
@@ -536,6 +553,18 @@ export default function ReportInstanceEditor() {
   const [viewerRec, setViewerRec] = useState<{ id: number; subtitle: string } | null>(null);
   // 当前聚焦的字段（供顶部"浮动格式条"操作）
   const [focused, setFocused] = useState<{ key: string; gi: number; fi: number; label: string } | null>(null);
+  const sourceChanges = useMemo(() => collectReportSourceChanges(sourceSnapshot), [sourceSnapshot]);
+  const pendingSourceChanges = sourceChanges.filter(change => !doc?.source_reviews?.includes(change.signature));
+  const openSourceData = (index?: number, code?: string) => {
+    setShowSourceData(true);
+    setSourcePdf(false);
+    const key = focused?.key || activeGroup.current?.key;
+    if (index != null) setSourceTarget({ index, code, token: Date.now() });
+    else if (key?.startsWith('proj')) setSourceTarget(current => current?.index === Number(key.slice(4)) ? current : { index: Number(key.slice(4)), token: Date.now() });
+  };
+  useEffect(() => {
+    if (showSourceData && focused?.key.startsWith('proj')) setSourceTarget({ index: Number(focused.key.slice(4)), token: Date.now() });
+  }, [focused?.key]);
   const [insertedField, setInsertedField] = useState<{ key: string; id: string } | null>(null);
   const [deletedBlockFocus, setDeletedBlockFocus] = useState<{ key: string; groupId: string; id: string; position: number; token: number; onApplied: () => void } | null>(null);
   useEffect(() => {
@@ -547,7 +576,7 @@ export default function ReportInstanceEditor() {
     setFocused({ key: insertedField.key, gi, fi, label: field.label });
     const element = [...document.querySelectorAll<HTMLElement>('[data-report-field]')].find(node => node.dataset.reportField === `${insertedField.key}/${field.id}`)
       || document.getElementById(`grp-${insertedField.key}-${gi}`);
-    element?.scrollIntoView({ block: 'nearest' });
+    revealInScrollPanes(element);
     // The newly selected visual editor mounts after this effect's state update.
     requestAnimationFrame(() => {
       const mounted = [...document.querySelectorAll<HTMLElement>('[data-report-field]')].find(node => node.dataset.reportField === `${insertedField.key}/${field.id}`)
@@ -591,38 +620,14 @@ export default function ReportInstanceEditor() {
     setLoading(true);
     try {
       const res = await axios.get(`${API}/reports/${id}`);
-      let reportData = res.data;
-      // 项目模板的生效版本变化后，直接用本报告已选范围重建项目页。
-      // 以前只有“反选→再勾选”才会显式改变 scope，用户才看到新模板；
-      // 现在按版本快照检测，选中项本身不变，仅拉取其最新生效内容。
-      if (!readOnly && !reportData.is_cover_draft) {
-        try {
-          const scopeRes = await axios.get(`${API}/reports/${id}/scope-candidates`);
-          const candidates: any[] = scopeRes.data?.candidates || [];
-          if (candidates.some(candidate => candidate.included && candidate.template_updated)) {
-            if (reportData.edited || hasContinuousText(reportData.content_doc)) {
-              message.warning('项目模板已更新；报告有人工编辑，已保留当前内容。需要更新时请手动调整报告范围并确认。');
-            } else {
-            const assignments = candidates.map(candidate => ({
-              record_data_id: candidate.record_data_id,
-              project_template_id: candidate.project_template_id,
-              enabled: !!candidate.included,
-            }));
-            await axios.post(`${API}/reports/${id}/rescope`, { assignments, refresh_from_template: true });
-            reportData = (await axios.get(`${API}/reports/${id}`)).data;
-            message.info('检测到项目模板已更新，报告内容已自动刷新');
-            }
-          }
-        } catch (refreshError: any) {
-          message.warning('项目模板自动刷新失败：' + (refreshError.response?.data?.error || refreshError.message || '未知错误'));
-        }
-      }
+      const reportData = res.data;
       const cd = normalizeContentDoc(reportData.content_doc, !readOnly);
       if (!cd) { message.error('该报告没有可编辑的实例文档（可能是旧版报告）'); return; }
       savedDocSnapshotRef.current = JSON.stringify(cd);
       baselineReadyRef.current = true;
       replaceDocBaseline(cd);
       setOriginal(normalizeContentDoc(reportData.content_doc_original, !readOnly) || cd);
+      setSourceSnapshot(normalizeContentDoc(reportData.content_doc_original, false));
       setMeta({ report_no: reportData.report_no, order_no: reportData.order_no, version: reportData.version, edited: reportData.edited, coverOnly: !!reportData.is_cover_draft, warnings: reportData.warnings || [] });
       setDirty(false);
     } catch { message.error('加载失败'); }
@@ -670,30 +675,39 @@ export default function ReportInstanceEditor() {
   const openScope = async () => {
     setScopeOpen(true); setScopeLoading(true); setScopeSearch(''); setScopeCollapsed(new Set());
     try {
-      let res = await axios.get(`${API}/reports/${id}/scope-candidates`);
-      let cands: any[] = res.data?.candidates || [];
-      const templateChanged = cands.some(candidate => candidate.included && candidate.template_updated);
-      if (templateChanged && !isDirty()) {
-        await axios.post(`${API}/reports/${id}/rescope`, {
-          refresh_from_template: true,
-          assignments: cands.map(candidate => ({
-            record_data_id: candidate.record_data_id,
-            project_template_id: candidate.project_template_id,
-            enabled: !!candidate.included,
-          })),
-        });
-        await loadReport();
-        res = await axios.get(`${API}/reports/${id}/scope-candidates`);
-        cands = res.data?.candidates || [];
-        message.info('项目模板已更新，已按当前选择自动刷新报告');
-      } else if (templateChanged) {
-        message.warning('检测到项目模板已更新；当前报告尚有未保存修改，已暂停自动刷新');
-      }
+      const res = await axios.get(`${API}/reports/${id}/scope-candidates`);
+      const cands: any[] = res.data?.candidates || [];
       setScopeCands(cands);
       setScopeSel(new Set(cands.filter(c => c.included)
         .map(c => `${Number(c.record_data_id)}:${Number(c.project_template_id)}`)));
     } catch { message.error('加载候选样品/项目失败'); setScopeCands([]); }
     finally { setScopeLoading(false); }
+  };
+  const [refreshingTemplates, setRefreshingTemplates] = useState(false);
+  const refreshProjectTemplates = () => {
+    Modal.confirm({
+      title: '刷新项目模板',
+      content: '将按当前选中的项目重新拉取最新生效模板和原始记录。首页内容会保留，项目页中的人工文字和排版修改会重置。',
+      okText: '刷新', cancelText: '取消',
+      onOk: async () => {
+        setRefreshingTemplates(true);
+        try {
+          if (isDirty() && !(await handleSave({ silent: true }))) throw new Error('当前修改未保存，请保存后重试');
+          const { data } = await axios.get(`${API}/reports/${id}/scope-candidates`);
+          if (data.template_refresh_allowed === false) throw new Error(data.template_refresh_blocked_reason || '当前报告不能刷新模板');
+          const assignments = (data.candidates || []).filter((c: any) => c.included).map((c: any) => ({
+            record_data_id: c.record_data_id, project_template_id: c.project_template_id, enabled: true,
+          }));
+          if (!assignments.length) throw new Error('当前报告没有选中的项目');
+          await axios.post(`${API}/reports/${id}/rescope`, { assignments, refresh_from_template: true });
+          await loadReport();
+          message.success('项目模板和原始记录已刷新');
+        } catch (error: any) {
+          message.error(error.response?.data?.error || error.message || '刷新失败');
+          throw error;
+        } finally { setRefreshingTemplates(false); }
+      },
+    });
   };
   const scopePairKey = (c: any) => `${Number(c.record_data_id)}:${Number(c.project_template_id)}`;
   const toggleScope = (candidate: any) => setScopeSel(prev => {
@@ -715,7 +729,7 @@ export default function ReportInstanceEditor() {
       groups = groups.map(g => {
         const sampleHit = g.sample_name.toLowerCase().includes(q) || String(g.sample_no ?? '').toLowerCase().includes(q);
         const items = sampleHit ? g.items : g.items.filter(c =>
-          String(c.project_name ?? '').toLowerCase().includes(q) || String(c.test_item_name ?? '').toLowerCase().includes(q));
+          String(c.project_name ?? '').toLowerCase().includes(q) || String(c.test_item_name ?? '').toLowerCase().includes(q) || String(c.method_name ?? '').toLowerCase().includes(q));
         return { ...g, items };
       }).filter(g => g.items.length);
     }
@@ -936,7 +950,7 @@ export default function ReportInstanceEditor() {
       setFocused({ key, gi, fi, label: field.label });
       requestAnimationFrame(() => {
         const node = [...document.querySelectorAll<HTMLElement>('[data-report-field]')].find(node => node.dataset.reportField === `${key}/${field.id}`);
-        node?.focus({ preventScroll: true }); node?.scrollIntoView({ block: 'nearest' });
+        node?.focus({ preventScroll: true }); revealInScrollPanes(node);
       });
       viewerRef.current?.scrollToMarker(`${key}::${field.code}`, `${key}::${group.id}`, markerHighlightForField(field));
     }
@@ -971,8 +985,11 @@ export default function ReportInstanceEditor() {
 
   const handleSave = async (options: { silent?: boolean } = {}): Promise<boolean> => {
     const d = docRef.current;   // 最新状态（防 onBlur 提交与点保存的竞态）
-    if (!d || !id) return false;
+    if (!d || !id || readOnly || saveInFlight.current) return false;
+    if (!isDirty()) return true;
+    saveInFlight.current = true;
     setSaving(true);
+    setSaveFailed(false);
     try {
       const result = await axios.put(`${API}/reports/${id}`, { content_doc: d }, { headers: lease.headers });
       // 保存不等于重新进入编辑器：保留进入时基线和全部撤回/重做记录。
@@ -985,12 +1002,17 @@ export default function ReportInstanceEditor() {
       baselineReadyRef.current = true;
       setDirty(JSON.stringify(docRef.current) !== savedDocSnapshotRef.current);
       setMeta(m => m ? { ...m, edited: true, version: (m.version || 1) + 1 } : m);
-      return true;
+      // 输入可能在请求期间继续发生；不能释放编辑权并遗失这些新修改。
+      const complete = JSON.stringify(docRef.current) === savedDocSnapshotRef.current;
+      if (!complete && !options.silent) message.info('还有新的修改，请再次结束编辑以保存');
+      return complete;
     } catch (e: any) {
+      setSaveFailed(true);
       if (e.response?.status === 423) message.warning(e.response?.data?.error || '该报告已由其他用户占用编辑，当前为只读');
       else message.error('保存失败：' + (e.response?.data?.error || e.message));
       return false;
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
   };
@@ -1000,11 +1022,54 @@ export default function ReportInstanceEditor() {
     isDirty,
     save: () => handleSave({ silent: true }),
   });
+  const imageRevision = JSON.stringify([doc?.cover, ...(doc?.projects || [])].filter(Boolean).map(section => ({
+    raw: pickReportImageData(section),
+    fields: (section?.groups || []).flatMap((group: any) => (group.fields || []).filter((field: any) => ['image', 'report_photo_table', 'report_image_gallery'].includes(field.type))),
+  })));
+  // Photos should not wait for the 30-second general autosave interval.
+  useEffect(() => {
+    if (loading || saving || readOnly || !baselineReadyRef.current || !isDirty()) return;
+    const timer = window.setTimeout(() => { void handleSave({ silent: true }); }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [imageRevision, loading, saving, readOnly]);
+
+  const downloadSavedReport = async () => {
+    if (downloadInFlight.current || !id) return;
+    downloadInFlight.current = true;
+    try {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      // Let input blur handlers flush their updates before taking the snapshot.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      if (!readOnly && !await handleSave({ silent: true })) {
+        message.warning('报告尚未保存完成，请等待保存完成后再导出'); return;
+      }
+      const response = await axios.get(`${API}/reports/${id}/pdf`, { responseType: 'blob' });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = `${meta?.report_no || meta?.order_no || '报告'}.pdf`;
+      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error: any) { message.error('保存或导出失败：' + (error?.message || '请重试')); }
+    finally { downloadInFlight.current = false; }
+  };
+
+  useEffect(() => {
+    const saveShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's' || event.altKey) return;
+      event.preventDefault();
+      if (readOnly || loading) return;
+      // 提交图片标题等在失焦时写入的内容，然后保存；不退出编辑。
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      void handleSave({ silent: true });
+    };
+    window.addEventListener('keydown', saveShortcut);
+    return () => window.removeEventListener('keydown', saveShortcut);
+  });
 
   // 打开「应用到已生成报告」：先保存草稿（服务端按 DB 里的草稿套用），再拉本单已生成报告列表
   const openApply = async () => {
     if (!meta?.order_no) { message.warning('缺少订单号'); return; }
-    if (dirty) { await handleSave(); }
+    if (isDirty() && !await handleSave()) return;
     try {
       // 取【本单全部取号报告】(requisitions)＋【已生成报告】(reports)：取号报告才是"应用"的对象全集，
       // 已生成的立即重渲染套用，尚未生成的（无 report_id）在生成时自动套用当前首页（external 生成 carry）。
@@ -1082,7 +1147,7 @@ export default function ReportInstanceEditor() {
   );
 
   // 大纲跳转：左侧编辑区滚到该段/分区锚点，同时右侧 PDF 预览滚到对应分区标记。
-  const scrollToAnchor = (elId: string) => document.getElementById(elId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const scrollToAnchor = (elId: string) => revealInScrollPanes(document.getElementById(elId), { behavior: 'smooth', block: 'start' });
   const restoreHistory = (action: 'undo' | 'redo' | 'reset') => {
     if (readOnly || saving || !doc) return;
     // Indexed focus targets may refer to a different field after restoring a move/delete.
@@ -1125,7 +1190,10 @@ export default function ReportInstanceEditor() {
         {!readOnly && divergence.length > 0 && (
           <Tag icon={<WarningOutlined />} color="red">偏离原始 {divergence.length} 处</Tag>
         )}
-        {!readOnly && dirty && <Tag color="red">未保存</Tag>}
+        {!readOnly && <span role="status" style={{ fontSize: 12, color: saveFailed ? '#cf1322' : '#667085' }}>
+          {saving ? '保存中…' : saveFailed ? '保存失败' : dirty ? '待自动保存' : '已保存'}
+          {saveFailed && !saving && <Button type="link" size="small" onClick={() => handleSave({ silent: true })}>重试</Button>}
+        </span>}
         {!readOnly && (
           <EditorHistoryControls
             shortcutHints
@@ -1136,7 +1204,7 @@ export default function ReportInstanceEditor() {
         )}
         <div style={{ flex: 1 }} />
         <DocumentCollaborationStatus resourceType="report_instance" resourceId={id}
-          canEdit={!permissionReadOnly} lease={lease} onSaveBeforeRelease={() => handleSave()}
+          canEdit={!permissionReadOnly} lease={lease} saving={saving} onSaveBeforeRelease={() => handleSave()}
           changes={dirty ? ['报告内容（未保存）'] : []} />
         {!readOnly && meta?.coverOnly && (
           <Tooltip title="把本首页（结构/图片/样式）应用到本订单已取号的报告里——已生成的可勾选覆盖，尚未生成的取号报告会在生成时自动套用当前首页">
@@ -1145,7 +1213,10 @@ export default function ReportInstanceEditor() {
         )}
         {!readOnly && !meta?.coverOnly && meta?.order_no && (
           <Tooltip title="重新选择本报告包含的样品 / 测试项目；确认后按新范围重算（首页检测结论表随之变化）">
-            <Button icon={<SettingOutlined />} onClick={openScope}>调整样品/项目</Button>
+            <Space>
+              <Button loading={refreshingTemplates} disabled={saving} onClick={refreshProjectTemplates}>刷新项目模板</Button>
+              <Button icon={<SettingOutlined />} onClick={openScope}>调整样品/项目</Button>
+            </Space>
           </Tooltip>
         )}
         {!readOnly && !meta?.coverOnly && meta?.order_no && (
@@ -1153,7 +1224,6 @@ export default function ReportInstanceEditor() {
             <Button danger icon={<RollbackOutlined />} onClick={openReturn}>退回原始记录</Button>
           </Tooltip>
         )}
-        {!readOnly && <Button type="primary" icon={<SaveOutlined />} loading={saving} onClick={() => handleSave()}>保存</Button>}
         {readOnly && (
           <Tooltip title="下载本报告 PDF">
             <Button icon={<DownloadOutlined />} onClick={() => id && window.open(`${API}/reports/${id}/pdf`, '_blank')}>PDF</Button>
@@ -1161,19 +1231,11 @@ export default function ReportInstanceEditor() {
         )}
       </div>
 
-      {!!meta?.warnings?.some(w => w?.type === 'record_free_grid_header_changed') && (
-        <Alert banner type="warning" showIcon style={{ flexShrink: 0 }}
-          message="原始记录录入时修改了表头名称"
-          description={<div>映射仍按稳定标识取值，请核对报告中的表头名称及对应数据，必要时修改报告。
-            {meta.warnings.filter(w => w?.type === 'record_free_grid_header_changed').map((w, i) => <div key={i}>
-              {(w.changes || []).map((change: any, j: number) => <div key={j}>{change.table}：{change.before || '（空）'} → {change.after || '（空）'}</div>)}
-            </div>)}
-          </div>} />
-      )}
-      {!!meta?.warnings?.some(w => w?.type === 'record_free_grid_structure_changed') && (
+      {(pendingSourceChanges.length > 0 || ((!sourceSnapshot || sourceSnapshot.projects.some(project => !project.ctx?.linked_record_template || !project.ctx?.record_raw_data)) && !!meta?.warnings?.some(w => w?.type === 'record_free_grid_structure_changed'))) && (
         <Alert banner type="warning" showIcon style={{ flexShrink: 0 }}
           message="原始记录录入时新增了非试样行或列"
-          description="这些临时结构已保留在原始记录中，但项目模板不会自动映射新增位置。请核对本报告项目表格，必要时在报告中补充。" />
+          description={<div>新增内容可能未包含在报告中，请查看原始数据并按需复制补充。{pendingSourceChanges.map(change => <Button key={`${change.index}/${change.code}`} size="small" type="link" onClick={() => openSourceData(change.index, change.code)}>{change.label}</Button>)}</div>}
+          action={<Button size="small" onClick={() => openSourceData(pendingSourceChanges[0]?.index, pendingSourceChanges[0]?.code)}>查看原始数据</Button>} />
       )}
 
       <div style={{ flex: 1, display: 'flex', padding: 12, minHeight: 0 }}>
@@ -1306,18 +1368,78 @@ export default function ReportInstanceEditor() {
             }}
             onPasteCapture={event => {
               if (readOnly || isReportToolbarOverlay(event.target)) return;
+              const photoCopy = readReportPhoto(event.clipboardData);
+              if (photoCopy) {
+                event.preventDefault(); event.stopPropagation();
+                const slot = (event.target as HTMLElement).closest<HTMLElement>('[data-report-photo-index]');
+                const block = slot?.closest<HTMLElement>('[data-report-field]')?.dataset.reportField;
+                if (slot && block) {
+                  const slash = block.indexOf('/'), key = block.slice(0, slash), fieldId = block.slice(slash + 1), index = Number(slot.dataset.reportPhotoIndex);
+                  mutate(d => {
+                    const section = key === 'cover' ? d.cover : d.projects[Number(key.slice(4))];
+                    const group = section?.groups.find(g => g.fields.some(f => f.id === fieldId));
+                    const field = group?.fields.find(f => f.id === fieldId);
+                    if (!field || !group || isSignatureGroup(group) || !Number.isInteger(index) || index < 0) return;
+                    if (group.section_role === 'images') {
+                      const raw = section.ctx.record_raw_data ||= {};
+                      const collection = structuredClone(findImageCollection(raw, group) || imageCollectionFromLegacy(group, raw));
+                      if (!collection.items[index]) collection.items[index] = { id: newId('photo'), title: '' };
+                      collection.items[index] = { ...collection.items[index], photo: photoCopy.photo, title: photoCopy.title };
+                      raw[imageCollectionKey(group.id)] = { ...collection, source_group_id: group.id };
+                    } else if (field.type === 'report_image_gallery') {
+                      message.info('此旧版自动图库请打开“管理图片”，选中图片框后粘贴');
+                    } else if (field.type === 'image' || field.type === 'report_photo_table') {
+                      const cfg = field.type === 'image' ? null : (field.photo_table ||= {});
+                      const per = field.type === 'image' ? field.image_title_mode === 'per' : cfg?.title_mode === 'per';
+                      if (per) {
+                        const items = field.type === 'image' ? (field.image_items ||= []) : (cfg!.items ||= []);
+                        items[index] = { ...items[index], id: items[index]?.id || newId('photo'), label: photoCopy.title, photos: [photoCopy.photo] };
+                      } else {
+                        const photos = field.type === 'image' ? (field.image_photos ||= []) : (cfg!.photos ||= []);
+                        photos[index] = photoCopy.photo;
+                      }
+                    }
+                  });
+                  return;
+                }
+                if (!(event.target as HTMLElement).closest('.report-visual-paragraph')) { message.info('请先选中图片框，或把光标放到正文中'); return; }
+                const token = newId('photo_clipboard');
+                reportFigureClipboard.set(token, { id: token, code: token, type: 'image', label: photoCopy.title || '图片', image_title_mode: 'per', image_cols: 1, image_items: [{ id: newId('photo'), label: photoCopy.title, photos: [photoCopy.photo] }] });
+                insertDocumentContent('image', { copyToken: token });
+                return;
+              }
               const token = event.clipboardData.getData(REPORT_FIGURE_MIME), field = reportFigureClipboard.get(token);
-              if (!field) return;
+              if (!field) {
+                if (!(event.target as HTMLElement).closest('.report-visual-paragraph')) return;
+                try {
+                  const tableData = reportTableClipboard(event.clipboardData.getData('text/html'), event.clipboardData.getData('text/plain'));
+                  if (!tableData) return;
+                  event.preventDefault(); event.stopPropagation();
+                  insertDocumentContent('table', { tableData });
+                } catch (error) { event.preventDefault(); event.stopPropagation(); message.warning((error as Error).message); }
+                return;
+              }
               event.preventDefault(); event.stopPropagation();
               insertDocumentContent(field.type === 'image' || field.type === 'report_photo_table' || field.type === 'report_image_gallery' ? 'image' : 'table', { copyToken: token });
             }}
-            style={{ minHeight: '100%', pointerEvents: readOnly ? 'none' : undefined }}>
+            style={{ minHeight: '100%', pointerEvents: readOnly ? 'none' : undefined,
+              fontSize: `${reportBodyLayout(doc.cover.layout_options?.theme_config).size}pt`,
+              '--report-field-gap': sectionThemeValues(doc.cover).fieldGap,
+              '--report-section-gap': sectionThemeValues(doc.cover).sectionGap,
+              '--report-paragraph-gap': reportBodyLayout(doc.cover.layout_options?.theme_config).paragraphGap } as CSSProperties}>
           {sections.map(({ key, section }) => (
             <div key={key} id={`sec-${key}`} className="report-document-section" data-report-page-break={key !== 'cover' && section.page_break !== false || undefined} style={{ marginBottom: 22, paddingTop: key === 'cover' ? 0 : 4,
               width: `${reportBodyLayout(doc.cover.layout_options?.theme_config).widthPt}pt`, marginInline: 'auto',
-              fontFamily: reportBodyLayout(doc.cover.layout_options?.theme_config).font }}>
+              fontFamily: reportBodyLayout(doc.cover.layout_options?.theme_config).font,
+              '--report-field-gap': sectionThemeValues(section).fieldGap,
+              '--report-section-gap': sectionThemeValues(section).sectionGap } as CSSProperties}>
               <div className="report-section-divider" contentEditable={false} aria-label={key === 'cover' ? '首页分隔栏' : `${section.title || section.name}分隔栏`}>
                 {key === 'cover' ? '首页' : (section.title || section.name)}
+                {key !== 'cover' && !readOnly && <AntSelect size="small" aria-label={`${section.title || section.name}分页方式`}
+                  style={{ width: 150, marginLeft: 12 }} value={section.page_break === false ? 'flow' : 'page'}
+                  options={[{ value: 'page', label: '项目另起一页' }, { value: 'flow', label: '接续上一项目' }]}
+                  onClick={event => event.stopPropagation()}
+                  onChange={value => mutate(d => { d.projects[Number(key.slice(4))].page_break = value !== 'flow'; })} />}
               </div>
               {key !== 'cover' && reportProjectHeadingValue(section) !== null && <div
                 className={`report-project-heading ${/Fandol|FangSong|SimHei|KaiTi/i.test(sectionThemeValues(doc.cover).font) ? 'report-heading-synthetic-bold' : ''}`}
@@ -1334,6 +1456,8 @@ export default function ReportInstanceEditor() {
               </div>}
               {section.groups.map((g, gi) => (
                 <div key={g.id || gi} id={`grp-${key}-${gi}`} data-report-page-break={g.page_break_before || undefined} tabIndex={g.fields.length ? undefined : 0}
+                  className={`report-group-flow ${!g.hide_title && g.label ? 'report-group-has-heading' : ''}`}
+                  style={{ '--report-group-gap': g.style?.block_spacing || sectionThemeValues(section).fieldGap } as CSSProperties}
                   onDragOver={event => {
                     if (!readOnly && draggedReportFigure?.startsWith(`${key}/`) && event.dataTransfer.types.includes('application/x-report-field')) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
                   }}
@@ -1353,6 +1477,7 @@ export default function ReportInstanceEditor() {
                   }}
                   onFocusCapture={event => {
                     if (isReportToolbarOverlay(event.target) || retainsReportTextSelection(event.target)) return;
+                    if (showSourceData && key.startsWith('proj') && activeGroup.current?.key !== key) setSourceTarget({ index: Number(key.slice(4)), token: Date.now() });
                     activeGroup.current = { key, id: g.id };
                     if (!(event.target as HTMLElement).closest('[data-report-field]')) setFocused(null);
                     if (!(event.target as HTMLElement).closest('.report-visual-paragraph, .report-paragraph-tools, .ant-dropdown')) { insertionTarget.current = null; setActiveTextToolbar(null); }
@@ -1367,15 +1492,16 @@ export default function ReportInstanceEditor() {
                 {(g.report_document || (!meta?.coverOnly && canEditContinuousText(g))) ? <ReportContinuousText
                   onBoundary={direction => navigateReportGroup(key, g.id, direction)}
                   onDeleteBoundary={direction => {
-                    for (const side of [direction, -direction] as const) {
-                      const adjacent = section.groups[gi + side];
-                      const field = side === -1 ? adjacent?.fields.at(-1) : adjacent?.fields[0];
-                      if (adjacent && field && (LABELCAP_TYPES.has(field.type) || field.type === 'image')
-                        && deleteFigureBlank(key, adjacent.id, field.id, side === -1 ? 1 : -1)) return true;
-                    }
+                    const anchor = direction === -1 ? g.fields[0] : g.fields.at(-1);
+                    if (anchor && deleteFigureBlank(key, g.id, anchor.id, direction)) return true;
+                    const adjacent = section.groups[gi + direction];
+                    const field = direction === -1 ? adjacent?.fields.at(-1) : adjacent?.fields[0];
+                    if (adjacent && field && (LABELCAP_TYPES.has(field.type) || field.type === 'image')
+                      && deleteFigureBlank(key, adjacent.id, field.id, direction === -1 ? 1 : -1)) return true;
                     return false;
                   }}
                   focusRequest={deletedBlockFocus?.key === key && deletedBlockFocus.groupId === g.id ? deletedBlockFocus : undefined}
+                  onTitleChange={title => mutate(d => { groupAt(d, key, gi).label = title; })}
                   group={g} resolve={field => resolveReportFieldValue(field, section.ctx)} readOnly={readOnly}
                   font={sectionThemeValues(doc.cover).font} size={sectionThemeValues(doc.cover).size}
                   onInsert={(kind, value, split, options) => {
@@ -1546,9 +1672,22 @@ export default function ReportInstanceEditor() {
         <Card size="small"
           style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
           styles={{ body: { flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}>
+          <div style={{ padding: 8, background: '#eef3f9', borderBottom: '1px solid #dbe3ef' }}><Segmented block value={!showSourceData ? 'report' : sourcePdf ? 'source-pdf' : 'source'} options={[{ value: 'report', label: '报告 PDF' }, { value: 'source', label: `原始数据${pendingSourceChanges.length ? ` (${pendingSourceChanges.length}待核对)` : ''}` }, { value: 'source-pdf', label: '原始记录 PDF' }]} onChange={value => { if (value === 'report') setShowSourceData(false); else { if (!showSourceData) openSourceData(); else setShowSourceData(true); setSourcePdf(value === 'source-pdf'); } }} /></div>
+          <div style={{ display: showSourceData ? 'block' : 'none', flex: 1, minHeight: 0 }}><ReportSourceDataPanel key={id} sources={sourceSnapshot?.projects || []} target={sourceTarget} readOnly={readOnly} pdf={sourcePdf}
+            reviews={sourceChanges.map(change => ({ index: change.index, code: change.code, reviewed: !!doc?.source_reviews?.includes(change.signature) }))}
+            onReview={(index, code, reviewed) => {
+              if (readOnly) return;
+              const change = sourceChanges.find(item => item.index === index && item.code === code);
+              if (!change) return;
+              mutate(d => { d.source_reviews = (d.source_reviews || []).filter(value => value !== change.signature); if (reviewed) d.source_reviews.push(change.signature); });
+            }}
+            onInsert={tableData => { if (!readOnly) { try { insertDocumentContent('table', { tableData }); } catch (error) { message.warning((error as Error).message); } } }} /></div>
+          <div style={{ display: showSourceData ? 'none' : 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
           {previewError && <Alert type="error" banner showIcon message="预览失败" description={previewError} />}
           <TypstViewer ref={viewerRef} enableSync source={typstSource} mode="view" height="100%"
+            onDownload={downloadSavedReport}
             downloadName={`${meta?.report_no || meta?.order_no || '报告'}.pdf`} />
+          </div>
         </Card>
           }
         />
@@ -1650,7 +1789,7 @@ export default function ReportInstanceEditor() {
                                     borderTop: '1px solid #f5f5f5', background: checked ? '#f6ffed' : '#fff' }}>
                                   <Checkbox checked={checked} onChange={() => toggleScope(c)} />
                                   <span style={{ fontWeight: 600 }}>{c.project_name}</span>
-                                  {c.test_item_name && <span style={{ fontSize: 12, color: '#999' }}>· {c.test_item_name}</span>}
+                                  {c.method_name && <span style={{ fontSize: 12, color: '#999' }}>· {c.method_name}</span>}
                                   {c.needs_template && <Tag color="orange" style={{ margin: 0 }}>待配置项目模板</Tag>}
                                   <div style={{ flex: 1 }} />
                                   {c.tester_name && <span style={{ fontSize: 11, color: '#bbb' }}>主检 {c.tester_name}</span>}
@@ -1746,6 +1885,7 @@ function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, on
   const [over, setOver] = useState(false);
   const [edgeCaret, setEdgeCaret] = useState<-1 | 1 | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
+  const focusPhoto = useReportPhotoFocus(frameRef);
   useEffect(() => {
     const node = frameRef.current;
     const exit = (event: Event) => {
@@ -1791,10 +1931,15 @@ function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, on
           event.currentTarget.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
         }
       }}
-      className={`fe-row ${selected ? 'fe-selected' : ''}`}
+      className={`fe-row ${showContinueEdges ? 'fe-figure-row' : ''} ${selected ? 'fe-selected' : ''}`}
       onContextMenu={() => onSelect?.()}
       onClick={(e) => {
         if (isReportToolbarOverlay(e.target)) return;
+        if (focusPhoto(e.target)) {
+          setEdgeCaret(null);
+          onSelect?.();
+          return;
+        }
         const target = reportFigureClickTarget(e.target);
         if (target === 'image') {
           frameRef.current?.focus({ preventScroll: true });
@@ -1826,7 +1971,11 @@ function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, on
         lineHeight: reportLineHeightCSS(blockStyle?.line_height),
         borderTop: `2px solid ${over ? '#1677ff' : 'transparent'}` }}
     >
-      {showContinueEdges && onEnterBeside && <ReportFigureEdges onContinue={direction => { if (onNavigate?.(direction)) return; setEdgeCaret(direction); frameRef.current?.focus({ preventScroll: true }); onSelect?.(); }} />}
+      {showContinueEdges && onEnterBeside && <ReportFigureEdges directInput onContinue={direction => {
+        setEdgeCaret(null);
+        onSelect?.();
+        onEnterBeside(direction);
+      }} />}
       {edgeCaret && selected && onEnterBeside && <span aria-label={edgeCaret === -1 ? '图表前光标' : '图表后光标'} style={{ position: 'absolute', pointerEvents: 'none', left: edgeCaret === -1 ? 12 : undefined, right: edgeCaret === 1 ? 0 : undefined, top: edgeCaret === -1 ? 0 : undefined, bottom: edgeCaret === 1 ? 0 : undefined, height: '1.2em', borderLeft: '2px solid #1677ff' }} />}
       <Tooltip title="按住拖动重排">
         <span className="fe-drag" draggable
@@ -2031,7 +2180,7 @@ function GroupEditor(props: {
     props.onFocusField(from + direction);
     if (target.rich || targetRun) focusText(target.id, direction === 1 ? 'start' : 'end');
     else node.focus({ preventScroll: true });
-    node.scrollIntoView({ block: 'nearest' });
+    revealInScrollPanes(node);
     return true;
   };
   const isImageSection = group.section_role === 'images' && group.fields.some(f => f.type === 'image');
@@ -2042,7 +2191,7 @@ function GroupEditor(props: {
   const imageInheritedSize = group.style?.size ? (parseFloat(group.style.size) || props.documentSize) : props.documentSize;
   const imageDefaultInset = group.fields.find(field => field.type === 'image')?.image_table_style?.inset_pt ?? 6;
   const inner = (
-    <div tabIndex={0} className={`fe-group-card report-document-group ${group.report_source_fields ? 'report-mixed-document' : ''} ${props.selectedFi != null || !group.fields.length ? 'report-group-active' : ''}`} style={{ fontFamily: reportFontStack(group.style?.font || props.documentFont, !!group.style?.font), fontSize: `${reportLengthPt(group.style?.size, 'pt', props.documentSize || 10) || props.documentSize || 10}pt` }}>
+    <div className={`fe-group-card report-document-group ${group.report_source_fields ? 'report-mixed-document' : ''} ${props.selectedFi != null || !group.fields.length ? 'report-group-active' : ''}`} style={{ fontFamily: reportFontStack(group.style?.font || props.documentFont, !!group.style?.font), fontSize: `${reportLengthPt(group.style?.size, 'pt', props.documentSize || 10) || props.documentSize || 10}pt` }}>
       {!props.readOnly && !props.locked && isImageSection && props.selectedFi === firstImgIdx && <ReportFigureTools>
       <ReportImageLayoutToolbar value={group.image_layout || {}} defaultInset={imageDefaultInset}
         inheritedFont={imageInheritedFont} inheritedSize={imageInheritedSize}
@@ -2059,9 +2208,10 @@ function GroupEditor(props: {
         <Button size="small">图片说明 ▾</Button>
       </ClosablePopover>}
       </ReportFigureTools>}
-      {!group.hide_title && group.label && <div className="report-section-heading">{group.label}</div>}
+      <ReportSectionHeading group={group} readOnly={props.readOnly || props.locked} onChange={title => props.onMutateGroup(g => { g.label = title; })} />
       <div>
       {group.fields.map((f, fi) => {
+        if (hideAutomaticSampleTable(f, ctx)) return null;
         const run = textRuns.find(run => run.start === fi);
         if (run) return <div key={f.id} data-report-field={`${sectionKey}/${f.id}`} data-report-page-break={f.page_break_before || undefined}>
           <ReportContinuousText group={run.group} resolve={field => resolveReportFieldValue(field, ctx)}
@@ -2070,11 +2220,12 @@ function GroupEditor(props: {
             focusRequest={props.externalTextFocus && run.ids.includes(props.externalTextFocus.id) ? props.externalTextFocus : textFocus && run.ids.includes(textFocus.id) ? textFocus : undefined}
             onBoundary={direction => navigateBlock(direction === 1 ? fi + run.ids.length - 1 : fi, direction)}
             onDeleteBoundary={direction => {
-              for (const side of [direction, -direction]) {
-                const adjacent = group.fields[side === -1 ? fi - 1 : fi + run.ids.length];
-                if (adjacent && (LABELCAP_TYPES.has(adjacent.type) || adjacent.type === 'image') && props.onDeleteFigureBlank?.(adjacent.id, side === -1 ? 1 : -1)) return true;
-                if (!adjacent && props.onDeleteGroupBoundary?.(side === -1 ? -1 : 1)) return true;
-              }
+              const anchor = group.fields[direction === -1 ? fi : fi + run.ids.length - 1];
+              if (anchor && props.onDeleteFigureBlank?.(anchor.id, direction)) return true;
+              const adjacent = group.fields[direction === -1 ? fi - 1 : fi + run.ids.length];
+              if (adjacent && (LABELCAP_TYPES.has(adjacent.type) || adjacent.type === 'image')
+                && props.onDeleteFigureBlank?.(adjacent.id, direction === -1 ? 1 : -1)) return true;
+              if (!adjacent && props.onDeleteGroupBoundary?.(direction)) return true;
               return false;
             }}
             onChange={value => {
@@ -2228,7 +2379,7 @@ function GroupEditor(props: {
         }
         if (!inner) return null;
         const directTable = (f.type === 'free_grid' || TABLE_FREE_TYPES.has(f.type))
-          && !(f.type === 'report_sample_table' && !f.free_table?.columns?.length && (f.sample_table?.mode || 'auto') === 'auto' && (ctx?.order_samples?.length || 0) <= 1);
+          && !(f.type === 'report_sample_table' && !f.free_table?.columns?.length && (f.sample_table?.mode || 'always') === 'auto' && (ctx?.order_samples?.length || 0) <= 1);
         if (directTable && !props.readOnly && !props.locked) inner = <InlineReportTable field={f} ctx={ctx}
           active={props.selectedFi === fi} onFocus={() => props.onFocusField(fi)} onMutate={fn => props.onMutateField(fi, fn)} />;
         if (!props.readOnly && !props.locked && props.selectedFi === fi && (f.type === 'image' || f.type === 'report_photo_table' || f.type === 'report_image_gallery')) {
@@ -2251,7 +2402,7 @@ function GroupEditor(props: {
               {f.rich ? <ReportRichText value={value} /> : value || (!props.readOnly && !props.locked ? <span className="report-empty-content">点击填写</span> : null)}
             </div>;
           } else if ((props.readOnly || props.locked) && (f.type === 'free_grid' || TABLE_FREE_TYPES.has(f.type))
-            && !(f.type === 'report_sample_table' && !f.free_table?.columns?.length && (f.sample_table?.mode || 'auto') === 'auto' && (ctx?.order_samples?.length || 0) <= 1)) {
+            && !(f.type === 'report_sample_table' && !f.free_table?.columns?.length && (f.sample_table?.mode || 'always') === 'auto' && (ctx?.order_samples?.length || 0) <= 1)) {
             const table = buildFreeTableFromField(f, ctx);
             inner = <div style={{ overflowX: 'auto' }}><ReadonlyGrid columns={table.columns} rows={table.rows} cells={table.cells} spans={table.spans} showHeader={f.type !== 'free_grid'} /></div>;
           } else if ((f.type === 'image' && !isImageSection) || f.type === 'report_photo_table' || f.type === 'report_image_gallery') {
@@ -2266,11 +2417,11 @@ function GroupEditor(props: {
             onChange={value => props.onFieldValue(fi, value)}
             onInsert={(kind, value, offset, split, options) => props.onInsertInParagraph(f.id, kind, value, offset, split, options)}
             onDeleteBoundary={direction => {
-              for (const side of [direction, -direction] as const) {
-                const neighbor = group.fields[fi + side];
-                if (neighbor && (LABELCAP_TYPES.has(neighbor.type) || neighbor.type === 'image') && props.onDeleteFigureBlank?.(neighbor.id, side === -1 ? 1 : -1)) return true;
-                if (!neighbor && props.onDeleteGroupBoundary?.(side === -1 ? -1 : 1)) return true;
-              }
+              if (props.onDeleteFigureBlank?.(f.id, direction)) return true;
+              const neighbor = group.fields[fi + direction];
+              if (neighbor && (LABELCAP_TYPES.has(neighbor.type) || neighbor.type === 'image')
+                && props.onDeleteFigureBlank?.(neighbor.id, direction === -1 ? 1 : -1)) return true;
+              if (!neighbor && props.onDeleteGroupBoundary?.(direction)) return true;
               return false;
             }}
             onBoundary={direction => navigateBlock(fi, direction)} />;
@@ -2337,21 +2488,21 @@ function GroupEditor(props: {
     const vAlign = group.style?.vertical_align === 'bottom' ? 'bottom'
       : group.style?.vertical_align === 'center' ? 'center' : 'flow';
     return (
-      <div style={{ position: 'relative' }}>
+      <div className="report-signature-preview" style={{ position: 'relative', border: sectionKey === 'cover' ? '1px solid #ccd8e8' : undefined, borderRadius: 6, paddingTop: sectionKey === 'cover' ? 50 : 16, paddingBottom: 16, marginTop: 32, marginBottom: 32, background: sectionKey === 'cover' ? '#f4f7fb' : undefined }}>
         <div style={{ pointerEvents: 'none', opacity: 0.6, userSelect: 'none' }} aria-disabled>{inner}</div>
         <div style={{ position: 'absolute', top: 5, right: 8, display: 'flex', alignItems: 'center', gap: 6, zIndex: 5 }}>
-          <Tooltip title="签字栏在页面上的位置：跟随正文（紧接上方内容）/ 页面居中 / 钉在页面底部">
+          <Tooltip title={sectionKey === 'cover' ? '首页底部：固定在首页；随正文：紧接正文；当前页底部：跟随正文所在页，空间不足时移至下一页底部' : '签字栏在页面上的位置'}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: '#fff', borderRadius: 6, padding: '1px 5px', boxShadow: '0 1px 5px rgba(16,40,80,0.12)' }}>
               <span style={{ fontSize: 11, color: '#888' }}>位置</span>
               <Segmented
                 size="small"
-                value={vAlign}
-                onChange={(v) => props.onMutateGroup(g => { g.style = { ...g.style, vertical_align: v === 'flow' ? undefined : (v as 'center' | 'bottom') }; })}
-                options={[{ label: '跟随正文', value: 'flow' }, { label: '居中', value: 'center' }, { label: '底部', value: 'bottom' }]}
+                disabled={props.readOnly}
+                value={sectionKey === 'cover' ? signaturePosition(group) : vAlign}
+                onChange={(v) => props.onMutateGroup(g => { if (sectionKey === 'cover') g.signature_position = v as NonNullable<FieldGroup['signature_position']>; else g.style = { ...g.style, vertical_align: v === 'flow' ? undefined : (v as 'center' | 'bottom') }; })}
+                options={sectionKey === 'cover' ? [...SIGNATURE_POSITION_OPTIONS] : [{ label: '跟随正文', value: 'flow' }, { label: '居中', value: 'center' }, { label: '底部', value: 'bottom' }]}
               />
             </span>
           </Tooltip>
-          <Tag color="default" style={{ margin: 0, background: '#fff', boxShadow: '0 1px 5px rgba(16,40,80,0.12)' }}>🔒 签发分区·系统固定</Tag>
         </div>
       </div>
     );
@@ -2509,10 +2660,12 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
     if (!grid.length) return;
     if (editingCell && grid.length === 1 && grid[0].length === 1 && !hasRange) return;
     e.preventDefault(); e.stopPropagation();
-
+    applyPastedGrid(grid, startRi, startCi);
+  };
+  const applyPastedGrid = (grid: string[][], startRi: number, startCi: number) => {
     const next: Record<string, string> = {};
     const pastedKeys: string[] = [];
-    let written = 0, overwritten = 0, skippedMerged = 0, clipped = 0;
+    let written = 0, skippedMerged = 0, clipped = 0;
     grid.forEach((sourceRow, rowOffset) => sourceRow.forEach((value, colOffset) => {
       const ri = startRi + rowOffset, ci = startCi + colOffset;
       if (ri >= rows.length || ci >= columns.length) { clipped++; return; }
@@ -2520,7 +2673,6 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
       if (!row || !col) { clipped++; return; }
       if (covered.has(`${row.id}|${col.id}`)) { skippedMerged++; return; }
       const key = `${row.id}::${col.id}`;
-      if ((cells[key] ?? '') !== '' && cells[key] !== value) overwritten++;
       next[key] = value;
       pastedKeys.push(key);
       written++;
@@ -2541,13 +2693,7 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
       if (clipped) notes.push(`超出表格范围 ${clipped} 格`);
       if (notes.length) message.warning(notes.join('；'), 6);
     };
-    if (overwritten) {
-      Modal.confirm({
-        title: '粘贴将覆盖报告中的已有内容',
-        content: `将写入 ${written} 格，其中 ${overwritten} 格已有内容。该修改只影响当前报告，是否继续？`,
-        okText: '覆盖粘贴', cancelText: '取消', onOk: apply,
-      });
-    } else apply();
+    apply();
   };
 
   // 拖拽改列宽(fr)/行高(cm)——指针捕获，与画布同款手感
@@ -2574,6 +2720,8 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
   };
   const tableMenu = {
     items: [
+      { key: 'copy', label: '复制', disabled: !sel },
+      { key: 'paste', label: '粘贴', disabled: !sel || sel.header },
       { key: 'addRow', label: '新增行', disabled: !sel },
       { key: 'addCol', label: '新增列', disabled: !sel },
       { key: 'deleteRow', label: '删除行', icon: <DeleteOutlined />, danger: true, disabled: !sel || sel.header || !rowIndex.has(sel.rowId) || rows.length <= 1 || (hasRange && bottom - top + 1 >= rows.length) },
@@ -2581,6 +2729,17 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
     ],
     onClick: ({ key }: { key: string }) => {
       if (!sel) return;
+      if (key === 'copy') {
+        if (!navigator.clipboard?.writeText) { message.info('请按 Ctrl/Cmd+C 复制'); return; }
+        const values = sel.header ? [columns.slice(left, right + 1).map(col => col.label)] : rows.slice(top, bottom + 1).map(row => columns.slice(left, right + 1).map(col => covered.has(`${row.id}|${col.id}`) ? '' : cells[`${row.id}::${col.id}`] ?? ''));
+        navigator.clipboard?.writeText(serializeSpreadsheetClipboard(values)).catch(() => message.warning('浏览器未允许复制，请按 Ctrl/Cmd+C'));
+        return;
+      }
+      if (key === 'paste' && !sel.header) {
+        if (!navigator.clipboard?.readText) { message.info('请按 Ctrl/Cmd+V 粘贴'); return; }
+        navigator.clipboard.readText().then(text => { if (text) applyPastedGrid(parseSpreadsheetClipboard(text), top, left); }).catch(() => message.warning('浏览器未允许读取剪贴板，请按 Ctrl/Cmd+V'));
+        return;
+      }
       if (key === 'addRow') addRow(sel.header ? -1 : bottom);
       if (key === 'addCol') addCol(right);
       if (key === 'deleteRow' && !sel.header) {
@@ -2662,7 +2821,7 @@ function FreeGridEditor({ columns, rows, cells, spans, onMutate, active = true, 
           onClick={() => onMutate(f => { const c = ct(f); const next = { ...c.spans }; for (const key of selectionKeys) delete next[key]; c.spans = next; })}>拆分</Button></>}
       </>}
       </ReportFigureTools>}
-      <Dropdown trigger={['contextMenu']} menu={tableMenu}><div style={{ paddingRight: 10, paddingBottom: 10, cursor: 'text' }} onClick={event => { if (event.target === event.currentTarget) { event.stopPropagation(); tableElement.current?.dispatchEvent(new CustomEvent('report-table-forward-boundary', { bubbles: true })); } }}>
+      <Dropdown trigger={['contextMenu']} menu={tableMenu}><div style={{ marginLeft: -30, width: 'calc(100% + 30px)', paddingBottom: 10, cursor: 'text' }} onClick={event => { if (event.target === event.currentTarget) { event.stopPropagation(); tableElement.current?.dispatchEvent(new CustomEvent('report-table-forward-boundary', { bubbles: true })); } }}>
       <table ref={tableElement} className="report-inline-table" style={{ borderCollapse: 'collapse', fontFamily: tableStyle?.font, fontSize: tableStyle?.font_size || 'inherit', tableLayout: 'fixed', width: flexibleTotal ? '100%' : `${fixedTotal + 22.5}pt` }}
         onCopy={event => {
           if (!sel || sel.header || (editingCell && !hasRange)) return;
@@ -2839,9 +2998,9 @@ function ReadonlyGrid({ columns, rows, cells, spans, showHeader = true }: {
   }
   return (
     <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'inherit', tableLayout: 'fixed' }}>
         {showHeader && <thead><tr>{columns.map(c => (
-          <th key={c.id} style={{ border: '1px solid #eee', padding: '3px 6px', background: '#fafafa', fontWeight: 600, textAlign: 'center' }}>{c.label || ''}</th>
+          <th key={c.id} style={{ border: '1px solid #b8bec8', padding: '4px 5px', fontWeight: 700, textAlign: 'center' }}>{c.label || ''}</th>
         ))}</tr></thead>}
         <tbody>
           {rows.length === 0 && <tr><td colSpan={Math.max(columns.length, 1)} style={{ border: '1px solid #eee', padding: 6, color: '#999', textAlign: 'center' }}>（空表）</td></tr>}
@@ -2854,7 +3013,7 @@ function ReadonlyGrid({ columns, rows, cells, spans, showHeader = true }: {
                 const rs = Math.min(Math.max(s.rowspan ?? 1, 1), rows.length - ri);
                 return (
                   <td key={c.id} colSpan={cs > 1 ? cs : undefined} rowSpan={rs > 1 ? rs : undefined}
-                    style={{ border: '1px solid #eee', padding: '3px 6px', textAlign: 'center', color: '#555', background: (cs > 1 || rs > 1) ? '#fafcff' : undefined, verticalAlign: 'middle' }}>
+                    style={{ border: '1px solid #b8bec8', padding: '4px 5px', textAlign: 'center', verticalAlign: 'middle', whiteSpace: 'pre-wrap' }}>
                     {cells[`${r.id}::${c.id}`] || ''}
                   </td>
                 );

@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { BASE_TEMPLATES } from '../../../shared/base-templates.js';
+import { BASE_TEMPLATES } from '../../../shared/base-templates.ts';
 import { generateTypst } from '../../../shared/typst-generator.js';
 
 /**

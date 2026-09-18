@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FieldDefinition, FieldGroup } from './types';
-import { detachReportFigureNotes } from './report-detached-notes';
+import { detachReportFigureNotes, removeLegacyImageNotes } from './report-detached-notes';
 import { reportRichPlainText } from './report-rich-document';
 import { makeReportManualImages, makeReportManualTable } from './report-document-editing';
 import { renderContentDoc } from './typst-generator';
@@ -28,20 +28,19 @@ test('above notes carry the page break and do not duplicate the old caption', ()
   assert.equal(result[0].fields[0].page_break_before, true);
   assert.equal(result[0].fields[1].page_break_before, undefined);
 });
-test('image notes are sibling prose without changing photo slots; composite layouts are protected', () => {
+test('image top labels remain prose but obsolete image captions are removed', () => {
   const image = makeReportManualImages('image', { imageCount: 2 });
   const source: FieldGroup[] = [{ id: 'images', label: '', hide_title: true, layout: 'vertical', section_role: 'images', page_break_before: true,
     image_layout: { top_label: '上方', caption: '下方', cols: 2 }, fields: [image] }];
   const result = detachReportFigureNotes(source);
-  assert.equal(result.length, 3);
+  assert.equal(result.length, 2);
   assert.equal(text(result[0].fields[0]), '上方');
-  assert.equal(text(result[2].fields[0]), '备注：下方');
   assert.equal(result[0].page_break_before, true);
   assert.equal(result[1].page_break_before, undefined);
   assert.deepEqual(result[1].fields, source[0].fields);
   assert.deepEqual(detachReportFigureNotes(result), result);
   source[0].module_span = 2;
-  assert.deepEqual(detachReportFigureNotes(source), source);
+  assert.deepEqual(detachReportFigureNotes(source), removeLegacyImageNotes(source));
 });
 test('insertion dimensions and image count are validated and survive reopening', () => {
   const table = makeReportManualTable('t', { rows: 5, columns: 4 });
@@ -51,4 +50,20 @@ test('insertion dimensions and image count are validated and survive reopening',
   assert.equal(JSON.parse(JSON.stringify(images)).image_photos.length, 3);
   assert.throws(() => makeReportManualTable('t', { rows: 0 }));
   assert.throws(() => makeReportManualImages('i', { imageCount: 1.5 }));
+});
+
+test('previously auto-detached image notes are deleted; independently authored notes remain', () => {
+  const groups: FieldGroup[] = [
+    { id: 'photos', label: 'Pictures', layout: 'vertical', section_role: 'images', image_layout: { caption: 'Old caption' }, fields: [{ id: 'photo', code: 'photo', type: 'image', label: 'Before' }] },
+    { id: 'photos_below_note_group', label: '', hide_title: true, layout: 'vertical', fields: [{ id: 'photos_below_note', code: 'photos_below_note', type: 'text', label: '', binding: { source: 'literal', text: 'UnwantedCaption' } }] },
+    { id: 'manual', label: '', hide_title: true, layout: 'vertical', fields: [{ id: 'note', code: 'note', type: 'text', label: '', binding: { source: 'literal', text: 'UserNote' } }] },
+  ];
+  const before = structuredClone(groups);
+  const cleaned = removeLegacyImageNotes(groups);
+  assert.deepEqual(cleaned.map(g => g.id), ['photos', 'manual']);
+  assert.deepEqual(groups, before);
+  assert.deepEqual(removeLegacyImageNotes(cleaned), cleaned);
+  const pdf = renderContentDoc({ cover: { groups, ctx: {} }, projects: [] });
+  assert.doesNotMatch(pdf, /UnwantedCaption|Old caption/);
+  assert.match(pdf, /UserNote/);
 });

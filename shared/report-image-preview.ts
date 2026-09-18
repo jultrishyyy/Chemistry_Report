@@ -59,7 +59,7 @@ export function reportImagePreview(field: FieldDefinition, ctx: any = {}): Repor
 export function reportCollectionPreview(group: FieldGroup, collection: RecordImageCollection): ReportImagePreviewModel {
   const cfg = group.image_layout || {};
   const shared = cfg.title_mode === 'shared';
-  return { ...layout(cfg), title: shared ? cfg.shared_title || '' : '', aboveText: cfg.top_label, belowText: cfg.caption,
+  return { ...layout(cfg), title: shared ? cfg.shared_title || '' : '', aboveText: cfg.top_label,
     titleStyle: cfg.label_style,
     insetX: cfg.inset_x ?? group.fields.find(field => field.type === 'image')?.image_table_style?.inset_pt ?? 6,
     insetY: cfg.inset_y ?? group.fields.find(field => field.type === 'image')?.image_table_style?.inset_pt ?? 6,

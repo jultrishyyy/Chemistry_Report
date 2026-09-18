@@ -23,32 +23,33 @@ function mergeWithEnv(base: Record<string, any>, prefix: string): Record<string,
 
 const dbBase = loadJson('database.json');
 const dbLocal = loadJson('database.local.json');
-export const dbConfig = mergeWithEnv({ ...dbBase, ...dbLocal }, 'DB');
+export const dbConfig = mergeWithEnv({ password: '', ...dbBase, ...dbLocal }, 'DB');
 
 const typstBase = loadJson('typst.json');
 export const typstConfig = mergeWithEnv(typstBase, 'TYPST');
 
-// 所有外部接口统一由 interfaces.{demo|server}.json 管理。
+// 外部接口的结构默认值只保留一份 interfaces.demo.json；实际部署值由
+// deploy/system.env 通过环境变量覆盖。这样 mock/server 不再各维护一份 JSON。
 // 未设 INTEGRATIONS_PROFILE 时安全地使用 demo（OA / SOAP 都不会真实调用）。
 const requestedProfile = String(process.env.INTEGRATIONS_PROFILE || 'demo').trim().toLowerCase();
 if (requestedProfile !== 'demo' && requestedProfile !== 'server') {
   throw new Error(`[config] INTEGRATIONS_PROFILE 只能是 demo 或 server（当前：${requestedProfile || '(空)'}）`);
 }
 export const integrationsProfile = requestedProfile === 'server' ? 'server' : 'demo';
-const interfacesProfile = loadJson(`interfaces.${integrationsProfile}.json`);
-if (integrationsProfile === 'server' && Object.keys(interfacesProfile).length === 0) {
-  throw new Error('[config] server 模式缺少 config/interfaces.server.json；拒绝回退到 mock，请复制 interfaces.server.json.example 后填写真实值。');
-}
-const interfaceConfig = integrationsProfile === 'server'
-  ? interfacesProfile
-  : (Object.keys(interfacesProfile).length ? interfacesProfile : loadJson('interfaces.demo.json'));
+const interfaceConfig = loadJson('interfaces.demo.json');
 
 // 本地认证/RBAC 策略仍在 auth.json；外部 OA 端点来自统一接口配置。
 const authBase = loadJson('auth.json');
 export const authConfig = mergeWithEnv({ ...authBase, ...(interfaceConfig.auth || {}) }, 'AUTH');
+if (integrationsProfile === 'server' && !String(authConfig.common_login_url || '').trim()) {
+  throw new Error('[config] server 模式必须配置 OA common_login_url，不能回退模拟登录');
+}
 
 // 接口 1.4 / 1.5 / 1.6（SOAP）：报告回传、撤回送审、材料任务状态通知共用配置。
 export const deliveryConfig = mergeWithEnv({ ...(interfaceConfig.report_delivery || {}) }, 'DELIVERY');
+if (integrationsProfile === 'server' && !String(deliveryConfig.soap_endpoint || process.env.DIGUI_ACCEPT_REPORT_URL || '').trim()) {
+  throw new Error('[config] server 模式必须配置 report_delivery.soap_endpoint，不能模拟外部送审或撤回成功');
+}
 /** PDF 中附件超链接使用的外部系统地址；PUBLIC_BASE_URL 可临时覆盖配置。 */
 export const publicBaseUrl = String(process.env.PUBLIC_BASE_URL ?? interfaceConfig.public_base_url ?? '').trim().replace(/\/$/, '');
 
@@ -83,7 +84,7 @@ export const headerFooterConfig: Record<string, any> = {
 };
 
 export function printConfig() {
-  console.log('[config] 外部接口配置=%s (config/interfaces.%s.json)', integrationsProfile, integrationsProfile);
+  console.log('[config] 运行模式=%s（用户配置 deploy/system.env）', integrationsProfile);
   console.log('[config] 报告取号(1.2)页眉页脚=%s', integrationsProfile === 'server' ? '严格使用 POST /api/external/reports 推送值（不回退示例）' : 'mock 示例值');
   console.log('[config] DB host=%s database=%s', dbConfig.host, dbConfig.database);
   console.log('[config] Typst binary=%s', typstConfig.binary);

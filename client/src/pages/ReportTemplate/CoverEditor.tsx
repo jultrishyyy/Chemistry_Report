@@ -104,6 +104,9 @@ export default function CoverEditor() {
     loading, saving, mockPreview, setMockPreview, viewerRef, selectRequest, setSelectRequest,
     handleSave, confirmLeave, undo, redo, reset, canUndo, canRedo, canReset, collaborationChanges,
   } = ed;
+  const openSettings = (kind: 'field' | 'group', code: string) => {
+    setSelectRequest({ kind, code, token: Date.now() });
+  };
 
   const typstPreview = useMemo(() => {
     // 页眉页脚由系统统一写死（标准版式 STANDARD_HF_LAYOUT，镜像 config/header-footer.json），
@@ -114,7 +117,7 @@ export default function CoverEditor() {
       layout_options: { ...(template.layout_options || {}), header_footer: hf },
     };
     const src = generateTypst(previewTpl);
-    if (!mockPreview) return src;
+    if (!mockPreview) return injectReportFieldsIntoTypst(src, previewTpl, {});
     // 示例数据：给原样照片表填一张样图，让预览看到带照片的图片表（真实报告由文员上传）
     return injectReportFieldsIntoTypst(src, withMockPhotoTables(previewTpl), MOCK_CTX);
   }, [template, mockPreview]);
@@ -159,7 +162,7 @@ export default function CoverEditor() {
           <ReportTemplateGroupActions templateId={Number(id)} templateKind="cover"
             groupId={meta?.report_project_family_id} disabled={readonly} onChanged={reload} />
         )}
-        <Tooltip title="开启后右侧 PDF 预览自动填充 mock 委托单数据">
+        <Tooltip title="开启后右侧 PDF 预览自动填充示例委托单数据">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
             <EyeOutlined />
             <Segmented size="small" value={mockPreview ? 'mock' : 'blank'}
@@ -213,7 +216,7 @@ export default function CoverEditor() {
         right={
           <TypstViewer ref={viewerRef} source={typstPreview} mode="view" height="calc(100vh - 50px)"
             enableSync downloadName={`${meta?.name || '首页模板'}.pdf`}
-            onMarkerClick={(m: PosMarker) => setSelectRequest({ kind: m.kind, code: m.code, token: Date.now() })} />
+            onMarkerClick={(m: PosMarker) => openSettings(m.kind, m.code)} />
         }
       />
     </div>

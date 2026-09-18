@@ -11,6 +11,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Modal, Tabs, Input, Select, Tag, Button, Empty, Space, Alert, Switch, Segmented } from 'antd';
 import type { CellBinding, RecordTemplate, FieldDefinition } from '../../../../shared/types';
 import { freeGridSourceBinding, recordSampleBands, sampleBandForCell } from '../../../../shared/free-grid-binding';
+import { sampleParameterKeys } from '../../../../shared/free-grid-parameter-binding';
 import AutoGrowTextArea from '../AutoGrowTextArea';
 
 interface Props {
@@ -35,12 +36,16 @@ interface Props {
   initialCompactTarget?: 'content' | 'unit';
   /** 单位来源是否随当前试样展开；仅逐试样目标格开启。 */
   sampleUnitMode?: boolean;
+  parameterAxisBinding?: boolean;
+  sampleSelectionShape?: { rows: number; columns: number };
+  /** Only restrict per-sample table values, keeping all general source categories available. */
+  freeGridAllowSample?: boolean;
   unitValue?: CellBinding;
   /** 当前格是否已配置内容来源；用于只编辑单位时保留“无内容映射”状态。 */
   contentValuePresent?: boolean;
   onUnitChange?: (b: CellBinding | undefined) => void;
   /** 表头文字与单位一次提交，避免两次状态更新互相覆盖。 */
-  onCombinedChange?: (value: CellBinding | undefined, unit: CellBinding | undefined) => void;
+  onCombinedChange?: (value: CellBinding | undefined, unit: CellBinding | undefined) => void | boolean;
   /**
    * P-Map-11c：绑定的是"试样带"那一行/列里的单元格时，传带子绑定的矩阵 code——
    * 弹窗会出「试样带·当前试样」tab（参数列→record_cell_sample / 样品名→record_sample_label）。
@@ -157,7 +162,7 @@ const RECORD_META_KEYS = [
 // 首页/封面是订单级、没有单一样品/项目上下文 → 隐藏它们，避免映射弹窗太杂乱（首页只留 自定义/委托单/报告接口/系统）。
 const PROJECT_ONLY_KEYS = ['sample', 'test', 'record_field', 'record_field_unit', 'record_cell', 'record_summary', 'record_free_cell', 'record_free_cell_sample', 'record_free_template_cell', 'record_free_formula_cell', 'record_free_formula_cell_sample', 'record_free_cell_unit', 'record_free_cell_unit_sample'];
 
-export default function BindingPickerModal({ open, value, linkedRecord, onChange, onClose, allowedSources, title, freeGridFieldCode, bandMatrixCode, compactFreeGrid = false, initialCompactTarget = 'content', sampleUnitMode = false, unitValue, contentValuePresent = true, onUnitChange, onCombinedChange }: Props) {
+export default function BindingPickerModal({ open, value, linkedRecord, onChange, onClose, allowedSources, title, freeGridFieldCode, bandMatrixCode, compactFreeGrid = false, initialCompactTarget = 'content', sampleUnitMode = false, parameterAxisBinding = false, sampleSelectionShape, freeGridAllowSample = true, unitValue, contentValuePresent = true, onUnitChange, onCombinedChange }: Props) {
   // 从 value 推断初始 tab
   const initialTab = (() => {
     if (value.source === 'literal') return 'literal';
@@ -179,15 +184,16 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
   })();
   const [tab, setTab] = useState(initialTab);
 
-  useEffect(() => { if (open) setTab(initialTab); /* eslint-disable-next-line */ }, [open]);
+  useEffect(() => { if (open) setTab(initialCompactTarget === 'unit' && onCombinedChange ? '__unit' : initialTab); /* eslint-disable-next-line */ }, [open, initialCompactTarget]);
 
   // 当前临时值（本地编辑，确定后提交）
-  const [draft, setDraft] = useState<CellBinding>(value);
-  useEffect(() => { if (open) setDraft(value); }, [open, value]);
+  const [draft, setDraftState] = useState<CellBinding>(value);
+  const setDraft = (binding: CellBinding) => { setContentTouched(true); setDraftState(binding); };
+  useEffect(() => { if (open) setDraftState(value); }, [open, value]);
   const [unitDraft, setUnitDraft] = useState<CellBinding | undefined>(unitValue);
   const [compactTarget, setCompactTarget] = useState<'content' | 'unit'>(initialCompactTarget);
   const [contentTouched, setContentTouched] = useState(false);
-  const [contentSourceMode, setContentSourceMode] = useState<'free_grid' | 'record_field'>(value.source === 'record_field' ? 'record_field' : 'free_grid');
+  const [contentSourceMode, setContentSourceMode] = useState<'free_grid' | 'record_field' | 'literal'>(value.source === 'literal' ? 'literal' : value.source === 'record_field' ? 'record_field' : 'free_grid');
   const unitModeOf = (binding?: CellBinding): 'free_grid' | 'record_field' | 'literal' =>
     binding?.source === 'record_field_unit' ? 'record_field' : binding?.source === 'literal' ? 'literal' : 'free_grid';
   const [unitSourceMode, setUnitSourceMode] = useState<'free_grid' | 'record_field' | 'literal'>(unitModeOf(unitValue));
@@ -205,7 +211,7 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
       setUnitDraft(unitValue);
       setCompactTarget(initialCompactTarget);
       setContentTouched(false);
-      setContentSourceMode(value.source === 'record_field' ? 'record_field' : 'free_grid');
+      setContentSourceMode(value.source === 'literal' ? 'literal' : value.source === 'record_field' ? 'record_field' : 'free_grid');
       setUnitSourceMode(unitModeOf(unitValue));
       setRecordDataMode(recordDataModeOf(value));
     }
@@ -225,11 +231,11 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
     const list: FieldDefinition[] = [];
     for (const g of linkedRecord.groups) {
       for (const f of g.fields) {
-        if (f.type === 'free_grid' && f.free_table && (!freeGridFieldCode || f.code === freeGridFieldCode)) list.push(f);
+        if (f.type === 'free_grid' && f.free_table && (!sampleSelectionShape || recordSampleBands(f.free_table).length === 1) && (!freeGridFieldCode || f.code === freeGridFieldCode)) list.push(f);
       }
     }
     return list;
-  }, [linkedRecord, freeGridFieldCode]);
+  }, [linkedRecord, freeGridFieldCode, sampleSelectionShape]);
   const unitFreeGridFields = useMemo(() => freeGridFields.filter(field => {
     const ft = field.free_table;
     return !!ft && (Object.values(ft.cell_units || {}).some(unit => !!unit?.trim())
@@ -278,7 +284,9 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
   const canCommit = !contentCommitRequired || (draftAllowed && draftComplete);
   const commit = () => {
     if (!canCommit) return;
-    if (onCombinedChange) onCombinedChange(contentValuePresent || contentTouched ? draft : undefined, unitDraft);
+    if (onCombinedChange) {
+      if (onCombinedChange(contentValuePresent || contentTouched ? draft : undefined, unitDraft) === false) return;
+    }
     else {
       onChange(draft);
       onUnitChange?.(unitDraft);
@@ -323,7 +331,7 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
       <Modal
         title={compactTarget === 'unit'
           ? '设置单位'
-          : title?.includes('逐试样') ? '选择每个试样的数据来源' : '选择内容来源'}
+          : title || '选择内容来源'}
         open={open}
         onCancel={onClose}
         onOk={commit}
@@ -338,19 +346,28 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
             <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 3 }}>内容来源</div>
             <BindingSummary value={draft} linkedRecord={linkedRecord} />
           </div>
-          <div style={sourceSlotStyle(compactTarget === 'unit')} onClick={() => setCompactTarget('unit')}>
+          <div style={sourceSlotStyle(compactTarget === 'unit')} onClick={() => { if (!parameterAxisBinding) setCompactTarget('unit'); }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, color: '#8c8c8c', marginBottom: 3 }}>
               <span>单位</span>
-              {unitDraft && <Button type="link" danger size="small" style={{ height: 18, padding: 0 }} onClick={(e) => { e.stopPropagation(); setUnitDraft(undefined); }}>清除</Button>}
+              {!parameterAxisBinding && unitDraft && <Button type="link" danger size="small" style={{ height: 18, padding: 0 }} onClick={(e) => { e.stopPropagation(); setUnitDraft(undefined); }}>清除</Button>}
             </div>
-            {unitDraft ? <BindingSummary value={unitDraft} linkedRecord={linkedRecord} /> : <span style={{ color: '#bfbfbf' }}>未设置</span>}
+            {parameterAxisBinding ? <span>自动跟随每个试样的来源单位</span> : unitDraft ? <BindingSummary value={unitDraft} linkedRecord={linkedRecord} /> : <span style={{ color: '#bfbfbf' }}>未设置</span>}
           </div>
         </div>
+        {parameterAxisBinding && <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message={sampleSelectionShape ? "点击来源列号／行号，蓝色范围即将映射到目标选区" : "点击来源参数表头，或试样区内的数据格"}
+          description={sampleSelectionShape ? "确认时自动建立试样映射，无需先设置区域。多个参数从所选位置起连续对应；单位自动跟随。" : "确认后统一更新该参数在试样区域内的来源与单位，表头文字保持不变。"} />}
         {compactTarget === 'content' ? <>
           <Tabs
-            activeKey={contentSourceMode}
-            onChange={(key) => setContentSourceMode(key as 'free_grid' | 'record_field')}
+            activeKey={parameterAxisBinding ? 'free_grid' : contentSourceMode}
+            onChange={(key) => setContentSourceMode(key as 'free_grid' | 'record_field' | 'literal')}
             items={[
+              ...(!allowedSources || allowedSources.includes('literal') ? [{
+                key: 'literal', label: '自定义文字',
+                children: <Input.TextArea value={draft.source === 'literal' ? draft.text : ''}
+                  placeholder="输入表头或单元格文字" autoSize={{ minRows: 2, maxRows: 6 }}
+                  onChange={e => setDraft({ source: 'literal', text: e.target.value })} />,
+              }] : []),
               {
                 key: 'free_grid',
                 label: '原始记录表格',
@@ -359,9 +376,11 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
                   value={draft}
                   onPick={(binding) => { setContentTouched(true); setDraft(binding); }}
                   allowFixed={!allowedSources || allowedSources.includes('record_free_cell')}
-                  allowSample={!allowedSources || allowedSources.includes('record_free_cell_sample')}
-                  allowTemplate={!allowedSources || allowedSources.includes('record_free_template_cell')}
+                  allowSample={freeGridAllowSample && (!allowedSources || allowedSources.includes('record_free_cell_sample'))}
+                  allowTemplate={!parameterAxisBinding && (!allowedSources || allowedSources.includes('record_free_template_cell'))}
                   onPickUnit={setUnitDraft}
+                  parameterAxis={parameterAxisBinding}
+                  sampleSelectionShape={sampleSelectionShape}
                   compact
                 />,
               },
@@ -430,12 +449,15 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
       styles={{ body: { maxHeight: 'calc(100vh - 160px)', overflowY: 'auto' } }}
       destroyOnClose
     >
+      {parameterAxisBinding && <Alert type="info" showIcon style={{ marginBottom: 12 }}
+        message="点击来源列号／行号选择整条试样参数；也可选择其他字段来源"
+        description="参数来源的公式和单位自动跟随；通用信息或固定文字统一应用到选中的试样格。" />}
       <Tabs
         className="binding-picker-source-tabs"
         popupClassName="binding-picker-tabs-popup"
         tabPosition="left"
         size="small"
-        activeKey={isVisible(tab) ? tab : fallbackTab}
+        activeKey={tab === '__unit' && onCombinedChange ? tab : isVisible(tab) ? tab : fallbackTab}
         onChange={(k) => {
           setTab(k);
           // 切 tab 时重置 draft 为该 source 的初始结构
@@ -455,6 +477,15 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
           else if (k === 'record_table') { /* keep draft; pick by clicking a cell/summary */ }
         }}
         items={[
+          ...(onCombinedChange && !parameterAxisBinding ? [{ key: '__unit', label: '单位设置', children: <>
+            <Segmented value={unitSourceMode} onChange={mode => setUnitSourceMode(mode as typeof unitSourceMode)}
+              options={[{ value: 'free_grid', label: '表格单位' }, { value: 'record_field', label: '字段单位' }, { value: 'literal', label: '手动填写' }]} />
+            <Button type="link" onClick={() => setUnitDraft(undefined)}>清除单位</Button>
+            {unitSourceMode === 'literal' && <Input value={unitDraft?.source === 'literal' ? unitDraft.text : ''} placeholder="例如 MPa" onChange={e => setUnitDraft({ source: 'literal', text: e.target.value })} />}
+            {unitSourceMode === 'record_field' && <RecordScalarFieldPicker groups={scalarFieldsByGroup} value={unitDraft || { source: 'literal', text: '' }} onPick={setUnitDraft} unitOnly />}
+            {unitSourceMode === 'free_grid' && <FreeGridCellPicker fields={unitFreeGridFields} value={unitDraft || { source: 'literal', text: '' }} onPick={setUnitDraft}
+              allowFixed={false} allowSample={false} allowTemplate={false} unitOnly sampleUnit={sampleUnitMode} compact={false} />}
+          </> }] : []),
           {
             key: 'literal',
             label: '固定文字',
@@ -662,8 +693,11 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
                     value={draft}
                     onPick={setDraft}
                     allowFixed={!allowedSources || allowedSources.includes('record_free_cell')}
-                    allowSample={!allowedSources || allowedSources.includes('record_free_cell_sample')}
-                    allowTemplate={!allowedSources || allowedSources.includes('record_free_template_cell')}
+                    allowSample={freeGridAllowSample && (!allowedSources || allowedSources.includes('record_free_cell_sample'))}
+                    allowTemplate={!parameterAxisBinding && (!allowedSources || allowedSources.includes('record_free_template_cell'))}
+                    onPickUnit={onCombinedChange ? setUnitDraft : undefined}
+                    parameterAxis={parameterAxisBinding}
+                    sampleSelectionShape={sampleSelectionShape}
                     unitOnly={false}
                     compact={false}
                   />
@@ -677,7 +711,7 @@ export default function BindingPickerModal({ open, value, linkedRecord, onChange
               </div>
             ) : <Empty />,
           },
-        ].filter(it => isVisible(it.key))}
+        ].filter(it => it.key === '__unit' || isVisible(it.key))}
       />
 
       {/* 底部预览当前选中的绑定 */}
@@ -1038,7 +1072,7 @@ function BandCellPicker({ matrixField, value, onPick }: {
   );
 }
 
-function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, allowTemplate, unitOnly = false, sampleUnit = false, onPickUnit, compact = false }: {
+export function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, allowTemplate, unitOnly = false, sampleUnit = false, onPickUnit, compact = false, parameterAxis = false, sampleSelectionShape }: {
   fields: FieldDefinition[];
   value: CellBinding;
   onPick: (b: CellBinding) => void;
@@ -1049,6 +1083,8 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
   sampleUnit?: boolean;
   onPickUnit?: (b: CellBinding | undefined) => void;
   compact?: boolean;
+  parameterAxis?: boolean;
+  sampleSelectionShape?: { rows: number; columns: number };
 }) {
   const [fieldCode, setFieldCode] = useState(
     (value.source === 'record_free_cell' || value.source === 'record_free_cell_sample' || value.source === 'record_free_template_cell' || value.source === 'record_free_formula_cell' || value.source === 'record_free_formula_cell_sample' || value.source === 'record_free_cell_unit' || value.source === 'record_free_cell_unit_sample')
@@ -1069,6 +1105,23 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
   const sampleIndexCells = ft?.sample_index_cells || {};
   const headerCells = ft?.header_cells || {};
   const bands = ft ? recordSampleBands(ft) : [];
+  const parameterBand = parameterAxis && allowSample && !unitOnly && bands.length === 1 ? bands[0] : undefined;
+  const [parameterAnchor, setParameterAnchor] = useState<{ field: string; key: string }>();
+  const parameterKeysFor = (key: string) => {
+    if (!ft || !parameterBand) return [];
+    const [row, col] = key.split('::');
+    const axis = parameterBand.axis;
+    const parameters = axis === 'row' ? cols : rows;
+    const start = parameters.findIndex(item => item.id === (axis === 'row' ? col : row));
+    const count = sampleSelectionShape ? axis === 'row' ? sampleSelectionShape.columns : sampleSelectionShape.rows : 1;
+    if (start < 0 || start + count > parameters.length) return [];
+    const groups = parameters.slice(start, start + count).map(item => sampleParameterKeys(ft, parameterBand,
+      axis === 'row' ? `${parameterBand.refs[0]}::${item.id}` : `${item.id}::${parameterBand.refs[0]}`));
+    return groups.some(keys => keys.length !== parameterBand.refs.length) ? [] : groups.flat();
+  };
+  const activeParameterKeys = new Set(parameterBand && 'field_code' in value && value.field_code === field?.code
+    && 'cell_key' in value && ['record_free_cell_sample', 'record_free_formula_cell_sample'].includes(value.source)
+    ? parameterKeysFor(value.cell_key) : parameterBand && value.source === 'record_sample_index' && parameterAnchor?.field === field?.code ? parameterKeysFor(parameterAnchor!.key) : []);
   const covered = (() => {
     const rowIdx = new Map(rows.map((r, i) => [r.id, i]));
     const colIdx = new Map(cols.map((c, i) => [c.id, i]));
@@ -1113,7 +1166,7 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
           if (headerCells[candidateKey]) { nearestHeaderKey = candidateKey; break; }
         }
         if (nearestHeaderKey !== key) continue;
-        const sampleKey = band.refs.map(rowId => `${rowId}::${cid}`).find(k => (!!inputCells[k] || !!formulaCells[k]) && !!ft && !!sampleBandForCell(ft, k));
+        const sampleKey = band.refs.map(rowId => `${rowId}::${cid}`).find(k => !headerCells[k] && !!ft && !!sampleBandForCell(ft, k));
         if (sampleKey) return sampleKey;
       } else {
         if (band.refs.includes(cid)) continue;
@@ -1128,7 +1181,7 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
           if (headerCells[candidateKey]) { nearestHeaderKey = candidateKey; break; }
         }
         if (nearestHeaderKey !== key) continue;
-        const sampleKey = band.refs.map(colId => `${rid}::${colId}`).find(k => (!!inputCells[k] || !!formulaCells[k]) && !!ft && !!sampleBandForCell(ft, k));
+        const sampleKey = band.refs.map(colId => `${rid}::${colId}`).find(k => !headerCells[k] && !!ft && !!sampleBandForCell(ft, k));
         if (sampleKey) return sampleKey;
       }
     }
@@ -1188,8 +1241,10 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
   };
   const canPick = (key: string) => !!bindingForClick(key);
   const pick = (key: string) => {
-    const binding = bindingForClick(key);
+    let binding = bindingForClick(key);
     if (!binding) return;
+    if (sampleSelectionShape && field && binding.source === 'record_sample_index') binding = { source: 'record_free_cell_sample', field_code: field.code, cell_key: sampleCellForClick(key) || key };
+    if (parameterBand) setParameterAnchor({ field: field!.code, key });
     onPick(binding);
     if (onPickUnit && 'cell_key' in binding && 'field_code' in binding) {
       const sourceKey = binding.cell_key;
@@ -1220,6 +1275,9 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
             ? '点击录入格或“录入可改”的固定文字格，可绑定这个固定位置的值。未修改的固定文字会使用模板默认值。'
             : '点击来源格：试样区域的数据自动逐试样读取；表头读取文字，区域外的内容固定读取。'}
       />}
+      {parameterBand && <Alert type="info" showIcon style={{ marginBottom: 10 }}
+        message={parameterBand.axis === 'row' ? '点击列号，选中该列在试样区域内的全部数据' : '点击行号，选中该行在试样区域内的全部数据'}
+        description={sampleSelectionShape ? `蓝色范围对应目标 ${sampleSelectionShape.rows} 行 × ${sampleSelectionShape.columns} 列；多个参数从点击位置起连续对应，试样数量自动跟随原始记录。` : "蓝色范围是参数来源，不包含表头和区域外的共享内容。点击参数表头也可选择同一范围。"} />}
       <Space style={{ marginBottom: 12, flexWrap: 'wrap' }}>
         <span style={{ color: '#595959', fontWeight: 600 }}>{field?.label || '原始记录表格'}</span>
         {fields.length > 1 && <Select
@@ -1231,9 +1289,23 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
       </Space>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', minWidth: 520 }}>
+          {parameterBand?.axis === 'row' && <thead><tr>{cols.map((col, index) => {
+            const keys = parameterKeysFor(`${rows[0]?.id}::${col.id}`);
+            const selected = keys.length > 0 && keys.every(key => activeParameterKeys.has(key));
+            return <th key={col.id} style={{ padding: 4, background: selected ? '#e6f4ff' : '#fafafa', border: '1px solid #d9d9d9' }}>
+              <Button size="small" type={selected ? 'primary' : 'text'} disabled={!keys.length}
+                aria-label={`选择第${index + 1}列试样数据`} aria-pressed={selected}
+                onClick={() => pick(keys[0])}>第{index + 1}列</Button>
+            </th>;
+          })}</tr></thead>}
           <tbody>
             {rows.map((r, ri) => (
               <tr key={r.id}>
+                {parameterBand?.axis === 'col' && <th style={{ padding: 4, background: '#fafafa', border: '1px solid #d9d9d9' }}>
+                  <Button size="small" type={parameterKeysFor(`${r.id}::${cols[0]?.id}`).some(key => activeParameterKeys.has(key)) ? 'primary' : 'text'}
+                    disabled={!parameterKeysFor(`${r.id}::${cols[0]?.id}`).length} aria-label={`选择第${ri + 1}行试样数据`}
+                    onClick={() => pick(parameterKeysFor(`${r.id}::${cols[0]?.id}`)[0])}>第{ri + 1}行</Button>
+                </th>}
                 {cols.map((c, ci) => {
                   if (covered.has(`${ri},${ci}`)) return null;
                   const key = `${r.id}::${c.id}`;
@@ -1244,14 +1316,16 @@ function FreeGridCellPicker({ fields, value, onPick, allowFixed, allowSample, al
                   const isInput = !!inputCells[key];
                   const isFixedText = !!ft?.fixed_text_cells?.[key] || (!isHeader && !isInput && !formulaCells[key]);
                   const band = inBand(key);
-                  const selected = fixedSelected(key) || templateSelected(key) || unitSelected(key) || formulaSelected(key) || sampleSelected(key);
+                  const selected = (parameterBand && ['record_sample_index', 'record_free_cell_sample', 'record_free_formula_cell_sample'].includes(value.source)) ? activeParameterKeys.has(key) : activeParameterKeys.has(key) || fixedSelected(key) || templateSelected(key) || unitSelected(key) || formulaSelected(key) || sampleSelected(key);
                   const pickable = canPick(key);
-                  const sampleByHeader = !!(isHeader && sampleCellForClick(key));
+                  const sampleByHeader = !!(!allowTemplate && isHeader && sampleCellForClick(key));
                   const configuredUnit = ft?.cell_units?.[key] || ft?.cell_unit_options?.[key]?.join(' / ');
                   const isFormula = !!formulaCells[key];
                   return (
                     <td
                       key={key}
+                      data-source-cell={key}
+                      data-source-selected={selected || undefined}
                       colSpan={colspan > 1 ? colspan : undefined}
                       rowSpan={rowspan > 1 ? rowspan : undefined}
                       onClick={() => pick(key)}

@@ -1,0 +1,42 @@
+const assert = require('node:assert/strict');
+const { JSDOM } = require('../client/node_modules/jsdom');
+const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' });
+for (const key of ['window', 'document', 'navigator', 'HTMLElement']) Object.defineProperty(global, key, { configurable: true, value: dom.window[key] });
+global.IS_REACT_ACT_ENVIRONMENT = true;
+global.localStorage = { getItem() { throw Error('Storage denied'); }, setItem() { throw Error('Quota exceeded'); } };
+const React = require('../client/node_modules/react');
+global.React = React;
+const { createRoot } = require('../client/node_modules/react-dom/client');
+const EditorSplit = require('../client/src/components/EditorSplit.tsx').default;
+const root = createRoot(document.getElementById('root'));
+async function pointer(node, type, x = 0, button = 0) {
+  const event = new dom.window.MouseEvent(type, { bubbles: true, clientX: x, button });
+  Object.defineProperty(event, 'pointerId', { value: 1 });
+  await React.act(async () => node.dispatchEvent(event));
+}
+(async () => {
+  await React.act(async () => root.render(React.createElement(EditorSplit, { left: 'left', right: 'right' })));
+  const split = document.querySelector('[data-editor-split-root]');
+  const [left, handle] = split.children;
+  split.getBoundingClientRect = () => ({ left: 0, width: 1000 });
+  handle.setPointerCapture = () => {};
+  handle.hasPointerCapture = () => false;
+  assert.equal(left.style.width, '45%', 'disabled storage uses fallback width');
+  await pointer(handle, 'pointerdown');
+  await pointer(handle, 'pointermove', 650);
+  assert.equal(left.style.width, '65%', 'storage write failure does not prevent resizing');
+  await pointer(handle, 'pointercancel');
+  await pointer(handle, 'pointermove', 300);
+  assert.equal(left.style.width, '65%', 'cancelled drag must stop');
+  await pointer(handle, 'pointerdown');
+  await pointer(handle, 'lostpointercapture');
+  await pointer(handle, 'pointermove', 300);
+  assert.equal(left.style.width, '65%', 'lost capture must stop dragging');
+  await pointer(handle, 'pointerdown', 0, 2);
+  await pointer(handle, 'pointermove', 300);
+  assert.equal(left.style.width, '65%', 'right click must not resize');
+  await pointer(handle, 'dblclick');
+  assert.equal(left.style.width, '45%');
+  await React.act(async () => root.unmount());
+  console.log('Editor split: unavailable storage, resizing, cancellation, lost capture and reset passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

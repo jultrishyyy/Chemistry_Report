@@ -63,12 +63,12 @@ test('direct pictures and photo tables preserve shared/per titles, photos, capti
   assert.ok(source.indexOf('direct.png') < source.indexOf('后面的正文'));
   assert.ok(!source.includes('data.source'));
 });
-test('modern image collections retain all items and notes without modifying their source', () => {
+test('modern image collections retain images but omit legacy implicit captions without modifying their source', () => {
   const group: FieldGroup = { id: 'g', label: '', layout: 'vertical', fields: [imageField], image_layout: { title_mode: 'shared', shared_title: '图片集合', top_label: '检测前', caption: '下方说明' } };
   const collection: any = { kind: 'image_collection', version: 1, items: [{ id: 'a', title: 'A', photo: photo('first') }, { id: 'b', title: 'B', photo: photo('second') }] };
   const before = JSON.stringify(collection);
   const model = reportCollectionPreview(group, collection);
-  assert.equal(model.items.length, 2); assert.equal(model.aboveText, '检测前'); assert.equal(model.belowText, '下方说明');
+  assert.equal(model.items.length, 2); assert.equal(model.aboveText, '检测前'); assert.equal(model.belowText, undefined);
   assert.equal(JSON.stringify(collection), before);
   assert.equal(reportPreviewPhotoSrc({ rel_path: '图片/a.png' }), '/api/images/file?p=%E5%9B%BE%E7%89%87%2Fa.png');
   assert.equal(reportPreviewPhotoSrc({ rel_path: '../private' }), undefined);

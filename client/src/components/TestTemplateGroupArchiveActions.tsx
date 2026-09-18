@@ -3,6 +3,7 @@ import { AuditOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons';
 import { Button, Input, Modal, Radio, Space, Tooltip, message } from 'antd';
 import axios from 'axios';
 import { useAuth } from '../auth';
+import { isDatabaseId } from '../../../shared/database-id';
 
 const errorMessage = (error: unknown, fallback: string) => {
   if (axios.isAxiosError<{ error?: string }>(error)) return error.response?.data?.error || error.message || fallback;
@@ -38,8 +39,14 @@ export default function TestTemplateGroupArchiveActions({ group, onRefresh, kind
   const [decision, setDecision] = useState<'approve' | 'reject'>('approve');
   const [reviewNote, setReviewNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const checkGroup = () => {
+    if (isDatabaseId(group.id)) return true;
+    message.warning('项目组信息已更新，请刷新页面后重试。');
+    return false;
+  };
 
   const requestArchive = async () => {
+    if (!checkGroup()) return;
     setBusy(true);
     try {
       await axios.post(`${apiBase}/${group.id}/archive-request`, {
@@ -57,6 +64,7 @@ export default function TestTemplateGroupArchiveActions({ group, onRefresh, kind
     content: `将撤回“${group.name}”的删除申请，项目组继续正常使用。`,
     okText: '撤回申请', cancelText: '取消',
     onOk: async () => {
+      if (!checkGroup()) return;
       try {
         await axios.post(`${apiBase}/${group.id}/archive-request/cancel`);
         message.success('删除申请已撤回'); await onRefresh();
@@ -65,6 +73,7 @@ export default function TestTemplateGroupArchiveActions({ group, onRefresh, kind
   });
 
   const reviewArchive = async () => {
+    if (!checkGroup()) return;
     if (decision === 'reject' && !reviewNote.trim()) {
       message.warning('驳回时请填写原因'); return;
     }

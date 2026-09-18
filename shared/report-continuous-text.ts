@@ -19,7 +19,7 @@ const simpleStyle = (style: object | undefined, paragraph = false) => !style || 
 /** Do not flatten tables, signatures, columns or styles the text schema cannot preserve. */
 export function canEditContinuousText(group: FieldGroup): boolean {
   return (!group.report_source_fields || !!group.report_document) && group.layout === 'vertical' && !!group.fields?.length && !group.image_layout
-    && group.fields.every(f => ordinary.has(f.type) && !f.signature_line && !f.field_gap
+    && group.fields.every(f => ordinary.has(f.type) && !f.cover_text_styles && !f.signature_line && !f.field_gap
       && (!f.rich || !f.unit)
       // Older saved overrides may already contain a flattened page break. Keep
       // them renderable; reject NEW conversions instead of breaking old PDFs.

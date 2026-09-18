@@ -2,7 +2,7 @@ import pg from 'pg';
 import { readFileSync, readdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { dbConfig } from '../config/index.js';
+import { dbConfig, integrationsProfile } from '../config/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const migrationsDir = resolve(__dirname, 'migrations');
@@ -21,6 +21,7 @@ async function run() {
   const client = await pool.connect();
 
   try {
+    await client.query("SELECT set_config('cdr.integrations_profile', $1, false)", [integrationsProfile]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS _migrations (
         id SERIAL PRIMARY KEY,

@@ -21,6 +21,7 @@ import TemplatePdfPreviewModal from '../../components/TemplatePdfPreviewModal';
 import { useListPagination } from '../../hooks/useListPagination';
 import ReportProjectFamilyManagerModal from '../../components/ReportProjectFamilyManagerModal';
 import TestTemplateGroupArchiveActions from '../../components/TestTemplateGroupArchiveActions';
+import { visibleReportGroups } from '../../utils/reportGroupVisibility';
 
 const STATUS_COLOR: Record<string, string> = { draft: 'default', pending: 'orange', rejected: 'red' };
 const STATUS_LABEL: Record<string, string> = { draft: '草稿', pending: '待审核', rejected: '已退回' };
@@ -131,6 +132,7 @@ export default function ReportTemplateList() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState<false | 'cover' | 'project' | 'cover_page'>(false);
   const [creating, setCreating] = useState(false);
+  const [createHostManufacturerId, setCreateHostManufacturerId] = useState<number | undefined>();
   const [form] = Form.useForm();
   const [linkingRow, setLinkingRow] = useState<ReportTemplate | null>(null);
   const [linkingId, setLinkingId] = useState<number | undefined>();
@@ -142,6 +144,9 @@ export default function ReportTemplateList() {
   const [createReportGroup, setCreateReportGroup] = useState<ReportProjectGroup | null>(null);
   const openCreate = (kind: 'cover' | 'project', group?: ReportProjectGroup | null) => {
     form.resetFields();
+    // 项目组弹窗关闭后，创建表单才会挂载。主机厂使用独立状态保存，避免
+    // preserve=false 的未挂载字段丢失预填值。
+    setCreateHostManufacturerId(group?.host_manufacturer_id ?? undefined);
     setCreateReportGroup(group || null);
     setCreateOpen(kind);
   };
@@ -183,7 +188,7 @@ export default function ReportTemplateList() {
         layout_options: { blocks: [] },
       };
       // 显式传递关联；后端以 null 表示未设置，避免主机厂值在创建过程中被遗漏。
-      payload.host_manufacturer_id = values.host_manufacturer_id ?? null;
+      payload.host_manufacturer_id = createHostManufacturerId ?? null;
       payload.report_project_family_id = createReportGroup?.id ?? null;
       if (createOpen === 'project') {
         payload.linked_record_template_id = values.linked_record_template_id;
@@ -205,7 +210,7 @@ export default function ReportTemplateList() {
         payload.field_definitions = src.field_definitions || [];
         payload.layout_options = src.layout_options || payload.layout_options;
         // 复制现有模板且未主动指定时，沿用其主机厂归属，避免同一套模板拆出无归属副本。
-        if (!payload.host_manufacturer_id && src.host_manufacturer_id) {
+        if (payload.host_manufacturer_id == null && src.host_manufacturer_id) {
           payload.host_manufacturer_id = src.host_manufacturer_id;
         }
       }
@@ -215,6 +220,7 @@ export default function ReportTemplateList() {
         : '创建成功');
       setCreateOpen(false);
       setCreateReportGroup(null);
+      setCreateHostManufacturerId(undefined);
       form.resetFields();
       load();
       if (createOpen === 'project') {
@@ -265,7 +271,7 @@ export default function ReportTemplateList() {
   const renderTable = (allRows: ReportTemplate[], kind: 'cover' | 'project' | 'cover_page') => {
     const rows = applyTemplateSearch(allRows.filter(t => !hostFilter || t.host_manufacturer_id === hostFilter), search);
     const visibleTemplates = filter === 'all' ? rows : filterTemplateRows(rows, filter, user?.display_name);
-    const groupsForKind = reportGroups.filter(group => group.template_kind === kind);
+    const groupsForKind = visibleReportGroups(reportGroups, kind);
     const groupedTemplateIds = new Set(groupsForKind.flatMap(group =>
       (group.templates || []).map(template => Number(template.id))));
     const keyword = search.keyword?.trim().toLowerCase();
@@ -285,8 +291,8 @@ export default function ReportTemplateList() {
             const childTimes = children.map(template => activityTs(template));
             const groupTime = new Date(group.updated_at || 0).getTime();
             return [{
-              ...group, id: reportGroupRowKey(group.id), family_id: Number(group.id),
-              _row_type: 'report_group', method_count: group.templates?.length || 0,
+              ...group, template_kind: kind, id: reportGroupRowKey(group.id), family_id: Number(group.id),
+              _row_type: 'report_group', method_count: allRows.filter(t => Number(t.report_project_family_id) === Number(group.id)).length,
               visible_method_count: children.length,
               last_activity: new Date(Math.max(Number.isFinite(groupTime) ? groupTime : 0, ...childTimes)).toISOString(),
               children,
@@ -515,7 +521,7 @@ export default function ReportTemplateList() {
         {
           title: '流程操作', width: COL_WIDTH.workflow, fixed: 'right' as const, align: 'center' as const,
           render: (_: any, row: ReportTemplate) => {
-            if (isReportGroupRow(row)) return <TestTemplateGroupArchiveActions kind="report" group={row as any} onRefresh={load}/>;
+            if (isReportGroupRow(row)) return <TestTemplateGroupArchiveActions kind="report" group={{ ...row, id: row.family_id } as any} onRefresh={load}/>;
             const editorBase = row.template_kind === 'project' ? '/report-templates/project/editor' : '/report-templates/cover/editor';
             return (
               <Space size={4} className="table-row-actions table-workflow-actions">
@@ -618,7 +624,7 @@ export default function ReportTemplateList() {
       <Modal
         title={createOpen === 'project' ? '新建项目模板' : '新建首页模板'}
         open={!!createOpen}
-        onCancel={() => { setCreateOpen(false); setCreateReportGroup(null); form.resetFields(); }}
+        onCancel={() => { setCreateOpen(false); setCreateReportGroup(null); setCreateHostManufacturerId(undefined); form.resetFields(); }}
         onOk={handleCreate}
         confirmLoading={creating}
         destroyOnClose
@@ -630,9 +636,11 @@ export default function ReportTemplateList() {
           </Form.Item>
           {createReportGroup && <Alert type="info" showIcon style={{marginBottom:12}}
             message={`新模板将加入项目组“${createReportGroup.name}”`} />}
-          <Form.Item name="host_manufacturer_id" label="主机厂（可不选）">
+          <Form.Item label="主机厂（可不选）">
             <Space.Compact style={{ width: '100%' }}>
               <Select allowClear showSearch optionFilterProp="label" placeholder="选择主机厂" style={{ width: '100%' }}
+                value={createHostManufacturerId}
+                onChange={(value) => setCreateHostManufacturerId(value)}
                 options={manufacturers.map(m => ({ value: m.id, label: `${m.name}${m.category ? ` · ${m.category}` : ''}` }))} />
               <Button onClick={() => { setEditingFactory(null); factoryForm.resetFields(); setFactoryEditorOpen(true); setFactoryOpen(true); }}>新建</Button>
             </Space.Compact>
@@ -695,7 +703,7 @@ export default function ReportTemplateList() {
               const values = await factoryForm.validateFields(); setFactorySaving(true);
               const res = editingFactory ? await axios.put(`${API}/host-manufacturers/${editingFactory.id}`, values) : await axios.post(`${API}/host-manufacturers`, values);
               setManufacturers(prev => editingFactory ? prev.map(x => x.id === editingFactory.id ? res.data : x) : [...prev, res.data].sort((a, b) => a.name.localeCompare(b.name)));
-              form.setFieldValue('host_manufacturer_id', res.data.id); message.success(editingFactory ? '已修改' : '已新增');
+              setCreateHostManufacturerId(res.data.id); message.success(editingFactory ? '已修改' : '已新增');
               setEditingFactory(null); factoryForm.resetFields(); setFactoryEditorOpen(false);
             } catch (e: any) { message.error(e.response?.data?.error || '保存失败'); } finally { setFactorySaving(false); }
                 }}>{editingFactory ? '保存修改' : '确认新增'}</Button>

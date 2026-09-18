@@ -1,10 +1,17 @@
 import { Form, Input, Switch, Select as AntSelect, Button, Space, Tag, InputNumber, Radio, Alert, Tabs, DatePicker, Tooltip, Modal } from 'antd';
 import dayjs from 'dayjs';
+import { useEquipmentSearch } from '../../hooks/useEquipmentSearch';
+import { equipmentCodes } from '../../../../shared/equipment-search';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PlusOutlined, DeleteOutlined, HolderOutlined, SnippetsOutlined, LinkOutlined, ArrowUpOutlined, ArrowDownOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useDrag, useDrop } from 'react-dnd';
 import type { FieldDefinition, RecordTemplate } from '../../../../shared/types';
 import AutoGrowTextArea from '../AutoGrowTextArea';
+import { formatChoiceValue } from '../../../../shared/choice-display';
+import { canArrangeRecordField } from '../../../../shared/record-layout';
+import CoverInlineEditor from '../ReportEditor/CoverInlineEditor';
+import { coverCanEditInline } from '../../../../shared/cover-template-editing';
+import { storedReportRichDocument } from '../../../../shared/report-rich-document';
 import {
   FIELD_CATEGORIES,
   categoriesForGroup,
@@ -130,35 +137,25 @@ type EquipmentOption = {
 /** 原始记录模板：为 device_ref 配置常用设备。保存的始终是设备管理编号，不复制设备名称等易变信息。 */
 function DeviceRefConfigEditor({ field, onChange }: { field: FieldDefinition; onChange: (patch: Partial<FieldDefinition>) => void }) {
   const config = field.device_ref_config || {};
-  const presetCodes = useMemo(() => config.preset_asset_codes || [], [config.preset_asset_codes]);
+  const presetCodes = useMemo(() => equipmentCodes(config.preset_asset_codes), [config.preset_asset_codes]);
   const [options, setOptions] = useState<EquipmentOption[]>([]);
-  const [loading, setLoading] = useState(false);
+  const { keyword, setKeyword: searchEquipment, items: searchItems, loading, error: searchError } = useEquipmentSearch();
 
   useEffect(() => {
     if (!presetCodes.length) return;
     fetch(`/api/equipment/lookup?codes=${encodeURIComponent(presetCodes.join(','))}`)
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((rows: EquipmentOption[]) => setOptions(prev => {
+        if (!Array.isArray(rows)) return prev;
         const merged = new Map(prev.map(item => [item.asset_code, item]));
-        rows.forEach(item => merged.set(item.asset_code, item));
+        rows.forEach(item => { if (typeof item?.asset_code === 'string' && typeof item?.name === 'string') merged.set(item.asset_code, item); });
         return Array.from(merged.values());
       }))
       .catch(() => undefined);
   }, [presetCodes]);
 
-  const searchEquipment = (keyword: string) => {
-    if (!keyword.trim()) return;
-    setLoading(true);
-    fetch(`/api/equipment?keyword=${encodeURIComponent(keyword.trim())}&limit=30`)
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => setOptions(prev => {
-        const merged = new Map(prev.map(item => [item.asset_code, item]));
-        (data.items || []).forEach((item: EquipmentOption) => merged.set(item.asset_code, item));
-        return Array.from(merged.values());
-      }))
-      .catch(() => undefined)
-      .finally(() => setLoading(false));
-  };
+  // Details of selected values are retained separately; previous search hits are not candidates.
+  const visibleOptions = keyword.trim() ? searchItems : options.filter(item => presetCodes.includes(item.asset_code));
 
   const setConfig = (patch: Partial<NonNullable<FieldDefinition['device_ref_config']>>) =>
     onChange({ device_ref_config: { ...config, ...patch } });
@@ -181,8 +178,8 @@ function DeviceRefConfigEditor({ field, onChange }: { field: FieldDefinition; on
           onSearch={searchEquipment}
           onChange={codes => setConfig({ preset_asset_codes: codes })}
           placeholder="搜索并选择常用设备"
-          notFoundContent={loading ? '搜索中…' : '输入关键字搜索设备库'}
-          options={options.map(item => ({
+          notFoundContent={loading ? '搜索中…' : searchError || (keyword.trim() ? '未找到匹配设备' : '输入关键字搜索设备库')}
+          options={visibleOptions.map(item => ({
             value: item.asset_code,
             label: `${item.name}${item.model ? `（${item.model}）` : ''} — ${item.asset_code}${item.status ? ` [${item.status}]` : ''}`,
           }))}
@@ -291,7 +288,7 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
         />
       )
     ) : (
-      <AutoGrowTextArea value={field.default_value || ''} onChange={(e) => onChange({ default_value: e.target.value || undefined })} />
+      <AutoGrowTextArea autoSize={{ minRows: 3, maxRows: 12 }} value={field.default_value ?? ''} onChange={(e) => onChange({ default_value: e.target.value || undefined })} />
     )
   );
 
@@ -355,15 +352,15 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
         {field.conclusion_role && (
           <Tooltip title="该标记用于稳定生成报告；修改字段名称或在文本/选择之间切换都不会断开映射。">
             <Tag color="green" style={{ margin: 0 }}>结论模块字段 · {{
-              project_name: '总项目名称', item_name: '子项目名称', judgment_requirement: '判定要求', conclusion: '结论',
+              project_name: '总项目名称', item_name: '子项目名称', judgment_requirement: '判定要求', limit: '限值', conclusion: '结论',
             }[field.conclusion_role]}</Tag>
           </Tooltip>
         )}
-        {!isReportMode && !field.semantic_role && !['data_matrix', 'free_grid', 'image', 'device_ref', 'record_conclusion', 'static_content', 'spacer'].includes(field.type) && (
-          <Tooltip title="设为公共后，该字段在同一个项目录入批次中只保存一份；切换不同测试方法原始记录时自动显示同一值。系统会自动匹配各模板中的相同字段。">
-            <span style={{ fontSize: 12, color: '#888' }}>批次公共字段
+        {!isReportMode && !field.semantic_role && !['data_matrix', 'free_grid', 'image', 'record_conclusion', 'static_content', 'spacer'].includes(field.type) && (
+          <Tooltip title="允许同一项目的其他原始记录手动拉取已保存的内容。填充后各份记录独立保存，后续修改不会同步。">
+            <span style={{ fontSize: 12, color: '#888' }}>允许其他记录拉取
               <Switch size="small" style={{ marginLeft: 6 }} checked={field.data_scope === 'batch_shared'}
-                onChange={(checked) => onChange({ data_scope: checked ? 'batch_shared' : undefined })} />
+                onChange={(checked) => onChange({ data_scope: checked ? 'batch_shared' : 'record' })} />
             </span>
           </Tooltip>
         )}
@@ -378,6 +375,9 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
   const basicMetaBlock = (
     <>
       {/* 复杂类型（设备/图片表/图片组）在此给一个标签输入；简单值/时间范围在「字段名/字段值」编辑、非图片表格在「标签」Tab。 */}
+      {editorMode === 'record' && canArrangeRecordField(field) && <Form.Item label="独占一行">
+        <Switch checked={!!field.full_width} onChange={full_width => onChange({ full_width })} />
+      </Form.Item>}
       {!isSimpleValue && !isDateRange && !hasLabelNoteTabs && (
         <Form.Item label="标签（显示名称）">
           <AutoGrowTextArea value={field.label} onChange={(e) => onChange({ label: e.target.value })} />
@@ -1021,11 +1021,11 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
     configTab = (
       <Form layout="vertical" size="small">
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
-          message="样品信息表（首页·多样品自动出表）"
-          description="多样品时自动列出每个样品的 样品编号 / 样品名称 / 零件号（取自委托单接口 SampleSortNo / SampleName / Model）；单样品自动折叠（首页直接显示那一个样品）。放在检测结论表之前即可。" />
+          message="样品信息表"
+          description="默认列出报告对应样品的编号、名称和零件号，只有一个样品也显示。可按需要选择单样品时折叠。" />
         <Form.Item label="单/多样品" tooltip="自动＝多样品出表、单样品折叠（首页直接显示样品名称/零件号）。始终显示＝不论几个样品都出表。">
           <Radio.Group optionType="button" buttonStyle="solid" size="small"
-            value={st.mode || 'auto'}
+            value={st.mode || 'always'}
             onChange={(e) => setST({ mode: e.target.value })}
             options={[{ label: '自动（多样品出表 / 单样品折叠）', value: 'auto' }, { label: '始终显示', value: 'always' }]} />
         </Form.Item>
@@ -1436,7 +1436,7 @@ function RecordConclusionConfigEditor({ field, onChange }: {
       name_mode: cfg.mode === 'overall' ? 'inherit_project' : 'custom',
       name: cfg.mode === 'children' ? `子项目${seq}` : undefined,
       allow_name_override: true,
-      judgment_options: ['客户要求', '标准要求'],
+      judgment_options: ['标准要求', '客户要求'],
       conclusion_options: ['符合', '不符合'],
       judgment_required: true,
       conclusion_required: true,
@@ -1446,7 +1446,7 @@ function RecordConclusionConfigEditor({ field, onChange }: {
   const changeMode = (mode: 'overall' | 'children') => {
     const existing = cfg.items.length ? cfg.items : [{
       id: `conclusion_${Date.now()}`, code: 'overall', judgment_required: true, conclusion_required: true, default_report_enabled: true,
-      judgment_options: ['客户要求', '标准要求'], conclusion_options: ['符合', '不符合'],
+      judgment_options: ['标准要求', '客户要求'], conclusion_options: ['符合', '不符合'],
     }];
     const items = mode === 'overall'
       ? [{ ...existing[0], code: existing[0].code || 'overall', name_mode: 'inherit_project' as const, name: undefined }]
@@ -1459,7 +1459,7 @@ function RecordConclusionConfigEditor({ field, onChange }: {
           judgment_enabled: true,
           conclusion_enabled: true,
           judgment_requirement: existing[0]?.judgment_requirement,
-          judgment_options: existing[0]?.judgment_options || ['客户要求', '标准要求'],
+          judgment_options: existing[0]?.judgment_options || ['标准要求', '客户要求'],
           conclusion_options: existing[0]?.conclusion_options || ['符合', '不符合'],
           judgment_required: false,
           conclusion_required: false,
@@ -1511,7 +1511,7 @@ function RecordConclusionConfigEditor({ field, onChange }: {
               onChange={(event) => setProjectSummary({ judgment_requirement: event.target.value || undefined })} />
           </Form.Item>
           <Form.Item label="总项目判定要求常用选项" style={{ marginBottom: 8 }}>
-            <AntSelect mode="tags" value={projectSummary.judgment_options || ['客户要求', '标准要求']}
+            <AntSelect mode="tags" value={projectSummary.judgment_options || ['标准要求', '客户要求']}
               onChange={(values) => setProjectSummary({ judgment_options: values })} />
           </Form.Item>
         </>}
@@ -1588,6 +1588,9 @@ function ReportValueSource({ field, linkedRecord, onChange }: {
   // binding 被 picker 改成非自定义后，intent 跟到「抓取」（保持显示一致）
   const mode = !isLiteral ? 'fetch' : intent;
   const literalText = field.binding && field.binding.source === 'literal' ? (field.binding.text || '') : '';
+  if (field.rich && coverCanEditInline(field) && storedReportRichDocument(literalText)) {
+    return <CoverInlineEditor field={field} sources={[]} onChange={text => onChange({ binding: { source: 'literal', text } })} />;
+  }
   return (
     <>
       <Form.Item label="来源" style={{ marginBottom: 8 }}
@@ -1693,6 +1696,24 @@ function ChoiceEditor({
               打开后实验人员可选「其他」并手动输入
             </span>
           </Form.Item>
+          {mode === 'multi' && <>
+            <Form.Item label="选中内容排版"><AntSelect value={field.choice_display?.layout || 'inline'} options={[{ value: 'inline', label: '同一行，用符号分隔' }, { value: 'lines', label: '每项一行' }]} onChange={layout => onChange({ choice_display: { ...field.choice_display, layout } })} /></Form.Item>
+            {field.choice_display?.layout === 'lines' ? <>
+              <Form.Item label="行首标记"><AntSelect value={field.choice_display.marker || 'none'} options={[{ value: 'none', label: '无' }, { value: 'number', label: '编号：1. 2. 3.' }, { value: 'number_parentheses', label: '编号：（1）（2）（3）' }, { value: 'bullet', label: '分点：•' }]} onChange={marker => onChange({ choice_display: { ...field.choice_display, marker } })} /></Form.Item>
+              <Form.Item label="每项结尾符号"><Input value={field.choice_display.ending ?? ''} placeholder="可填句号、逗号、分号，或留空" onChange={e => onChange({ choice_display: { ...field.choice_display, ending: e.target.value } })} /></Form.Item>
+              {field.choice_display.marker && field.choice_display.marker !== 'none' && <div style={{ border: '1px solid #dce2eb', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                  <span>仅选一项时显示行首标记</span>
+                  <Switch aria-label="仅选一项时显示行首标记" checked={field.choice_display.show_marker_for_single !== false}
+                    onChange={show_marker_for_single => onChange({ choice_display: { ...field.choice_display, show_marker_for_single } })} />
+                </div>
+                <div style={{ color: '#888', fontSize: 12, marginTop: 12, marginBottom: 6 }}>仅选一项时的显示效果</div>
+                <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', background: '#f5f7fa', padding: 10, borderRadius: 4 }}>
+                  {formatChoiceValue((field.options?.length ? field.options : ['选项一']).slice(0, 1), field.choice_display)}
+                </div>
+              </div>}
+            </> : <Form.Item label="分隔符"><Input value={field.choice_display?.separator ?? '、'} placeholder="可填顿号、逗号、分号、空格等" onChange={e => onChange({ choice_display: { ...field.choice_display, separator: e.target.value } })} /></Form.Item>}
+          </>}
         </>
       )}
     </>

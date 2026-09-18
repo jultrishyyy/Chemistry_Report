@@ -4,7 +4,12 @@ import { resolve, dirname } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { integrationsProfile, printConfig } from '../../config/index.js';
-import { pool } from './db.js';
+import { pool, poolPolicy } from './db.js';
+import { createReadinessProbe } from './services/readiness.js';
+import { requestMetrics } from './services/request-metrics.js';
+import { getRenderQueueStats, getMemoryCacheStats, getDiskCacheStats, drainRenderQueue } from './services/typst-compiler.js';
+import { createGracefulShutdown } from './services/graceful-shutdown.js';
+import { positiveInteger } from './services/render-queue.js';
 import { log } from './logger.js';
 import { requestLogger, apiNotFound, errorHandler } from './middleware.js';
 import typstRouter from './routes/typst.js';
@@ -22,7 +27,7 @@ import workOrdersRouter from './routes/work-orders.js';
 import auditLogRouter from './routes/audit-log.js';
 import reworkRouter from './routes/rework.js';
 import externalRouter from './routes/external.js';
-import authRouter from './routes/auth.js';
+import authRouter, { requirePermission } from './routes/auth.js';
 import templateAssetsRouter from './routes/template-assets.js';
 import collaborationRouter from './routes/collaboration.js';
 import testMethodsRouter from './routes/test-methods.js';
@@ -33,13 +38,23 @@ import { seedReportTemplates } from './services/seed-report-templates.js';
 import { seedWorkOrders } from './services/seed-work-orders.js';
 import { seedMockBySample } from './services/seed-mock-by-sample.js';
 import { startTaskStateDeliveryRetryWorker } from './services/external-task-state.js';
+import { servePrecompressedAssets } from './services/static-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const HOST = process.env.HOST || '0.0.0.0';
+let shutdown: ReturnType<typeof createGracefulShutdown> | undefined;
 
 app.use(cors());
+app.use((req, res, next) => {
+  if (shutdown?.isStopping() && req.path !== '/api/health') {
+    res.set({ 'Retry-After': '5', Connection: 'close', 'Cache-Control': 'no-store' })
+      .status(503).json({ error: '系统正在更新，请稍后重试', status: 'stopping' });
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(requestLogger);  // 请求日志（结构化，健康检查除外）
 
@@ -57,6 +72,24 @@ app.get('/api/health', (_req, res) => {
     timestamp: new Date().toISOString(),
     integrations_profile: integrationsProfile,
     report_meta_source: integrationsProfile === 'server' ? 'external_interface' : 'mock',
+  });
+});
+
+// Liveness above remains independent of database availability. Do not restart-loop on DB outages.
+const checkReadiness = createReadinessProbe(pool);
+app.get('/api/ready', async (_req, res) => {
+  const result = await checkReadiness();
+  if (shutdown?.isStopping()) { res.set('Cache-Control', 'no-store').status(503).json({ status: 'stopping' }); return; }
+  res.set('Cache-Control', 'no-store').status(result.status === 'ready' ? 200 : 503).json(result);
+});
+app.get('/api/operations/metrics', requirePermission('user.manage'), (_req, res) => {
+  res.set('Cache-Control', 'no-store').json({
+    timestamp: new Date().toISOString(), uptime_seconds: process.uptime(),
+    process_memory_bytes: process.memoryUsage(), cpu_microseconds_since_start: process.cpuUsage(),
+    requests: requestMetrics.snapshot(),
+    database: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount,
+      max: poolPolicy.max, connection_timeout_ms: poolPolicy.connectionTimeoutMillis },
+    render_queue: getRenderQueueStats(), memory_cache: getMemoryCacheStats(), disk_cache: getDiskCacheStats(),
   });
 });
 
@@ -88,8 +121,15 @@ app.use(apiNotFound);
 // Serve frontend build (production mode)
 const clientDist = resolve(__dirname, '../../client/dist');
 if (existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  const clientAssets = resolve(clientDist, 'assets');
+  app.use('/assets', servePrecompressedAssets(clientAssets));
+  app.use('/assets', express.static(clientAssets, { index: false, maxAge: '1y', immutable: true,
+    setHeaders: res => { res.setHeader('Vary', 'Accept-Encoding'); } }));
+  app.use(express.static(clientDist, { index: false, maxAge: '1h', setHeaders: (res, path) => {
+    if (path.endsWith('/index.html')) res.setHeader('Cache-Control', 'no-cache');
+  } }));
   app.get(/^\/(?!api).*/, (_req, res) => {
+    res.set('Cache-Control', 'no-cache');
     res.sendFile(resolve(clientDist, 'index.html'));
   });
   log.info('[static] serving frontend', { dir: clientDist });
@@ -101,10 +141,10 @@ if (existsSync(clientDist)) {
 app.use(errorHandler);
 
 printConfig();
-startTaskStateDeliveryRetryWorker();
+const stopTaskStateWorker = startTaskStateDeliveryRetryWorker();
 
 // 启动 seed 复用共享连接池（不再单建临时池）；共享池是长生命周期单例，跑完不 end()
-Promise.all([
+const seedCompletion = integrationsProfile === 'demo' ? Promise.all([
   // 报告模板 seed 必须紧跟原始记录之后（project 按原始记录 name 反查关联 id），故串在同一条链上
   seedBaseTemplates(pool)
     .then(() => seedReportTemplates(pool))
@@ -112,8 +152,26 @@ Promise.all([
   seedWorkOrders(pool).catch(err => console.error('[seed] work orders failed:', err)),
 ])
   // 演示用「按样品出」订单：需模板已 seed（匹配项目模板）+ 源单存在，故放在最后跑
-  .then(() => seedMockBySample(pool).catch(err => console.error('[seed] mock by-sample failed:', err)));
+  .then(() => seedMockBySample(pool).catch(err => console.error('[seed] mock by-sample failed:', err))) : Promise.resolve();
 
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   log.info('server running', { url: `http://${HOST}:${PORT}` });
 });
+shutdown = createGracefulShutdown({
+  timeoutMs: positiveInteger(process.env.SHUTDOWN_TIMEOUT_MS, 60000),
+  drainHttp: () => new Promise<void>((resolveDrain, reject) => {
+    server.close(error => {
+      if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolveDrain();
+    });
+    server.closeIdleConnections();
+  }),
+  stopBackground: async () => { await Promise.all([stopTaskStateWorker(), seedCompletion]); },
+  drainRender: drainRenderQueue,
+  closeDatabase: () => pool.end(),
+  forceClose: () => server.closeAllConnections(),
+  exit: code => process.exit(code),
+  report: message => log.info('lifecycle', { message }),
+});
+process.on('SIGTERM', () => { void shutdown!.stop('SIGTERM'); });
+process.on('SIGINT', () => { void shutdown!.stop('SIGINT'); });

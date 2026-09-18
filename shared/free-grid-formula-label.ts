@@ -1,6 +1,7 @@
 import type { FieldDefinition, Formula } from './types';
 import { resolveFreeGridCellReference } from './free-grid-formula';
 import { formulaRangeLabel } from './formula-grid-selection';
+import { mapFormulaCode } from './spreadsheet-expression';
 type Table = NonNullable<FieldDefinition['free_table']>;
 export function freeGridAddress(table: Table, key: string): string {
   return formulaRangeLabel(table, [key]) || '已删除的格子';
@@ -19,7 +20,7 @@ export function freeGridFormulaLabel(formula: Formula, owner: string, tableOf: (
       const alias = formula.params?.source_aliases?.[source];
       if (typeof alias === 'string') replacements[alias] = labels[i];
     });
-    return '=' + String(formula.expression || '').replace(/^=\s*/, '').replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, token => replacements[token] ?? token);
+    return '=' + mapFormulaCode(String(formula.expression || '').replace(/^=\s*/, ''), code => code.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, token => replacements[token] ?? token));
   }
   const table = tableOf(owner);
   const compact = table && sources.every(source => resolveFreeGridCellReference(source, owner).fieldCode === owner) ? formulaRangeLabel(table, sources) : undefined;

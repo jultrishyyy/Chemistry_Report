@@ -40,6 +40,13 @@ function toAuthUser(d: any): AuthUser {
   };
 }
 
+/** OA uses values such as 0/"0" to mean there is no password reminder. */
+export function visiblePasswordTip(value: unknown): string {
+  if (value == null || value === false || value === 0) return '';
+  const text = String(value).trim();
+  return /^(?:0[!！]?|false|null|undefined)$/i.test(text) ? '' : text;
+}
+
 interface AuthCtx {
   user: AuthUser | null;
   loading: boolean;
@@ -126,7 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(u);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(u));
     // OA 返回的「密码超期」提示（非空＝需提醒用户改密码）
-    if (res.data?.modify_pwd_tips) message.warning(String(res.data.modify_pwd_tips), 6);
+    const passwordTip = visiblePasswordTip(res.data?.modify_pwd_tips);
+    if (passwordTip) message.warning(passwordTip, 6);
   };
 
   const logout = () => { setUser(null); localStorage.removeItem(STORAGE_KEY); };

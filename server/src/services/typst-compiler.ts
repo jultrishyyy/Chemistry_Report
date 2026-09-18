@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { writeFileSync, readFileSync, unlinkSync, mkdtempSync, rmdirSync, existsSync, readdirSync, mkdirSync, renameSync, statSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, mkdtempSync, rmdirSync, existsSync, readdirSync, statSync } from 'fs';
 import { join, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -7,8 +7,11 @@ import { createHash } from 'crypto';
 import { MOCK_IMAGE_DIR } from '../../../shared/mock-data.js';
 import { UPLOAD_IMAGE_PATH_PREFIX } from '../../../shared/typst-generator.js';
 import { uploadsDir } from '../../../config/index.js';
+import { RenderQueue, RenderCancelledError, positiveInteger } from './render-queue.js';
+import { ByteLru } from '../../../shared/byte-lru.js';
+import { PdfDiskCache } from './pdf-disk-cache.js';
 
-// 项目字体目录（demo_v1/fonts）：拷字体文件进去即可被 typst 加载。详见 fonts/README.md。
+// 项目字体目录（demo_v1/fonts）：随 Docker 镜像提供给 Typst，维护方式见《部署说明》字体章节。
 // 一旦本目录里有字体文件，就【只用本目录】渲染（--ignore-system-fonts）——让报告版面在任何服务器上一致，
 // 不受该机器系统字体影响。若本目录没有字体（如刚 clone、字体被 gitignore），回退到系统字体（原行为，不锁定）。
 const FONTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'fonts');
@@ -76,43 +79,18 @@ interface CompileError {
 // 并发闸门：每次 spawn 一个 typst CLI 子进程都是 CPU 密集型操作。无上限时，
 // 200 人同时生成报告会 fork 出 200 个进程把机器打爆。这里用信号量把同时在跑的
 // typst 进程数限制在 TYPST_MAX_CONCURRENCY（默认 4），超出的请求排队等待，逐个执行。
-const MAX_CONCURRENCY = Math.max(1, Number(process.env.TYPST_MAX_CONCURRENCY || 4));
-let active = 0;
-const waiters: Array<() => void> = [];
-
-function acquireSlot(): Promise<void> {
-  if (active < MAX_CONCURRENCY) {
-    active++;
-    return Promise.resolve();
-  }
-  return new Promise<void>((res) => waiters.push(res));
-}
-
-function releaseSlot(): void {
-  const next = waiters.shift();
-  if (next) next();        // 槽位转交给排队者，active 计数不变
-  else active--;
-}
-
-/** 在并发闸门内执行 fn：拿不到槽位就排队，跑完（成功或失败）释放槽位。 */
-async function runWithLimit<T>(fn: () => Promise<T>): Promise<T> {
-  await acquireSlot();
-  try {
-    return await fn();
-  } finally {
-    releaseSlot();
-  }
-}
+const renderQueue = new RenderQueue(
+  positiveInteger(process.env.TYPST_MAX_CONCURRENCY, 4),
+  positiveInteger(process.env.TYPST_MAX_QUEUE, 40),
+  positiveInteger(process.env.TYPST_QUEUE_TIMEOUT_MS, 15000),
+);
+export const getRenderQueueStats = () => renderQueue.stats();
+export const drainRenderQueue = () => renderQueue.drain();
 
 const LRU_MAX = 100;
-const cache = new Map<string, Buffer>();
-
-function evictIfNeeded() {
-  if (cache.size >= LRU_MAX) {
-    const firstKey = cache.keys().next().value!;
-    cache.delete(firstKey);
-  }
-}
+const cache = new ByteLru<Buffer>(LRU_MAX,
+  positiveInteger(process.env.TYPST_MEMORY_CACHE_MB, 128) * 1024 * 1024, pdf => pdf.byteLength);
+export const getMemoryCacheStats = () => ({ entries: cache.size, bytes: cache.bytes, max_bytes: cache.maxBytes });
 
 // 渲染环境指纹：typst-packages 主题源（按文件内容）+ fonts 内置字体（按 size/mtime，字体文件大不读内容）。
 // 混入缓存键——否则改主题（如 record-theme 的 #field）或换字体后，同一份 source 仍命中旧 PDF（脏缓存）。
@@ -151,56 +129,10 @@ function cacheKey(source: string): string {
 const DISK_CACHE_DIR = process.env.TYPST_CACHE_DIR === 'off'
   ? null
   : (process.env.TYPST_CACHE_DIR || join(tmpdir(), 'cdr-typst-pdf-cache'));
-const DISK_CACHE_MAX_FILES = Math.max(50, Number(process.env.TYPST_CACHE_MAX_FILES || 2000));
-let diskWritesSinceSweep = 0;
-
-if (DISK_CACHE_DIR) {
-  try { mkdirSync(DISK_CACHE_DIR, { recursive: true }); }
-  catch (e: any) { console.error('[typst-cache] mkdir failed, disk cache disabled:', e?.message); }
-}
-
-function diskPath(key: string): string | null {
-  return DISK_CACHE_DIR ? join(DISK_CACHE_DIR, `${key}.pdf`) : null;
-}
-
-/** 读盘缓存（命中返回 Buffer，未命中/出错返回 null——缓存永远是「优化」，不能让它的故障影响主流程）。 */
-function readDiskCache(key: string): Buffer | null {
-  const p = diskPath(key);
-  if (!p) return null;
-  try {
-    if (existsSync(p)) return readFileSync(p);
-  } catch { /* 读盘失败当未命中 */ }
-  return null;
-}
-
-/** 写盘缓存：先写临时文件再 rename（原子，避免并发下读到半截文件）。失败静默——不影响返回结果。 */
-function writeDiskCache(key: string, pdf: Buffer): void {
-  const p = diskPath(key);
-  if (!p) return;
-  try {
-    const tmp = `${p}.${process.pid}.tmp`;
-    writeFileSync(tmp, pdf);
-    renameSync(tmp, p);
-    if (++diskWritesSinceSweep >= 50) { diskWritesSinceSweep = 0; sweepDiskCache(); }
-  } catch { /* 写盘失败不影响主流程 */ }
-}
-
-/** 容量淘汰：文件数超 MAX 时按 mtime 删最旧的，降到 90%。每 50 次写触发一次，不每次扫盘。 */
-function sweepDiskCache(): void {
-  if (!DISK_CACHE_DIR) return;
-  try {
-    const files = readdirSync(DISK_CACHE_DIR).filter(f => f.endsWith('.pdf'));
-    if (files.length <= DISK_CACHE_MAX_FILES) return;
-    const withTime = files.map(f => {
-      const fp = join(DISK_CACHE_DIR, f);
-      try { return { fp, mtime: statSync(fp).mtimeMs }; } catch { return { fp, mtime: 0 }; }
-    }).sort((a, b) => a.mtime - b.mtime);
-    const target = Math.floor(DISK_CACHE_MAX_FILES * 0.9);
-    for (const { fp } of withTime.slice(0, files.length - target)) {
-      try { unlinkSync(fp); } catch { /* 忽略 */ }
-    }
-  } catch { /* 扫盘失败忽略 */ }
-}
+const diskCache = new PdfDiskCache(DISK_CACHE_DIR,
+  positiveInteger(process.env.TYPST_CACHE_MAX_FILES, 2000),
+  positiveInteger(process.env.TYPST_DISK_CACHE_MB, 2048) * 1024 * 1024);
+export const getDiskCacheStats = () => diskCache.stats();
 
 /**
  * 压缩异常偏大的 PDF。Ghostscript 是可选依赖：没有安装、执行超时或输出异常时，
@@ -282,26 +214,31 @@ async function optimizeLargePdf(pdf: Buffer): Promise<Buffer> {
   }
 }
 
-export async function compileTypst(source: string): Promise<CompileResult> {
+export async function compileTypst(source: string, signal?: AbortSignal): Promise<CompileResult> {
+  if (signal?.aborted) throw new RenderCancelledError();
   // public_base_url 也写入编译源码和缓存键；更换服务器域名后不会继续返回旧 PDF 链接。
   const resolvedSource = resolveSamplePaths(source);
   const key = cacheKey(resolvedSource);
 
   // 1) 进程内 LRU
-  if (cache.has(key)) {
-    return { pdf: cache.get(key)!, duration_ms: 0 };
+  const cached = cache.get(key);
+  if (cached) {
+    return { pdf: cached, duration_ms: 0 };
   }
 
   // 2) 磁盘缓存（重启/超 LRU/跨进程仍命中）。命中不进并发闸门、不 spawn typst。
-  const disk = readDiskCache(key);
+  const disk = await diskCache.read(key);
+  if (signal?.aborted) throw new RenderCancelledError();
   if (disk) {
-    evictIfNeeded();
     cache.set(key, disk);
     return { pdf: disk, duration_ms: 0 };
   }
 
   // 3) 都没命中 → 限流编译
-  return runWithLimit(async () => {
+  return renderQueue.run(`compile:${key}`, async () => {
+  // Another request may have populated memory while asynchronous disk lookup was pending.
+  const ready = cache.get(key);
+  if (ready) return { pdf: ready, duration_ms: 0 };
   const start = Date.now();
   const dir = mkdtempSync(join(tmpdir(), 'typst-'));
   const inputPath = join(dir, 'input.typ');
@@ -343,12 +280,11 @@ export async function compileTypst(source: string): Promise<CompileResult> {
   });
   const pdf = await optimizeLargePdf(typstPdf);
 
-  evictIfNeeded();
   cache.set(key, pdf);
-  writeDiskCache(key, pdf);   // 落盘，下次查看/下载/重启后直接读盘
+  await diskCache.write(key, pdf); // Bounded writers; never leave an unbounded background write queue.
 
   return { pdf, duration_ms: Date.now() - start };
-  });
+  }, signal);
 }
 
 function parseTypstError(stderr: string): CompileError {
@@ -370,12 +306,13 @@ export interface PosMarker {
 
 const posCache = new Map<string, PosMarker[]>();
 
-export async function queryTypstPositions(source: string): Promise<PosMarker[]> {
+export async function queryTypstPositions(source: string, signal?: AbortSignal): Promise<PosMarker[]> {
+  if (signal?.aborted) throw new RenderCancelledError();
   const resolvedSource = resolveSamplePaths(source);
   const key = cacheKey(resolvedSource);
   if (posCache.has(key)) return posCache.get(key)!;
 
-  return runWithLimit(async () => {
+  return renderQueue.run(`query:${key}`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'typst-q-'));
   const inputPath = join(dir, 'input.typ');
   writeFileSync(inputPath, resolvedSource, 'utf-8');
@@ -416,7 +353,7 @@ export async function queryTypstPositions(source: string): Promise<PosMarker[]> 
   }
   posCache.set(key, markers);
   return markers;
-  });
+  }, signal);
 }
 
 export function clearCache() {

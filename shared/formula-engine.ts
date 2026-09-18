@@ -1,4 +1,6 @@
 import { evalArithmetic } from './expr-eval';
+import { evalSpreadsheetResult } from './spreadsheet-expression';
+import { isFormulaError } from './formula-error';
 
 export type FormulaType =
   | 'average'
@@ -59,6 +61,12 @@ function getAllValues(sources: string[], data: Record<string, any>): any[] {
 
 export function execute(formula: Formula, data: Record<string, any>): any {
   const { type, sources = [], params = {}, decimals } = formula;
+  // Legacy aggregations must not silently filter out failed new-style formulas.
+  // Conditional spreadsheet formulas inspect only branches they actually use.
+  if (!(type === 'custom' && params.expression_dialect === 'excel_v1')) {
+    const error = sources.map(source => data[source]).find(isFormulaError);
+    if (error) return error;
+  }
 
   switch (type) {
     case 'average': {
@@ -224,9 +232,9 @@ export function execute(formula: Formula, data: Record<string, any>): any {
         // v1/v2… 永远可用，作为地址变化后的稳定兜底。
         vars[`v${i + 1}`] = data[srcCode];
       });
-      const r = evalArithmetic(expr, vars);
+      const r = params.expression_dialect === 'excel_v1' ? evalSpreadsheetResult(expr, vars) : evalArithmetic(expr, vars);
       if (r === null) return null;
-      return decimals !== undefined ? Number(r.toFixed(decimals)) : r;
+      return decimals !== undefined && typeof r === 'number' ? Number(r.toFixed(decimals)) : r;
     }
     default:
       return null;

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import ExcelJS from 'exceljs';
+import { equipmentSearchTerms, equipmentLikePattern } from '../../../shared/equipment-search.js';
 
 const router = Router();
 import { pool } from '../db.js';
@@ -28,8 +29,8 @@ router.get('/', async (req, res) => {
     const { keyword = '', status, limit = 50, offset = 0 } = req.query as any;
     const params: any[] = [];
     const where: string[] = [];
-    if (keyword) {
-      params.push(`%${keyword}%`);
+    for (const term of equipmentSearchTerms(keyword)) {
+      params.push(equipmentLikePattern(term));
       where.push(`(asset_code ILIKE $${params.length} OR name ILIKE $${params.length} OR model ILIKE $${params.length})`);
     }
     if (status) {
@@ -37,11 +38,11 @@ router.get('/', async (req, res) => {
       where.push(`status = $${params.length}`);
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    params.push(limit, offset);
+    params.push(Math.min(200, Math.max(1, Math.floor(Number(limit) || 50))), Math.max(0, Math.floor(Number(offset) || 0)));
     const r = await pool.query(
       `SELECT id, asset_code, name, model, factory_serial, cert_no, trace_date, expire_date, status, category, department
        FROM equipment_library ${whereSql}
-       ORDER BY name LIMIT $${params.length - 1} OFFSET $${params.length}`,
+       ORDER BY name, asset_code, id LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
     const total = await pool.query(`SELECT COUNT(*)::int AS n FROM equipment_library ${whereSql}`, params.slice(0, params.length - 2));

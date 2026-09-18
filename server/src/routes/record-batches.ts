@@ -61,7 +61,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 /** 一次选择多种测试方法，为每个方法建立独立 record_data，并挂到同一录入批次。 */
 router.post('/', requirePermission('record.entry'), async (req: Request, res: Response) => {
   const who = actor(req);
-  const { order_no, sample_external_id, test_item_name, template_group_id, method_scheme_ids, shared_data } = req.body || {};
+  const { order_no, sample_external_id, test_item_name, template_group_id, method_scheme_ids } = req.body || {};
   const ids = [...new Set((Array.isArray(method_scheme_ids) ? method_scheme_ids : []).map(Number).filter(Number.isFinite))];
   if (!order_no || !sample_external_id || !test_item_name || !ids.length) {
     res.status(400).json({ error: '委托单、样品、项目和至少一种测试方法必填' }); return;
@@ -97,7 +97,7 @@ router.post('/', requirePermission('record.entry'), async (req: Request, res: Re
       `INSERT INTO record_batches
        (order_no,sample_external_id,test_item_name,template_group_id,shared_profile_code,shared_data,audit_status,tester_name,tested_at)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,'draft',$7,NOW()) RETURNING *`,
-      [order_no, sample_external_id, test_item_name, primaryGroup, [...profileCodes][0], JSON.stringify(shared_data || {}), who.name],
+      [order_no, sample_external_id, test_item_name, primaryGroup, [...profileCodes][0], '{}', who.name],
     );
     const batch = inserted.rows[0];
     for (let index = 0; index < schemes.rows.length; index++) {
@@ -279,27 +279,15 @@ router.post('/:id/methods/:methodSchemeId/cancel', requirePermission('record.ent
 });
 
 router.put('/:id/shared-data', requirePermission('record.entry'), async (req: Request, res: Response) => {
-  const approved = await pool.query(
-    `SELECT 1 FROM record_data WHERE record_batch_id=$1 AND audit_status='reviewed' LIMIT 1`,
-    [Number(req.params.id)],
-  );
-  if (approved.rows.length) {
-    res.status(409).json({ error: '批次已有部分原始记录审核通过，公共字段已锁定；如需修改公共字段，请由审核员将整个批次退回' }); return;
-  }
-  const result = await pool.query(
-    `UPDATE record_batches SET shared_data=$1::jsonb,current_version=current_version+1,updated_at=NOW()
-      WHERE id=$2 AND audit_status IN ('draft','rejected') RETURNING *`,
-    [JSON.stringify(req.body?.shared_data || {}), Number(req.params.id)],
-  );
-  if (!result.rows.length) { res.status(409).json({ error: '批次不存在，或当前状态不可修改公共信息' }); return; }
-  res.json(result.rows[0]);
+  res.status(409).json({ error: '公共字段已改为各份记录独立保存，请刷新页面后在当前记录中填写或拉取。' });
 });
 
 async function batchRows(batchId: number) {
   const result = await pool.query(
     `SELECT b.*,r.id AS record_data_id,r.template_version_id,r.raw_data,r.derived_data,r.audit_status AS record_status,
-            r.current_version AS record_version
+            r.current_version AS record_version, t.name AS record_template_name
        FROM record_batches b JOIN record_batch_items i ON i.batch_id=b.id JOIN record_data r ON r.id=i.record_data_id
+       LEFT JOIN record_templates t ON t.id=r.template_id
       WHERE b.id=$1 AND i.item_status='active' AND r.cancelled_at IS NULL ORDER BY i.sort_order,i.id`, [batchId],
   );
   return result.rows;
@@ -330,15 +318,16 @@ router.post('/:id/submit', requirePermission('record.entry'), async (req: Reques
   if (!submissionRows.length) { res.status(409).json({ error: '批次中没有可提交的草稿或被退回记录' }); return; }
   const errors: string[] = [];
   for (const row of submissionRows) {
-    const merged = { ...(row.raw_data || {}), ...(row.shared_data || {}) };
+    const merged = { ...(row.shared_data || {}), ...(row.raw_data || {}) };
     const device = await validateDeviceReferences(row.template_version_id, merged);
     const conclusions = await validateRecordConclusions(row.template_version_id, merged);
-    errors.push(...device.map(issue => `记录#${row.record_data_id}：${issue.message}`), ...conclusions.map(issue => `记录#${row.record_data_id}：${issue}`));
+    const recordName = row.record_template_name || '未命名原始记录';
+    errors.push(...device.map(issue => `${recordName}：${issue.message}`), ...conclusions.map(issue => `${recordName}：${issue}`));
     const version = await pool.query('SELECT field_definitions FROM record_template_versions WHERE id=$1', [row.template_version_id]);
     const groups = (version.rows[0]?.field_definitions || []) as FieldGroup[];
     for (const field of groups.flatMap(group => group.fields || []).filter(field => field.data_scope === 'batch_shared' && field.required)) {
-      const value = (row.shared_data || {})[field.code];
-      if (value == null || value === '' || (Array.isArray(value) && !value.length)) errors.push(`公共字段“${field.label}”不能为空`);
+      const value = merged[field.code];
+      if (field.type !== 'device_ref' && (value == null || value === '' || (Array.isArray(value) && !value.length))) errors.push(`${recordName}：请填写${field.label}`);
     }
   }
   if (errors.length) { res.status(400).json({ error: [...new Set(errors)].join('；'), validation_errors: [...new Set(errors)] }); return; }

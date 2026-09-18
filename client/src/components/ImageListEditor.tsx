@@ -6,6 +6,7 @@ import {
 import { IS_TOUCH } from '../utils/device';
 import ImageProcessButton, { formatImageBytes } from './ImageProcessButton';
 import AutoGrowTextArea from './AutoGrowTextArea';
+import { readReportPhoto } from '../utils/reportPhotoClipboard';
 
 export type ImageListPhoto = {
   url?: string;
@@ -82,7 +83,12 @@ export default function ImageListEditor<T extends ImageListItem>({ items, onChan
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 2px 8px' }}>
       {items.map((item, index) => {
         const src = item.photo?.url || item.photo?.server_path;
-        return <div key={item.id} onClick={() => onItemFocus?.(index, item)} onFocusCapture={() => onItemFocus?.(index, item)} style={{
+        return <div key={item.id} tabIndex={reportMode ? 0 : undefined} onPaste={event => {
+          if (!reportMode || readOnly) return;
+          const copied = readReportPhoto(event.clipboardData); if (!copied) return;
+          event.preventDefault(); event.stopPropagation();
+          const next = [...items]; next[index] = { ...item, title: copied.title, photo: copied.photo }; onChange(next);
+        }} onClick={event => { onItemFocus?.(index, item); if (reportMode && (event.target as HTMLElement).tagName === 'IMG') event.currentTarget.focus(); }} onFocusCapture={() => onItemFocus?.(index, item)} style={{
           display: 'flex', alignItems: 'center', gap: 8, padding: 8,
           border: '1px solid #e8ecf3', borderRadius: 6, background: '#fff', minWidth: 0,
           flexWrap: reportMode || IS_TOUCH ? 'wrap' : 'nowrap', overflowX: reportMode || IS_TOUCH ? 'hidden' : 'auto',

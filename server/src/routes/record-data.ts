@@ -43,13 +43,13 @@ type DeviceValidationIssue = {
   field_code: string;
   field_label: string;
   asset_code?: string;
-  reason: 'required' | 'single_only' | 'outside_preset' | 'not_found' | 'invalid_status' | 'expired';
+  reason: 'required' | 'single_only' | 'outside_preset' | 'not_found' | 'invalid_status';
   message: string;
 };
 
 /**
  * 提交审核前校验设备引用。草稿不拦截；进入 pending 的所有路径都必须在服务端复核，
- * 防止绕过前端写入不存在、超期或已停用的设备。
+ * 防止绕过前端写入不存在或已停用的设备。过期仅在选择时提醒，不阻止提交。
  */
 export async function validateDeviceReferences(templateVersionId: number | null, rawData: Record<string, any>): Promise<DeviceValidationIssue[]> {
   if (!templateVersionId) return [];
@@ -69,7 +69,7 @@ export async function validateDeviceReferences(templateVersionId: number | null,
       .map(value => String(value ?? '').trim())
       .filter(Boolean);
     if (field.required && codes.length === 0) {
-      issues.push({ field_code: field.code, field_label: field.label, reason: 'required', message: `${field.label}必须选择设备` });
+      issues.push({ field_code: field.code, field_label: field.label, reason: 'required', message: `请选择${field.label || '测试设备'}` });
     }
     if (field.device_ref_config?.selection_mode === 'single' && codes.length > 1) {
       issues.push({ field_code: field.code, field_label: field.label, reason: 'single_only', message: `${field.label}只允许选择一台设备` });
@@ -90,7 +90,7 @@ export async function validateDeviceReferences(templateVersionId: number | null,
   const codes = Array.from(codeFields.keys());
   if (!codes.length) return issues;
   const equipment = await pool.query(
-    `SELECT asset_code, status, expire_date, (expire_date < CURRENT_DATE) AS expired
+    `SELECT asset_code, status
        FROM equipment_library
       WHERE asset_code = ANY($1)`, [codes]
   );
@@ -103,12 +103,8 @@ export async function validateDeviceReferences(templateVersionId: number | null,
         continue;
       }
       const status = String(row.status || '').trim();
-      if (status && /(超期|停用|报废|不合格)/.test(status)) {
+      if (status && /(停用|报废|不合格)/.test(status)) {
         issues.push({ field_code: field.code, field_label: field.label, asset_code: code, reason: 'invalid_status', message: `设备 ${code} 当前状态为“${status}”` });
-      }
-      const expireDate = row.expire_date ? new Date(row.expire_date).toISOString().slice(0, 10) : '';
-      if (row.expired && !issues.some(issue => issue.asset_code === code && issue.reason === 'invalid_status')) {
-        issues.push({ field_code: field.code, field_label: field.label, asset_code: code, reason: 'expired', message: `设备 ${code} 已于 ${expireDate} 到期` });
       }
     }
   }
@@ -207,7 +203,13 @@ router.get('/', async (req: Request, res: Response) => {
                       tester_name, tested_at, reviewer_name, reviewed_at, audit_status,
                       current_version, record_batch_id, reject_note, submitted_by_name, submitted_by_job_no,
                       cancelled_by_name, cancelled_at, cancel_reason,
-                      submitted_at, updated_at FROM record_data`;
+                      submitted_at, updated_at,
+                      EXISTS (SELECT 1 FROM record_audit_log a WHERE a.record_id=record_data.id
+                        AND a.action IN ('update','submit') AND EXISTS (
+                          SELECT 1 FROM jsonb_each(COALESCE(record_data.raw_data,'{}'::jsonb)
+                            || COALESCE((SELECT b.shared_data FROM record_batches b WHERE b.id=record_data.record_batch_id),'{}'::jsonb)) e
+                          WHERE left(e.key,2) <> '__' AND e.value NOT IN ('null'::jsonb, '""'::jsonb, '{}'::jsonb, '[]'::jsonb)
+                        )) AS has_entered_data FROM record_data`;
   const conds: string[] = [];
   const params: any[] = [];
   if (template_id) { params.push(template_id); conds.push(`template_id = $${params.length}`); }
@@ -221,7 +223,12 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await pool.query(
-    `SELECT r.*, b.shared_data AS batch_shared_data, b.audit_status AS batch_audit_status
+    `SELECT r.*, b.shared_data AS batch_shared_data, b.audit_status AS batch_audit_status,
+       EXISTS (SELECT 1 FROM record_audit_log a WHERE a.record_id=r.id
+         AND a.action IN ('update','submit') AND EXISTS (
+           SELECT 1 FROM jsonb_each(COALESCE(r.raw_data,'{}'::jsonb) || COALESCE(b.shared_data,'{}'::jsonb)) e
+           WHERE left(e.key,2) <> '__' AND e.value NOT IN ('null'::jsonb, '""'::jsonb, '{}'::jsonb, '[]'::jsonb)
+         )) AS has_entered_data
        FROM record_data r LEFT JOIN record_batches b ON b.id=r.record_batch_id
       WHERE r.id=$1`, [id],
   );

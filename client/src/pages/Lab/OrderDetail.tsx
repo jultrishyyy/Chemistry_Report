@@ -1109,7 +1109,7 @@ export default function LabOrderDetail() {
         okText="创建批次并开始录入" okButtonProps={{ disabled: !batchMethodIds.length }}>
         <Alert type="info" showIcon style={{ marginBottom: 12 }}
           message={batchModal ? `${batchModal.sampleName} · ${batchModal.testName}` : ''}
-          description="每种方法生成一份独立原始记录，并使用各自关联的项目报告模板；公共字段只保存一份。优先选择同一项目组的方法，跨项目组只有公共信息方案编码相同时才可一起选择。" />
+          description="每种方法生成一份独立原始记录，并使用各自关联的项目报告模板。公共字段可手动拉取，填充后各份记录独立保存，修改互不影响。" />
         <Collapse defaultActiveKey={methodGroups.filter(group => group.enabled).slice(0, 1).map(group => String(group.id))}
           items={methodGroups.filter(group => group.enabled).map(group => {
             const enabledMethods = (group.methods || []).filter((method: any) => method.enabled);

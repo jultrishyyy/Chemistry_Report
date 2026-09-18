@@ -12,6 +12,7 @@
  * 两侧校验口径一致。
  */
 import type { FieldGroup, CellBinding } from './types';
+import { storedReportRichDocument, type ReportRichNode } from './report-rich-document';
 import { recordSampleBands, sampleBandForCell } from './free-grid-binding';
 
 /** 报告模板里一处指向原始记录的绑定 */
@@ -41,6 +42,17 @@ export function collectReportBindings(groups: FieldGroup[] | undefined): Binding
     for (const f of g.fields ?? []) {
       const base = `${gLabel} / ${f.label || f.code || f.id}`;
       if (f.binding) out.push({ path: base, label: f.label || f.code || f.id, binding: f.binding });
+      if (f.rich && f.binding?.source === 'literal') {
+        const visit = (node: ReportRichNode) => {
+          if (node.type === 'templateField' && node.attrs?.reference) {
+            const ref = node.attrs.reference;
+            out.push({ path: `${base} · 动态字段[${ref.id}]`, label: ref.label, binding: ref.binding });
+          }
+          node.content?.forEach(visit);
+        };
+        const doc = storedReportRichDocument(f.binding.text);
+        if (doc) visit(doc);
+      }
       const rt = f.result_table;
       if (rt) {
         for (const c of rt.cells ?? []) {

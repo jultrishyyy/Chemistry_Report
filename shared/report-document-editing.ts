@@ -1,13 +1,22 @@
 import type { FieldDefinition } from './types';
 
-export type ReportInsertOptions = { rows?: number; columns?: number; imageCount?: number; copyToken?: string };
+export type ReportTableData = { cells: string[][]; spans?: Array<{ row: number; col: number; rowspan: number; colspan: number }> };
+export type ReportInsertOptions = { rows?: number; columns?: number; imageCount?: number; copyToken?: string; tableData?: ReportTableData };
 export function makeReportManualTable(code: string, options: ReportInsertOptions = {}): FieldDefinition {
-  const rows = options.rows ?? 3, columns = options.columns ?? 3;
+  const rows = options.tableData?.cells.length ?? options.rows ?? 3, columns = options.tableData?.cells[0]?.length ?? options.columns ?? 3;
   if (!Number.isInteger(rows) || rows < 1 || rows > 100 || !Number.isInteger(columns) || columns < 1 || columns > 50) throw new Error('表格支持 1–100 行、1–50 列');
   // New document tables have no extra header track. Existing saved tables are not migrated.
+  if (options.tableData && options.tableData.cells.some(row => row.length !== columns || row.some(value => typeof value !== 'string'))) throw new Error('来源表格数据不完整');
+  const spans: NonNullable<NonNullable<FieldDefinition['free_table']>['spans']> = {};
+  for (const span of options.tableData?.spans || []) {
+    if (![span.row, span.col, span.rowspan, span.colspan].every(Number.isInteger) || span.row < 0 || span.col < 0 || span.rowspan < 1 || span.colspan < 1 || span.row + span.rowspan > rows || span.col + span.colspan > columns) throw new Error('来源合并单元格越界');
+    spans[`r${span.row + 1}::c${span.col + 1}`] = { rowspan: span.rowspan, colspan: span.colspan };
+  }
   return { id: code, code, label: '', hide_label: true, type: 'free_grid', free_table: {
     columns: Array.from({ length: columns }, (_, i) => ({ id: `c${i + 1}`, label: '', width: '1fr' })),
-    rows: Array.from({ length: rows }, (_, i) => ({ id: `r${i + 1}` })), cells: {},
+    rows: Array.from({ length: rows }, (_, i) => ({ id: `r${i + 1}` })),
+    cells: Object.fromEntries((options.tableData?.cells || []).flatMap((row, r) => row.map((value, c) => [`r${r + 1}::c${c + 1}`, value]))),
+    ...(Object.keys(spans).length ? { spans } : {}),
   } };
 }
 

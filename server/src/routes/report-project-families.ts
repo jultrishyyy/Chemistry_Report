@@ -1,10 +1,12 @@
 import { Router, type Request, type Response } from 'express';
+import { validateGroupResourceId, groupOperationError } from '../services/group-request-validation.js';
 import { pool } from '../db.js';
 import {
   actorHasPermission, forkTemplate, readActor, syncToChildren, VersionFlowError,
 } from '../services/template-versions.js';
 
 const router: Router = Router();
+router.param('id', validateGroupResourceId);
 const cleanText = (value: unknown) => String(value ?? '').trim();
 const generatedCode = () => `report_group_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -31,8 +33,7 @@ function expandGroups(groups: any[], requested: unknown): string[] {
 }
 
 router.get('/', async (req: Request, res: Response) => {
-  const requestedKind = cleanText(req.query.kind);
-  const kind = requestedKind === 'cover' || requestedKind === 'project' ? requestedKind : null;
+  // Legacy ?kind callers now share the same report groups and membership list.
   const families = await pool.query(
     `SELECT f.*,g.name AS record_template_group_name,g.code AS record_template_group_code,
             hm.name AS host_manufacturer_name,hm.category AS host_manufacturer_category,
@@ -42,22 +43,22 @@ router.get('/', async (req: Request, res: Response) => {
        LEFT JOIN host_manufacturers hm ON hm.id=f.host_manufacturer_id
        LEFT JOIN report_templates bt ON bt.id=f.base_report_template_id
        LEFT JOIN report_template_versions bv ON bv.id=bt.current_version_id
-      WHERE f.archived_at IS NULL AND ($1::text IS NULL OR f.template_kind=$1)
+      WHERE f.archived_at IS NULL
       ORDER BY hm.name NULLS FIRST,f.name,f.id`,
-    [kind],
   );
   const members = await pool.query(
-    `SELECT t.id,t.name,t.report_project_family_id,t.linked_record_template_id,t.parent_template_id,
+    `SELECT t.id,t.name,t.template_kind,t.report_project_family_id,t.linked_record_template_id,t.parent_template_id,
             t.parent_version_id,t.field_mapping,t.host_manufacturer_id,t.current_version_id,
-            rv.version_no,rv.status,rec.name AS linked_record_template_name
+            rv.version_no,rv.status,rec.name AS linked_record_template_name,
+            hm.name AS host_manufacturer_name,hm.category AS host_manufacturer_category
        FROM report_templates t
        JOIN report_project_template_families f ON f.id=t.report_project_family_id
        LEFT JOIN report_template_versions rv ON rv.id=t.current_version_id
        LEFT JOIN record_templates rec ON rec.id=t.linked_record_template_id
+       LEFT JOIN host_manufacturers hm ON hm.id=t.host_manufacturer_id
       WHERE t.archived_at IS NULL AND f.archived_at IS NULL
-        AND t.template_kind=f.template_kind AND ($1::text IS NULL OR f.template_kind=$1)
+        AND t.template_kind IN ('cover','project')
       ORDER BY t.name,t.id`,
-    [kind],
   );
   const byFamily = new Map<number, any[]>();
   for (const member of members.rows) {
@@ -110,7 +111,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 });
 
-/** 把已有同类独立报告模板归入项目组。 */
+/** 首页和项目模板共用项目组，封面页模板不参与。 */
 router.post('/:id/templates', async (req: Request, res: Response) => {
   if (!requireEdit(req, res)) return;
   const familyId = Number(req.params.id);
@@ -130,13 +131,13 @@ router.post('/:id/templates', async (req: Request, res: Response) => {
          FROM report_templates WHERE id=ANY($1::int[]) AND archived_at IS NULL FOR UPDATE`, [templateIds],
     );
     if (candidates.rows.length !== templateIds.length) throw new VersionFlowError('部分模板不存在或已删除', 409);
-    const invalid = candidates.rows.filter(row => row.template_kind !== family.rows[0].template_kind || row.report_project_family_id != null);
+    const invalid = candidates.rows.filter(row => !['cover', 'project'].includes(row.template_kind) || row.report_project_family_id != null);
     if (invalid.length) throw new VersionFlowError(`以下模板类型不匹配或已属于项目组：${invalid.map(row => row.name).join('、')}`, 409);
     const result = await db.query(
       `UPDATE report_templates t SET report_project_family_id=$1,updated_at=NOW()
         FROM report_project_template_families f
        WHERE t.id=ANY($2::int[]) AND f.id=$1 AND f.archived_at IS NULL
-         AND t.template_kind=f.template_kind AND t.archived_at IS NULL
+         AND t.template_kind IN ('cover','project') AND t.archived_at IS NULL
          AND t.report_project_family_id IS NULL
        RETURNING t.*`, [familyId, templateIds],
     );
@@ -304,7 +305,7 @@ router.post('/:id/archive-request', async (req: Request, res: Response) => {
     await logGroupArchiveAction(db, groupId, 'archive_request', actor, { note });
     await db.query('COMMIT'); res.json({ ok: true });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 
@@ -331,7 +332,7 @@ router.post('/:id/archive-request/cancel', async (req: Request, res: Response) =
     await logGroupArchiveAction(db, groupId, 'archive_request_cancel', actor, { requested_by: requester });
     await db.query('COMMIT'); res.json({ ok: true });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 
@@ -387,7 +388,7 @@ router.post('/:id/archive-review', async (req: Request, res: Response) => {
     await db.query('COMMIT');
     res.json({ ok: true, archived: true, detached_template_count: memberCount });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useId, useState } from 'react';
+import { useContext, useEffect, useRef, useId, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ReportToolbarContext, selectedReportTextEditor } from './ReportToolbarContext';
 import { ReportInsertionContext } from './ReportInsertionContext';
@@ -9,12 +9,15 @@ import { reportParagraphExtensions, reportEditorValue, reportEditorSplit, select
 import { REPORT_TEXT_FONTS, readReportRichDocument, type ReportParagraphSpacing } from '../../../../shared/report-rich-document';
 import type { ReportInsertOptions } from '../../../../shared/report-document-editing';
 import { useReportCrossText } from './ReportCrossSelection';
+import type { Extensions } from '@tiptap/react';
 
-export default function ReportParagraphEditor({ value, onChange, onInsert, onBoundary, onDeleteBoundary, focusRequest }: {
+export default function ReportParagraphEditor({ value, onChange, onInsert, onBoundary, onDeleteBoundary, focusRequest, extraExtensions, extraControls }: {
   value: string; onChange: (value: string) => void;
+  extraExtensions?: Extensions;
+  extraControls?: (editor: Editor) => ReactNode;
   onInsert?: (kind: 'table' | 'image', value: string, offset: number, split?: { before: string; after: string }, options?: ReportInsertOptions) => void;
   onBoundary?: (direction: -1 | 1) => boolean;
-  onDeleteBoundary?: (direction: -1 | 1) => boolean;
+  onDeleteBoundary?: (direction: -1 | 1, paragraphIndex?: number) => boolean;
   focusRequest?: { token: number; edge?: 'start' | 'end'; position?: number; onApplied?: () => void };
 }) {
   const activate = useContext(ReportInsertionContext);
@@ -40,7 +43,7 @@ export default function ReportParagraphEditor({ value, onChange, onInsert, onBou
   };
   const crossActiveRef = useRef(false);
   const editor = useEditor({
-    extensions: reportParagraphExtensions(), content: readReportRichDocument(value), immediatelyRender: false,
+    extensions: [...reportParagraphExtensions(), ...(extraExtensions || [])], content: readReportRichDocument(value), immediatelyRender: false,
     onFocus: ({ editor }) => activateEditor(editor),
     onSelectionUpdate: ({ editor }) => { if (editor.isFocused) activateEditor(editor); },
     editorProps: { attributes: { class: 'report-visual-paragraph', role: 'textbox', 'aria-label': '报告正文', 'aria-multiline': 'true' },
@@ -48,12 +51,42 @@ export default function ReportParagraphEditor({ value, onChange, onInsert, onBou
         if (view.composing || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || !view.state.selection.empty) return false;
         const at = view.state.selection.from;
         const { $from } = view.state.selection;
+        const paragraphAtRoot = $from.depth === 1 && $from.parent.type.name === 'paragraph';
+        const paragraphIndex = paragraphAtRoot ? $from.index(0) : -1;
+        const atParagraphStart = paragraphAtRoot && $from.parentOffset === 0;
+        const atParagraphEnd = paragraphAtRoot && $from.parentOffset === $from.parent.content.size;
+        const blankBlock = (node: typeof view.state.doc | null | undefined) => !!node
+          && (node.type.name === 'reportSpacer' || (node.type.name === 'paragraph' && !node.textContent.trim()));
+        if (event.key === 'Backspace' && atParagraphStart && paragraphIndex > 0) {
+          const previous = view.state.doc.child(paragraphIndex - 1);
+          if (blankBlock(previous)) {
+            let from = 0;
+            for (let index = 0; index < paragraphIndex - 1; index++) from += view.state.doc.child(index).nodeSize;
+            view.dispatch(view.state.tr.delete(from, from + previous.nodeSize).scrollIntoView());
+            return true;
+          }
+        }
+        if (event.key === 'Delete' && atParagraphEnd && paragraphIndex >= 0 && paragraphIndex < view.state.doc.childCount - 1) {
+          const next = view.state.doc.child(paragraphIndex + 1);
+          if (blankBlock(next)) {
+            let from = 0;
+            for (let index = 0; index <= paragraphIndex; index++) from += view.state.doc.child(index).nodeSize;
+            view.dispatch(view.state.tr.delete(from, from + next.nodeSize).scrollIntoView());
+            return true;
+          }
+        }
+        // At the first/last character, remove an adjacent spacer field or an empty paragraph
+        // owned by the neighboring editing surface in one keystroke.
+        if (event.key === 'Backspace' && atParagraphStart && paragraphIndex === 0
+          && callbacks.current.onDeleteBoundary?.(-1, paragraphIndex)) return true;
+        if (event.key === 'Delete' && atParagraphEnd && paragraphIndex === view.state.doc.childCount - 1
+          && callbacks.current.onDeleteBoundary?.(1, paragraphIndex)) return true;
         const emptyEdgeParagraph = $from.depth === 1 && $from.parent.type.name === 'paragraph' && !$from.parent.textContent.trim()
           && ($from.index(0) === 0 || $from.index(0) === view.state.doc.childCount - 1);
         if ((event.key === 'Backspace' || event.key === 'Delete') && emptyEdgeParagraph) {
           // The first blank can precede a nonempty note in the same editor.
           // Let the adjacent figure remove only that blank and restore its caret.
-          if (callbacks.current.onDeleteBoundary?.(event.key === 'Backspace' ? -1 : 1)) return true;
+          if (callbacks.current.onDeleteBoundary?.(event.key === 'Backspace' ? -1 : 1, $from.index(0))) return true;
         }
         const direction = (event.key === 'ArrowLeft' || event.key === 'ArrowUp') && at === 1 ? -1
           : (event.key === 'ArrowRight' || event.key === 'ArrowDown') && at === view.state.doc.content.size - 1 ? 1 : null;
@@ -163,6 +196,7 @@ export default function ReportParagraphEditor({ value, onChange, onInsert, onBou
             </Tooltip>
           </Space>}><Button size="small" disabled={!editor}>{item.label} ▾</Button></Popover>)}
       <Button size="small" disabled={!editor} type={selection?.list ? 'primary' : 'default'} onClick={() => editor?.chain().focus().toggleBulletList().run()}>• 列表</Button>
+      {editor && extraControls?.(editor)}
       {onInsert && !toolbar && <><Button size="small" disabled={!editor} onClick={() => insert('table')}>插入表格</Button><Button size="small" disabled={!editor} onClick={() => insert('image')}>插入图片</Button></>}
     </Space>
   );

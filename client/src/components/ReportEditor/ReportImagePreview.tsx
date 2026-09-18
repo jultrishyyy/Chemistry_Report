@@ -32,7 +32,7 @@ export default function ReportImagePreview({ model, onTitleChange }: { model: Re
         const width = Number.isFinite(customWidth) && customWidth > 0 ? Math.min(customWidth, 30) : model.width;
         const height = Number.isFinite(customHeight) && customHeight > 0 ? Math.min(customHeight, 40) : model.height;
         const rotation = Number.isFinite(Number(photo?.display_rotation)) ? Number(photo.display_rotation) : 0;
-        return <figure key={index} style={{ margin: 0, minWidth: 0, border: '1px solid #ddd', gridColumn: index === solo ? '1 / -1' : undefined }}>
+        return <figure key={index} tabIndex={0} data-report-photo-index={index} aria-label={`图片框 ${index + 1}`} onClick={event => { if (!(event.target as HTMLElement).closest('[contenteditable="true"]')) event.currentTarget.focus(); }} style={{ margin: 0, minWidth: 0, border: '1px solid #ddd', gridColumn: index === solo ? '1 / -1' : undefined }}>
           {(item.title || onTitleChange) && <figcaption className="report-image-preview-title"
             contentEditable={!!onTitleChange} suppressContentEditableWarning role={onTitleChange ? 'textbox' : undefined}
             aria-label={onTitleChange ? `图片 ${index + 1} 标题` : undefined}

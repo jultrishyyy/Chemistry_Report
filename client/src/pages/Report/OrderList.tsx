@@ -210,14 +210,28 @@ export default function ReportOrderList() {
   useEffect(() => {
     (async () => {
       try {
-        const [wo, recs, reqCounts] = await Promise.all([
-          axios.get(`${API}/work-orders`),
+        // Resolve the order list first. An empty installation should reach its
+        // empty state immediately instead of waiting for unrelated aggregates.
+        const wo = await axios.get(`${API}/work-orders`);
+        const orders: WorkOrder[] = wo.data || [];
+        if (!orders.length) {
+          setRecords([]);
+          setRows([]);
+          return;
+        }
+        const [recs, reqCounts, reportCountEntries] = await Promise.all([
           axios.get(`${API}/record-data`),
           axios.get(`${API}/external/requisition-counts`).catch(() => ({ data: {} })),
+          Promise.all(orders.map(async order => {
+            try {
+              const response = await axios.get(`${API}/reports`, { params: { order_no: order.order_no } });
+              return [order.order_no, (response.data || []).length] as const;
+            } catch { return [order.order_no, 0] as const; }
+          })),
         ]);
-        const orders: WorkOrder[] = wo.data || [];
         const records: RecordRow[] = recs.data || [];
         const reqMap: Record<string, { total: number; generated: number; delivered?: number; approved?: number; revision?: number; data_rework?: number }> = reqCounts.data || {};
+        const reportCounts = Object.fromEntries(reportCountEntries);
         setRecords(records);
 
         const result: RowVm[] = [];
@@ -229,11 +243,6 @@ export default function ReportOrderList() {
           const recordedCount = samples.reduce((acc, s) => acc + (s.test_infos || []).filter(t =>
             records.some(r => r.order_no === o.order_no && r.sample_external_id === s.id && r.test_item_name === t.name)
           ).length, 0);
-          let reportsCount = 0;
-          try {
-            const r = await axios.get(`${API}/reports?order_no=${o.order_no}`);
-            reportsCount = (r.data || []).length;
-          } catch { /* noop */ }
           result.push({
             order_no: o.order_no,
             customer_name: o.customer_name,
@@ -242,7 +251,7 @@ export default function ReportOrderList() {
             test_total: allTests.length,
             linked_count: linkedCount,
             recorded_count: recordedCount,
-            reports_count: reportsCount,
+            reports_count: reportCounts[o.order_no] || 0,
             requisition_total: reqMap[o.order_no]?.total || 0,
             requisition_generated: reqMap[o.order_no]?.generated || 0,
             requisition_delivered: reqMap[o.order_no]?.delivered || 0,
@@ -252,6 +261,9 @@ export default function ReportOrderList() {
           });
         }
         setRows(result);
+      } catch {
+        message.error('加载委托单失败');
+        setRows([]);
       } finally {
         setLoading(false);
       }

@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Button, Space, Tooltip } from 'antd';
+import { Alert, Button, Space, Tooltip } from 'antd';
 import { ColumnWidthOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
@@ -69,6 +69,8 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
   const onApiReadyRef = useRef(onApiReady);
   onApiReadyRef.current = onApiReady;
   const [zoom, setZoom] = useState(1);
+  const [renderRevision, setRenderRevision] = useState(0);
+  const [renderError, setRenderError] = useState(false);
   const zoomRef = useRef(zoom);
   const appliedZoomRef = useRef(zoom);
   const activeHighlightRef = useRef<(PdfPointHighlight & { page: number; yPt: number }) | null>(null);
@@ -222,31 +224,40 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !url) return;
+    if (!container || !url || container.clientWidth <= 24) return;
     const seq = ++renderSeqRef.current;
     let cancelled = false;
+    let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | undefined;
+    let destroyed = false;
+    const destroy = () => {
+      if (!loadingTask || destroyed) return;
+      destroyed = true;
+      void loadingTask.destroy().catch(() => { /* Cleanup must not create an unhandled rejection. */ });
+    };
+    setRenderError(false);
 
     (async () => {
       try {
-        const doc = await pdfjsLib.getDocument(url).promise;
-        if (cancelled || seq !== renderSeqRef.current) return;
+        loadingTask = pdfjsLib.getDocument(url);
+        const doc = await loadingTask.promise;
+        if (cancelled || seq !== renderSeqRef.current || container.clientWidth <= 24) return;
         // 渲染到离屏 fragment（双缓冲），全部完成后一次性替换，期间滚动不动、不闪白
         const frag = document.createDocumentFragment();
         const nextPages = new Map<number, PageRenderEntry>();
         const width = Math.max(container.clientWidth - 24, 200);
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const dpr = window.devicePixelRatio || 1;
         for (let p = 1; p <= doc.numPages; p++) {
           const page = await doc.getPage(p);
           if (cancelled || seq !== renderSeqRef.current) return;
           const base = page.getViewport({ scale: 1 });
           const scale = width / base.width;
-          const viewport = page.getViewport({ scale: scale * dpr });
+          const viewport = page.getViewport({ scale: scale * dpr * zoom });
           const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const fitWidth = viewport.width / dpr;
-          const fitHeight = viewport.height / dpr;
-          const currentZoom = zoomRef.current;
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const fitWidth = base.width * scale;
+          const fitHeight = base.height * scale;
+          const currentZoom = zoom;
           canvas.style.width = `${fitWidth * currentZoom}px`;
           canvas.style.height = `${fitHeight * currentZoom}px`;
           canvas.style.display = 'block';
@@ -319,14 +330,19 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
           pendingScrollRef.current = null;
         }
       } catch (e) {
-        if (!cancelled) console.warn('PdfPreview render failed:', e);
+        if (!cancelled && seq === renderSeqRef.current) {
+          console.warn('PdfPreview render failed:', e);
+          setRenderError(true);
+        }
+      } finally {
+        destroy();
       }
     })();
 
-    return () => { cancelled = true; };
-  }, [url]);
+    return () => { cancelled = true; destroy(); };
+  }, [url, zoom, renderRevision]);
 
-  // 容器宽度变化：CSS 缩放已渲染画布（视觉近似即时跟手；下次编译会按新宽度精确重渲）
+  // CSS follows resizing immediately; repaint at the actual pixel density once resizing settles.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -338,6 +354,7 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
       lastWidth = w;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
+        if (container.clientWidth <= 24) return;
         const width = Math.max(container.clientWidth - 24, 200);
         pagesRef.current.forEach((entry) => {
           if (!entry.fitWidth || Math.abs(entry.fitWidth - width) < 1) return;
@@ -347,10 +364,13 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
           entry.fitScale *= ratio;
           applyEntryZoom(entry, zoomRef.current);
         });
+        setRenderRevision(value => value + 1);
       }, 250);
     });
     ro.observe(container);
-    return () => { ro.disconnect(); if (timer) clearTimeout(timer); };
+    const onWindowResize = () => setRenderRevision(value => value + 1);
+    window.addEventListener('resize', onWindowResize);
+    return () => { ro.disconnect(); window.removeEventListener('resize', onWindowResize); if (timer) clearTimeout(timer); };
   }, []);
 
   // 点击 → PDF 坐标（pt）
@@ -402,6 +422,10 @@ export default function PdfPreview({ url, height, onPdfClick, onHighlightClear, 
           </Tooltip>
         </Space>
       </div>
+      {renderError && <Alert type="error" showIcon message="PDF 显示失败"
+        description="如有旧预览，它不代表最新内容。请重试。"
+        action={<Button size="small" onClick={() => setRenderRevision(value => value + 1)}>重试</Button>}
+        style={{ flexShrink: 0 }} />}
       <div
         ref={containerRef}
         style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', overscrollBehavior: 'contain', background: '#eceff4', padding: '12px 0' }}

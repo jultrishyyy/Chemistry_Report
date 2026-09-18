@@ -24,8 +24,11 @@ function mimeOf(name: string): string {
  * 模板说明图片：文件引用保存在 field_definitions 版本快照中，物理文件永不随改版删除。
  * 说明字段已不再提供附件类型；服务端也仅接收图片，避免绕过前端继续写入附件资料。
  */
-router.post('/upload', upload.single('file'), (req: Request, res: Response) => {
-  if (!actorHasPermission(req, 'record_template.edit')) return res.status(403).json({ error: '当前账号无原始记录模板编辑权限' });
+router.post('/upload', (req, res, next) => {
+  const report = req.query.template_kind === 'report';
+  if (!actorHasPermission(req, report ? 'report_template.edit' : 'record_template.edit')) return res.status(403).json({ error: report ? '当前账号无报告模板编辑权限' : '当前账号无原始记录模板编辑权限' });
+  next();
+}, upload.single('file'), (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: '请选择文件' });
   try {
     const name = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
@@ -36,7 +39,7 @@ router.post('/upload', upload.single('file'), (req: Request, res: Response) => {
       return res.status(400).json({ error: '说明资料仅支持 PNG、JPG、GIF 或 WebP 图片' });
     }
     const templateId = String(req.body?.template_id || 'draft').replace(/[^\w-]/g, '') || 'draft';
-    const stored = storeAttachment(req.file.path, name, '_模板说明图片', `原始记录模板_${templateId}`);
+    const stored = storeAttachment(req.file.path, name, '_模板说明图片', `${req.query.template_kind === 'report' ? '报告模板' : '原始记录模板'}_${templateId}`);
     const mime = mimeOf(name);
     res.json({ id: crypto.randomUUID(), name: stored.filename, rel_path: stored.relPath, url: `/api/template-assets/file?p=${encodeURIComponent(stored.relPath)}`, mime_type: mime, size_bytes: req.file.size });
   } catch (e: any) { res.status(500).json({ error: e.message }); }

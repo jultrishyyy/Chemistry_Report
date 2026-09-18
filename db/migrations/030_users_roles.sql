@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- 预置演示账号（与旧 mock 身份对齐，便于直接登录测试；真实环境由首次登录自动建档）。
 -- mock 登录模式下，loginName 即 job_no，任意密码即可登录。
-INSERT INTO users (job_no, user_name, depart_name, roles) VALUES
+INSERT INTO users (job_no, user_name, depart_name, roles)
+SELECT * FROM (VALUES
   ('admin',     '管理员',     '化学检测中心', ARRAY['admin']),
   ('zhang_eng', '张工',       '化学检测中心', ARRAY['tester']),
   ('li_eng',    '李工',       '化学检测中心', ARRAY['tester']),
@@ -22,4 +23,6 @@ INSERT INTO users (job_no, user_name, depart_name, roles) VALUES
   ('zhao_sup',  '赵主管',     '化学检测中心', ARRAY['reviewer']),
   ('tpl_rev',   '模板审核员', '化学检测中心', ARRAY['template_reviewer']),
   ('clerk',     '文员小李',   '化学检测中心', ARRAY['clerk'])
+) AS demo_users(job_no, user_name, depart_name, roles)
+WHERE COALESCE(current_setting('cdr.integrations_profile', true), 'demo') <> 'server'
 ON CONFLICT (job_no) DO NOTHING;

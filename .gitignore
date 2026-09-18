@@ -7,11 +7,16 @@ config/interfaces.server.json
 
 # 归档 / 补丁 / 备份包（之前散落根目录的 demo_v1-*.tar.gz 即此类，勿入库、防再堆积）
 *.tar.gz
+*.tar
 *.tgz
 *.zip
 *.patch
 *.orig
 *.rej
+
+# 可移交的初始化数据属于部署输入，允许纳入版本库。
+!seed-data/uploads.tar.gz
+!seed-data/legacy-uploads.tar.gz
 
 # 运行时产物：nohup 日志 / pid / 编辑器临时文件
 *.log
@@ -31,5 +36,13 @@ fonts/*.otf
 fonts/*.TTF
 fonts/*.TTC
 fonts/*.OTF
+# Docker/PDF 运行依赖的授权字体随本次内网交付保存。
+!fonts/*.ttf
+!fonts/*.ttc
+!fonts/*.otf
+!fonts/*.TTF
+!fonts/*.TTC
+!fonts/*.OTF
 # Private generated database migration backups (never commit template snapshots).
 .local-migrations/
+release/

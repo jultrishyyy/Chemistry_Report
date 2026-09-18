@@ -15,7 +15,7 @@ React.useEffect = (fn, deps) => { const i = cursor++; if (!slots[i] || deps.some
 let handle;
 React.useImperativeHandle = (_ref, create) => { handle = create(); };
 global.setTimeout = fn => { timers.set(++id, fn); return id; }; global.clearTimeout = id => timers.delete(id);
-axios.post = () => new Promise((resolve, reject) => requests.push({ resolve, reject }));
+axios.post = (url, data, config) => new Promise((resolve, reject) => requests.push({ url, data, config, resolve, reject }));
 const nodes = n => Array.isArray(n) ? n.flatMap(nodes) : n?.props ? [n, ...nodes(n.props.children)] : [];
 const download = tree => nodes(tree).find(n => n.type === 'a' && n.props.download);
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
@@ -26,6 +26,8 @@ const runTimer = () => { const tasks = [...timers.values()]; timers.clear(); tas
   try {
     let tree = render(); assert.equal(download(tree), undefined); runTimer();
     props.source = 'B'; tree = render();
+    assert.equal(requests[0].config.signal.aborted, true, 'editing must abort old HTTP preview');
+    assert.equal(requests[0].config.headers['X-Preview-Request'], '1');
     requests[0].resolve({ data: new Uint8Array([1]) }); await flush();
     tree = render(); assert.equal(download(tree), undefined, 'old request cannot become downloadable during next debounce');
     runTimer(); requests[1].resolve({ data: new Uint8Array([2]) }); await flush();
@@ -44,6 +46,7 @@ const runTimer = () => { const tasks = [...timers.values()]; timers.clear(); tas
     tree = render(); runTimer();
     handle.scrollToMarker('proj1::body', 'proj1::group', { mode: 'text' });
     requests[0].resolve({ data: new Uint8Array([5]) }); await flush();
+    assert.equal(requests[1].config.headers['X-Preview-Request'], '1', 'position query also subscribes as a preview');
     requests[1].resolve({ data: { markers: [
       { kind: 'field', code: 'proj0::body', page: 1, y: 20 },
       { kind: 'field', code: 'proj1::body', page: 3, y: 60 },

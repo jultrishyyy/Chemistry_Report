@@ -46,8 +46,8 @@ async function assertReportGroupKind(
       WHERE id=$1 AND archived_at IS NULL`, [Number(familyId)],
   );
   if (!result.rows.length) throw new VersionFlowError('所选项目组不存在或已删除', 400);
-  if (result.rows[0].template_kind !== templateKind) {
-    throw new VersionFlowError('模板类型与所选项目组类型不一致', 400);
+  if (!['cover', 'project'].includes(templateKind)) {
+    throw new VersionFlowError('项目组仅支持首页模板和项目模板', 400);
   }
 }
 
@@ -226,7 +226,7 @@ router.get('/:id/lineage', async (req: Request, res: Response) => {
   const templateId = Number(req.params.id);
   const relation = await getLineage(pool, 'report', templateId);
   const family = await pool.query(
-    `SELECT f.id,f.name,f.code,f.template_kind
+    `SELECT f.id,f.name,f.code,t.template_kind
        FROM report_templates t
        JOIN report_project_template_families f ON f.id=t.report_project_family_id
       WHERE t.id=$1 AND f.archived_at IS NULL`, [templateId],
@@ -287,6 +287,18 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     await client.query('BEGIN');
     await assertReportGroupKind(client, report_project_family_id, template_kind);
+    let resolvedHostManufacturerId = host_manufacturer_id ? Number(host_manufacturer_id) : null;
+    // 从项目组内创建模板时，默认继承该项目组选择的主机厂。前端会显式传值，
+    // 此处仍做服务端兜底，避免旧前端或表单挂载时序造成关联丢失。
+    if (resolvedHostManufacturerId == null && report_project_family_id) {
+      const familyHost = await client.query(
+        `SELECT host_manufacturer_id
+           FROM report_project_template_families
+          WHERE id=$1 AND archived_at IS NULL`,
+        [report_project_family_id],
+      );
+      resolvedHostManufacturerId = familyHost.rows[0]?.host_manufacturer_id ?? null;
+    }
     let initialFieldDefinitions: FieldGroup[] = Array.isArray(field_definitions) ? field_definitions : [];
     let initialLayoutOptions: Record<string, any> = layout_options && typeof layout_options === 'object' ? { ...layout_options } : {};
     let inheritanceResult: { mapped: number; manual: number; record_template_id: number } | null = null;
@@ -351,7 +363,7 @@ router.post('/', async (req: Request, res: Response) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [
         name, source_file || null,
-        template_kind, test_project_codes || null, linked_record_template_id || null, host_manufacturer_id || null,
+        template_kind, test_project_codes || null, linked_record_template_id || null, resolvedHostManufacturerId,
         report_project_family_id || null,parent_template_id || null, parent_version_id || null,
       ]
     );

@@ -16,8 +16,10 @@ export type FieldSemanticRole =
 
 export type NumericRoundingRule = {
   /** half_even＝四舍六入五成双；multiple_2/5＝修约到最接近的对应倍数。 */
-  mode: 'none' | 'half_up' | 'half_even' | 'truncate' | 'ceil' | 'floor' | 'multiple_2' | 'multiple_5';
-  /** 除倍数修约外，修约保留的小数位数。 */
+  mode: 'none' | 'half_up' | 'half_even' | 'truncate' | 'ceil' | 'floor' | 'multiple_2' | 'multiple_5' | 'piecewise';
+  /** 按原始值依次匹配上限，最后一段无上限。间隔直接采用数据单位。 */
+  intervals?: { upper?: number; inclusive?: boolean; step: number; mode: 'half_even' | 'ceil' }[];
+  /** 兼容旧版独立修约位数。自由表格配置数字格式后以格式位数为准，新设置无需写入。 */
   digits?: number;
 };
 
@@ -327,6 +329,14 @@ export interface DataMatrixConfig {
 }
 
 export interface FieldDefinition {
+  /** 在双栏原始记录中独占一行，不改变数据来源标识。 */
+  full_width?: boolean;
+  /** Partial character formatting; raw label/value and bindings remain unchanged. */
+  cover_text_styles?: { label?: import('./cover-text-selection').CoverTextStyles; value?: import('./cover-text-selection').CoverTextStyles };
+  /** Original homepage fields retained when the user edits a continuous text run. */
+  cover_source_fields?: FieldDefinition[];
+  /** Added via the full cover field configurator; retain type/source controls. */
+  cover_configured_field?: boolean;
   id: string;
   code: string;
   label: string;
@@ -363,6 +373,7 @@ export interface FieldDefinition {
   /** 日期年月日分隔符；缺省 '-'，可改为 '/'。 */
   date_separator?: '-' | '/';
   options?: string[];
+  choice_display?: { layout?: 'inline' | 'lines'; separator?: string; marker?: 'none' | 'number' | 'number_parentheses' | 'bullet'; show_marker_for_single?: boolean; ending?: string };
   allow_custom?: boolean;      // select/checkbox 允许工程师自定义输入"其他"
   /**
    * 测试设备字段配置。设备选项始终引用设备库，不能退化为自由文本：
@@ -402,8 +413,8 @@ export interface FieldDefinition {
    * 结论模块中的字段职责。字段本身仍是普通 text/textarea/select 等类型，因而可独立配置
    * 必填、默认值、选项和版式；本标记只负责把值稳定地传给报告。
    */
-  conclusion_role?: 'project_name' | 'item_name' | 'judgment_requirement' | 'conclusion';
-  /** 数据归属：record=本方法记录（缺省）；batch_shared=同一项目录入批次的公共数据，只保存一份并供多份记录共用。 */
+  conclusion_role?: 'project_name' | 'item_name' | 'judgment_requirement' | 'limit' | 'conclusion';
+  /** record=本记录普通字段；batch_shared=允许手动拉取（历史命名），数据仍由每份记录独立保存。 */
   data_scope?: 'record' | 'batch_shared';
   /** 图片字段：拍摄阶段（用于"图片记录"分区按阶段分组渲染） */
   image_phase?: 'before' | 'during' | 'after' | 'other';
@@ -681,6 +692,8 @@ export interface FieldDefinition {
       matrix_code?: string;
       source_field?: string;
       source_band_id?: string;
+      /** Direct selection: selected axes are sample slots, not a repeated multi-axis block. */
+      source_axis_mapping?: 'ordinal';
       /** 报告侧样品投影：缺省/all=全部试样；indices=仅展开指定试样序号（0-based，按录入顺序）。 */
       sample_filter?: { mode: 'all' | 'indices'; indices?: number[] };
     }>;
@@ -993,6 +1006,8 @@ export interface StyleOverride {
 }
 
 export interface FieldGroup {
+  /** Project image section binding to the source record image collection. */
+  image_source_group_id?: string;
   id: string;
   label: string;
   /** 已生成报告的连续正文覆盖；fields 保留原绑定快照，不用于公共首页草稿。 */
@@ -1092,6 +1107,8 @@ export interface FieldGroup {
    * 当作一个整体（模块）来锚定/不拆页。缺省 1=只本组。例：签字模块=签字+签发+备注 → module_span:3。
    */
   module_span?: number;
+  /** 首页签署定位；未设置时兼容旧签署区的 bottom 配置。 */
+  signature_position?: 'first_page_bottom' | 'flow' | 'current_page_bottom';
   /** table 布局 + table_header='custom' 时的两列标题，如 ['信息项','内容']；缺省走无表头。 */
   columns?: string[];
   rows?: number;
@@ -1329,6 +1346,9 @@ export interface ReportContentSection {
 }
 
 export interface ReportContentDoc {
+  /** Generation identity and explicit source-structure review state; never rendered. */
+  source_review_revision?: string;
+  source_reviews?: string[];
   /** 真·封面（标题页，P3，可选）。渲染在最前、其后 pagebreak；首页/项目仍由 cover 段的 #show 统管页眉页脚 */
   front_cover?: ReportContentSection;
   cover: ReportContentSection;
@@ -1382,6 +1402,7 @@ export interface ReportReqMatchAssignment {
   record_data_id: number;
   record_data_status?: string;        // record_data.audit_status
   record_template_id?: number;
+  record_template_name?: string;
   project_template_id?: number | null; // 已确认/唯一候选的项目报告模板（null=需文员手选）
   project_template_version_id?: number | null;
   project_template_candidates?: ReportProjectTemplateCandidate[];

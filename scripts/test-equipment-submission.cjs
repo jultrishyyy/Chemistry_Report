@@ -1,0 +1,42 @@
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+const originalLoad = Module._load;
+const field = { code: 'devices', label: '测试设备', type: 'device_ref', required: true };
+let equipment = { asset_code: 'E1', status: '合格', expire_date: '2020-01-01', expired: true };
+const pool = { query: async (sql) => {
+  if (sql.includes('FROM equipment_library')) return { rows: equipment ? [equipment] : [] };
+  if (sql.includes('SELECT b.*')) return { rows: [{ record_data_id: 62, template_version_id: 1, record_template_name: '密度原始记录', record_status: 'draft', raw_data: {} }] };
+  if (sql.includes('FROM record_template_versions')) return { rows: [{ field_definitions: [{ fields: [field] }] }] };
+  throw Error(`Unexpected query: ${sql}`);
+} };
+Module._load = function(name, ...rest) {
+  if (name === '../db.js') return { pool };
+  return originalLoad.call(this, name, ...rest);
+};
+const { validateDeviceReferences } = require('../server/src/routes/record-data.ts');
+const router = require('../server/src/routes/record-batches.ts').default;
+Module._load = originalLoad;
+const { equipmentExpiryWarning } = require('../shared/equipment-expiry.ts');
+(async () => {
+  assert.deepEqual(await validateDeviceReferences(1, { devices: ['E1'] }), [], 'expired dates must not block submission');
+  equipment.status = '超期';
+  assert.deepEqual(await validateDeviceReferences(1, { devices: ['E1'] }), [], 'expired status must not block submission');
+  equipment.status = '停用';
+  assert.equal((await validateDeviceReferences(1, { devices: ['E1'] }))[0].reason, 'invalid_status');
+  equipment = null;
+  assert.equal((await validateDeviceReferences(1, { devices: ['E1'] }))[0].reason, 'not_found');
+  assert.equal((await validateDeviceReferences(1, {}))[0].reason, 'required');
+  const today = new Date(2026, 8, 18, 12);
+  assert.match(equipmentExpiryWarning({ expire_date: '2026-09-17', status: '合格' }, today), /到期/);
+  assert.equal(equipmentExpiryWarning({ expire_date: '2026-09-18' }, today), '');
+  assert.equal(equipmentExpiryWarning({ expire_date: '2026-09-19' }, today), '');
+  assert.match(equipmentExpiryWarning({ status: '超期' }, today), /超期/);
+  assert.equal(equipmentExpiryWarning({ expire_date: 'invalid' }, today), '');
+  const handler = router.stack.find(layer => layer.route?.path === '/:id/submit').route.stack.at(-1).handle;
+  const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+  await handler({ params: { id: '1' }, header: () => '测试用户' }, res);
+  assert.equal(res.code, 400);
+  assert.match(res.body.error, /密度原始记录：请选择测试设备/);
+  assert.doesNotMatch(res.body.error, /记录#|公共字段/);
+  console.log('Equipment expiry advisory, submission validation and named batch errors passed (mock database).');
+})().catch(error => { console.error(error); process.exitCode = 1; });

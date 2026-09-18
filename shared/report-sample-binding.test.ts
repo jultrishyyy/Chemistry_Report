@@ -96,7 +96,8 @@ test('fixed, header and sample bindings preserve explicit empty and zero values'
   assert.equal(resolveBinding({ source: 'record_free_template_cell', field_code: 'f', cell_key: 'h::x' }, ctx), '');
   assert.equal(resolveBinding({ source: 'record_free_cell', field_code: 'f', cell_key: 'a::y' }, ctx), '0');
   assert.ok(!render({ 'a::x::s0': '' }).includes('DefaultValue'));
-  assert.ok(render({}).includes('DefaultValue'));
+  assert.ok(!render({}).includes('DefaultValue')); // An unfilled sample no longer renders template defaults.
+  assert.ok(render({ 'a::y::s0': 0 }).includes('DefaultValue'));
 });
 
 test('legacy sample_band remains a valid direct source', () => {

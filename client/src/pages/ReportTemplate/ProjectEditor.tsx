@@ -19,6 +19,7 @@ import { generateTypst, injectReportFieldsIntoTypst, type ReportRenderCtx } from
 import { extractRecordConclusion } from '../../../../shared/record-conclusion';
 import { generateMockData } from '../../../../shared/mock-data';
 import { validateReportBindings, validateProjectConclusions } from '../../../../shared/binding-integrity';
+import { reportBindingReview } from '../../../../shared/report-binding-review';
 import { buildProjectGroupsFromRecord, DEFAULT_PROJECT_THEME_CONFIG, detectProjectConclusionBinding } from '../../../../shared/report-inherit';
 import { fetchRecordTemplateForLink } from '../../utils/recordTemplateLink';
 import type { RecordTemplate, ProjectConclusionDecl, CellBinding } from '../../../../shared/types';
@@ -80,7 +81,6 @@ export default function ProjectEditor() {
   const conclusions: ProjectConclusionDecl[] = conclusion ? [conclusion] : [];
   const [conclEdit, setConclEdit] = useState(false);
   const [conclOpen, setConclOpen] = useState<boolean | null>(null);   // 结论面板展开态：null=自动(未填则展开/填好则收起)，否则用户手动开合
-  const [bindingWarningsOpen, setBindingWarningsOpen] = useState(false);
   const setLayout = (patch: Record<string, any>) => {
     if (readonly) return;
     setTemplate({ ...template, layout_options: { ...(template.layout_options || {}), ...patch } });
@@ -120,9 +120,11 @@ export default function ProjectEditor() {
 
   // 实时映射完整性校验：报告绑定 + 检测结论声明 vs 关联原始记录当前版本字段集
   const bindingWarnings = useMemo(
-    () => (linkedRecord ? validateReportBindings(template.groups, linkedRecord.groups, hasStructuredRecordConclusion ? [] : conclusions) : []),
+    () => (linkedRecord ? reportBindingReview(template.groups, linkedRecord.groups, hasStructuredRecordConclusion ? [] : conclusions) : []),
     [template, linkedRecord, conclusions, hasStructuredRecordConclusion]
   );
+  const fieldIssues = useMemo(() => Object.fromEntries(bindingWarnings
+    .filter(w => w.fieldCode).map(w => [w.fieldCode!, w.reasons])), [bindingWarnings]);
 
   const mockData = useMemo(() => linkedRecord ? generateMockData(linkedRecord) : {}, [linkedRecord]);
 
@@ -336,7 +338,7 @@ export default function ProjectEditor() {
   if (loading) return <Spin style={{ margin: '100px auto', display: 'block' }} />;
 
   return (
-    <div {...ed.historyEvents} style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div {...ed.historyEvents} style={{ height: '100%', minHeight: 0, overflow: 'clip', display: 'flex', flexDirection: 'column' }}>
       <EditorToolbar title={meta?.name || '项目报告模板'}
         onBack={() => viewingVersion ? navigate(-1) : confirmLeave(() => navigate('/report-templates?tab=project'), handleSave)}>
         {permissionPreview && !viewingVersion && <Tag icon={<EyeOutlined />}>只读预览</Tag>}
@@ -448,23 +450,6 @@ export default function ProjectEditor() {
           action={<Button size="small" type="primary" icon={<ImportOutlined />} onClick={handlePullFromRecord}>从原始记录拉取</Button>} />
       )}
 
-      {bindingWarnings.length > 0 && !template.layout_options?.pending_record_inherit && (
-        <Alert type="warning" showIcon
-          style={{ margin: '8px 12px 0', borderRadius: 6, paddingBlock: 6 }}
-          message={<span>
-            发现 {bindingWarnings.length} 处映射需要处理，相关位置生成报告时可能为空。
-            <Button type="link" size="small" style={{ paddingInline: 6 }} onClick={() => setBindingWarningsOpen(open => !open)}>
-              {bindingWarningsOpen ? '收起详情' : '查看详情'}
-            </Button>
-          </span>}
-          description={bindingWarningsOpen ?
-            <ul style={{ margin: '4px 0 0', paddingLeft: 18, maxHeight: 120, overflow: 'auto' }}>
-              {bindingWarnings.map((w, i) => (
-                <li key={i}><b>{w.path}</b>：{w.reason}（{w.detail}）</li>
-              ))}
-            </ul>
-          : undefined} />
-      )}
 
       {conclEdit && (
         <BindingPickerModal
@@ -479,6 +464,7 @@ export default function ProjectEditor() {
       )}
 
       <EditorSplit
+        contained
         left={
           <EditAttemptGuard active={!!id && !permissionPreview && !viewingVersion && !pendingReview && !lease.loading && !lease.acquired && !lease.holderName}
             style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', ...(readonly ? { opacity: 0.75 } : {}) }}>
@@ -488,20 +474,23 @@ export default function ProjectEditor() {
             </div>
             {/* ─── 6.7 本项目检测结论：放在左侧·模板名称下方（不遮挡右侧 PDF 预览），含填写说明 ─── */}
             {hasStructuredRecordConclusion ? (
-              <Alert type="success" showIcon style={{ margin: '0 12px 8px' }}
-                message="项目名称和检测结论由原始记录统一提供"
-                description="该原始记录使用结论模块；名称、判定要求和结论都是可独立配置的普通字段。项目模板只负责版式和结果映射，生成报告时按字段角色读取实际录入值。" />
+              <div style={{ flexShrink: 0, margin: '0 12px 8px', color: '#777', fontSize: 12 }}>
+                项目名称和结论取自原始记录
+              </div>
             ) : <details open={conclOpenEff} style={{ flex: '0 0 auto', borderBottom: '1px solid #eee', background: '#fafcff' }}>
               <summary onClick={(e) => { e.preventDefault(); setConclOpen(!conclOpenEff); }}
                 style={{ padding: '6px 12px', cursor: 'pointer', fontWeight: 500, fontSize: 13, userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6, listStyle: 'none' }}>
                 <span style={{ fontSize: 11, color: '#999', transition: 'transform .15s', transform: conclOpenEff ? 'rotate(90deg)' : 'none' }}>▸</span>
                 本项目检测结论
+                {bindingWarnings.some(w => w.conclusion) && <Tag color="warning">来源需调整</Tag>}
                 <Tooltip title={conclHelp}><QuestionCircleOutlined style={{ color: '#999' }} /></Tooltip>
                 {conclErrors.length > 0
                   ? <Tag color="error" style={{ marginLeft: 'auto', marginRight: 0 }}>必填未完成</Tag>
                   : <Tag color="success" style={{ marginLeft: 'auto', marginRight: 0 }}>已填写</Tag>}
               </summary>
               <div style={{ padding: '6px 12px 10px' }}>
+                {bindingWarnings.filter(w => w.conclusion).map((w, i) => <Alert key={i} type="warning" showIcon
+                  style={{ marginBottom: 8 }} message={w.reasons.join('；')} />)}
                 <Alert type="info" showIcon style={{ marginBottom: 8, paddingBlock: 5 }}
                   message="报告项目标题将自动使用委托单中的当前项目名称" />
                 {!linkedRecord && (
@@ -539,8 +528,9 @@ export default function ProjectEditor() {
                 )}
               </div>
             </details>}
-            <div style={{ flex: '1 1 auto', minHeight: 0 }}>
+            <div style={{ flex: '1 1 0', minHeight: 0, overflow: 'clip' }}>
               <FieldEditor template={template} onChange={readonly ? () => {} : setTemplate} readOnly={readonly}
+                fieldIssues={template.layout_options?.pending_record_inherit ? {} : fieldIssues}
                 editorMode="report-project" linkedRecord={linkedRecord}
                 onFieldFocus={(code, groupId, field) => viewerRef.current?.scrollToMarker(
                   code,

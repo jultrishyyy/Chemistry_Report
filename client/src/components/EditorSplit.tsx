@@ -6,12 +6,17 @@ import { useRef, useState } from 'react';
 
 const KEY = 'editorSplitPct';
 const clamp = (v: number) => Math.min(Math.max(v, 25), 75);
+const rememberWidth = (value: number) => {
+  try { localStorage.setItem(KEY, String(value)); } catch { /* Storage may be disabled; resizing still works. */ }
+};
 
-export default function EditorSplit({ left, right }: { left: React.ReactNode; right: React.ReactNode }) {
+export default function EditorSplit({ left, right, contained = false }: { left: React.ReactNode; right: React.ReactNode; contained?: boolean }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [pct, setPct] = useState<number>(() => {
-    const v = Number(localStorage.getItem(KEY));
-    return Number.isFinite(v) && v >= 25 && v <= 75 ? v : 45;
+    try {
+      const v = Number(localStorage.getItem(KEY));
+      return Number.isFinite(v) && v >= 25 && v <= 75 ? v : 45;
+    } catch { return 45; }
   });
   const [dragging, setDragging] = useState(false);
 
@@ -20,21 +25,23 @@ export default function EditorSplit({ left, right }: { left: React.ReactNode; ri
     if (!rect || rect.width === 0) return;
     const next = clamp(((clientX - rect.left) / rect.width) * 100);
     setPct(next);
-    localStorage.setItem(KEY, String(Math.round(next * 10) / 10));
+    rememberWidth(Math.round(next * 10) / 10);
   };
 
   return (
-    <div ref={wrapRef} data-editor-split-root="true" style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+    <div ref={wrapRef} data-editor-split-root="true" style={{ flex: '1 1 0', display: 'flex', minHeight: 0, ...(contained ? { overflow: 'clip' } : {}) }}>
       {/* 左栏保留自身滚动作为兜底；字段编辑器内部主栏也有滚动，均以 minHeight:0 保证不被内容撑开。 */}
-      <div style={{ width: `${pct}%`, minWidth: 0, minHeight: 0, overflow: 'auto' }}>{left}</div>
+      <div style={{ width: `${pct}%`, minWidth: 0, minHeight: 0, overflow: contained ? 'clip' : 'auto' }}>{left}</div>
       <div
         title="拖动调整左右宽度，双击复位"
-        onPointerDown={(e) => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); setDragging(true); }}
+        onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); setDragging(true); }}
         onPointerMove={(e) => { if (dragging) update(e.clientX); }}
-        onPointerUp={(e) => { (e.target as HTMLElement).releasePointerCapture(e.pointerId); setDragging(false); }}
-        onDoubleClick={() => { setPct(45); localStorage.setItem(KEY, '45'); }}
+        onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); setDragging(false); }}
+        onPointerCancel={() => setDragging(false)}
+        onLostPointerCapture={() => setDragging(false)}
+        onDoubleClick={() => { setPct(45); rememberWidth(45); }}
         style={{
-          flex: 'none', width: 7, cursor: 'col-resize',
+          flex: 'none', width: 7, cursor: 'col-resize', touchAction: 'none',
           background: dragging ? 'rgba(19,102,217,0.35)' : '#e8ecf3',
           borderLeft: '1px solid #d9d9d9', borderRight: '1px solid #d9d9d9',
           transition: dragging ? 'none' : 'background 0.15s',

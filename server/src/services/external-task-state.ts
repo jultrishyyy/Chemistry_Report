@@ -6,6 +6,7 @@
  * SampleList[].TaskList[].TaskId。只有同一任务下所有未取消记录均 reviewed 才入队。
  */
 import { pool } from '../db.js';
+import { startPeriodicWorker } from './periodic-worker.js';
 import { isExternalSoapConfigured, updateMaterialTaskState } from './external-report-delivery.js';
 
 export interface TaskStateSyncResult {
@@ -147,6 +148,19 @@ export async function deliverTaskStateQueue(deliveryIds?: number[]): Promise<Del
   }
 
   return Promise.all(rows.map(async row => {
+    // A queued completion can become stale after an external data-entry return.
+    const current = await pool.query(
+      `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE audit_status<>'reviewed')::int AS unfinished
+         FROM record_data WHERE order_no=$1 AND sample_external_id=$2 AND test_item_name=$3 AND cancelled_at IS NULL`,
+      [row.order_no, row.sample_external_id, row.test_item_name],
+    );
+    if (Number(row.test_state) === 1 && (!Number(current.rows[0]?.total) || Number(current.rows[0]?.unfinished) > 0)) {
+      await pool.query(`UPDATE external_task_state_deliveries SET delivery_status='pending',
+        delivery_error='任务尚未全部审核通过，暂不发送完工通知',next_retry_at=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE id=$1`, [row.id]);
+      return { id: Number(row.id), task_id: String(row.task_id), order_no: String(row.order_no),
+        sample_external_id: String(row.sample_external_id), test_item_name: String(row.test_item_name),
+        ok: false, error: '任务尚未全部审核通过，暂不发送完工通知' };
+    }
     const delivered = await updateMaterialTaskState(String(row.task_id), Number(row.test_state) === 0 ? 0 : 1);
     if (delivered.mock) {
       // demo 配置绝不能写成 sent，否则以后切到 server 配置会永久漏发。
@@ -178,16 +192,12 @@ export async function deliverTaskStateQueue(deliveryIds?: number[]): Promise<Del
 }
 
 /** 服务启动后后台重试；定时器 unref，不阻止进程退出。 */
-export function startTaskStateDeliveryRetryWorker(): void {
+export function startTaskStateDeliveryRetryWorker(): () => Promise<void> {
   if (!isExternalSoapConfigured()) {
     console.log('[external-task-state] mock 模式不启动完工通知重试；通知保留 pending，切换 server 配置后发送');
-    return;
+    return async () => {};
   }
-  const run = () => deliverTaskStateQueue().catch(error => {
-    console.error('[external-task-state] 重试任务状态通知失败:', error?.message || error);
-  });
-  const first = setTimeout(run, 10_000);
-  first.unref();
-  const timer = setInterval(run, 5 * 60_000);
-  timer.unref();
+  return startPeriodicWorker(() => deliverTaskStateQueue(), error => {
+    console.error('[external-task-state] 重试任务状态通知失败:', error);
+  }, 10_000, 5 * 60_000);
 }

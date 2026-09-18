@@ -669,6 +669,34 @@ function ReviewDrawer({ open, onClose, kind, templateId, templateName, openDraft
     }
     setSubmitting(true);
     try {
+      if (kind === 'record' && decision === 'approve') {
+        // Always reload the pending version; do not inspect the editor's unsaved draft.
+        const pending = await axios.get(`${apiBase(kind)}/${templateId}/versions/${openDraft.id}`);
+        const impact = await axios.post(`${apiBase(kind)}/${templateId}/report-impact`, {
+          groups: pending.data.field_definitions,
+        });
+        const affected = (impact.data.templates || []).filter((row: any) => row.checked && row.issues?.length);
+        if (affected.length) {
+          const confirmed = await new Promise<boolean>(resolve => {
+            Modal.confirm({
+              title: `${affected.length} 个项目模板需要调整来源`,
+              content: <div style={{ maxHeight: '40vh', overflowY: 'auto' }}>
+                <p>发布后请调整以下模板，已有报告不会自动修改。</p>
+                {affected.map((row: any) => <div key={row.id} style={{ marginBlock: 8 }}>
+                  <strong>{row.name}</strong>
+                  <span style={{ marginLeft: 8, color: '#777' }}>{row.checked_status === 'approved' ? '已发布版本' : row.checked_status === 'pending' ? '待审核版本' : '草稿版本'}</span>
+                  {row.issues.map((issue: any, i: number) => <div key={i}>
+                    {issue.groupName} / {issue.fieldName}：{issue.reasons.join('；')}
+                  </div>)}
+                </div>)}
+              </div>,
+              okText: '继续发布', cancelText: '返回检查',
+              onOk: () => resolve(true), onCancel: () => resolve(false),
+            });
+          });
+          if (!confirmed) return;
+        }
+      }
       const res = await axios.post(`${apiBase(kind)}/${templateId}/versions/${openDraft.id}/review`, {
         decision, note: note.trim() || undefined,
       });
@@ -1021,13 +1049,13 @@ function LineageDrawer({ open, onClose, templateId, templateKind, lineage, loadi
         {!lineage?.family ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前模板未加入项目组" /> : <>
           <Space wrap style={{ marginBottom: 10 }}>
             <Tag color="cyan">{lineage.family.name}</Tag>
-            {(lineage.family.members?.length || 0) > 1 && <Button size="small" type="primary" ghost
-              icon={<SyncOutlined />} disabled={!canSync} onClick={onFamilySync}>同步到同组模板…</Button>}
+            {(lineage.family.members || []).some((m: any) => Number(m.id) !== Number(templateId) && m.template_kind === lineage.family.template_kind) && <Button size="small" type="primary" ghost
+              icon={<SyncOutlined />} disabled={!canSync} onClick={onFamilySync}>同步到同组同类模板…</Button>}
           </Space>
           <div style={{ display: 'grid', gap: 6 }}>
             {(lineage.family.members || []).map((member: any) => <div key={member.id}>
               {member.id === templateId ? <><Tag color="blue">当前模板</Tag>{member.name}</> : <a onClick={() => {
-                if (canSync) { onClose(); navigate(editorPath(member.id)); }
+                if (canSync) { onClose(); navigate(templateKind === 'report' ? `/report-templates/${member.template_kind === 'project' ? 'project' : 'cover'}/editor?id=${member.id}` : editorPath(member.id)); }
                 else setPreviewNode({ id: member.id, name: member.name });
               }}><Tag>同组</Tag>#{member.id} {member.name}</a>}
             </div>)}
@@ -1086,7 +1114,7 @@ function SyncWizard({ open, onClose, kind, templateId, templateName, onDone, mod
     try {
       const lin = (await axios.get(`${apiBase(kind)}/${templateId}/lineage`)).data;
       const targetIds = mode === 'family'
-        ? (lin.family?.members || []).filter((member: any) => Number(member.id) !== Number(templateId)).map((member: any) => member.id)
+        ? (lin.family?.members || []).filter((member: any) => Number(member.id) !== Number(templateId) && member.template_kind === lin.family.template_kind).map((member: any) => member.id)
         : (lin.descendants || []).filter((d: any) => d.parent_template_id === templateId).map((d: any) => d.id);
       if (targetIds.length === 0) {
         setPreview([]); setSelected([]);

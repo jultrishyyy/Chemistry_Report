@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Button, message, Spin, Tag, Space, Alert, Modal, Input, Select, Tooltip } from 'antd';
-import { SaveOutlined, CheckCircleOutlined, EyeOutlined, StopOutlined, ImportOutlined } from '@ant-design/icons';
+import { Button, message, Spin, Tag, Space, Alert, Modal, Select, Checkbox } from 'antd';
+import { SaveOutlined, CheckCircleOutlined, EyeOutlined, ImportOutlined } from '@ant-design/icons';
 import FormRenderer from '../../components/FormRenderer';
 import AttachmentManager from '../../components/AttachmentManager';
 import TypstViewer, { markerHighlightForField, type TypstViewerHandle } from '../../components/TypstViewer';
@@ -15,11 +15,13 @@ import { useAutoSave } from '../../hooks/useAutoSave';
 import { BRAND, APP_BG } from '../../theme';
 import axios from 'axios';
 import type { WorkOrder } from './order-shared';
+import { normalizeLinkedIds } from './order-shared';
 import { RecordOrderContextCard } from './OrderProjectInfo';
 import { useExclusiveEditLease } from '../../hooks/useCollaboration';
+import { rebaseRecordSave } from '../../../../shared/record-save-rebase';
 import { ensureRecordIdentityFields } from '../../../../shared/record-template-normalize';
 import { figureCaptionFieldKey, figureCaptionGroupKey } from '../../../../shared/figure-caption';
-import { getRecordFieldTransferExclusion, isRecordFieldTransferable } from '../../../../shared/record-field-transfer';
+import { isRecordPullSource, matchPublicRecordFields, publicRecordTransferPatch } from '../../../../shared/record-field-transfer';
 import DocumentCollaborationStatus from '../../components/DocumentCollaborationStatus';
 import EditAttemptGuard from '../../components/EditAttemptGuard';
 
@@ -29,24 +31,20 @@ const API = '/api';
 function splitData(
   template: RecordTemplate,
   data: Record<string, any>,
-  useBatchShared = false,
-  existingBatchSharedCodes: string[] = [],
+  _useBatchShared = false,
+  _existingBatchSharedCodes: string[] = [],
 ) {
   const allFields = template.groups.flatMap(g => g.fields);
   const computedCodes = new Set(allFields.filter(f => f.type === 'computed').map(f => f.code));
   const autoCodes = new Set(allFields.filter(f => f.semantic_role).map(f => f.code));
-  // 同一模板也允许单独录入；只有记录确实属于批次时，公共字段才从单条 raw_data 中分离。
-  const sharedCodes = new Set(useBatchShared
-    ? [...allFields.filter(f => f.data_scope === 'batch_shared').map(f => f.code), ...existingBatchSharedCodes]
-    : []);
+  // “公共”只控制拉取资格；所有录入值均独立保存在当前记录中。
   const stripped = stripMatrixFlatKeys(template, data);
   const rawData: Record<string, any> = {};
   const derivedData: Record<string, any> = {};
   const sharedData: Record<string, any> = {};
   for (const [k, v] of Object.entries(stripped)) {
     if (autoCodes.has(k)) continue;
-    if (sharedCodes.has(k)) sharedData[k] = v;
-    else if (computedCodes.has(k)) derivedData[k] = v;
+    if (computedCodes.has(k)) derivedData[k] = v;
     else rawData[k] = v;
   }
   return { rawData, derivedData, sharedData, allFields };
@@ -125,6 +123,13 @@ export default function LabRecord() {
   const [pullSources, setPullSources] = useState<any[]>([]);
   const [pullSourceId, setPullSourceId] = useState<number | undefined>();
   const [pullPreview, setPullPreview] = useState<any | null>(null);
+  const [replacePulledValues, setReplacePulledValues] = useState(false);
+  const pullDifferences = pullPreview?.skipped.filter((item: any) => !item.identical) || [];
+  const pullUnchanged = pullPreview?.skipped.filter((item: any) => item.identical) || [];
+  const pullCount = (pullPreview?.matched.length || 0) + pullUnchanged.length + (replacePulledValues ? pullDifferences.length : 0);
+  const transferText = (value: any) => Array.isArray(value) ? value.join('、')
+    : value && typeof value === 'object' ? ('custom' in value ? String(value.custom ?? '') : JSON.stringify(value)) : String(value ?? '');
+  const pullRequestRef = useRef(0);
 
   const effectiveOrderNo = String(recordRow?.order_no || ctxOrderNo || '');
   const effectiveSampleId = String(recordRow?.sample_external_id || ctxSampleId || '');
@@ -142,6 +147,10 @@ export default function LabRecord() {
   const currentSample = workOrder?.payload?.samples?.find(sample => String(sample.id) === effectiveSampleId)
     || workOrder?.payload?.samples?.find(sample => !!ctxSampleName && sample.name === ctxSampleName);
   const currentTest = currentSample?.test_infos?.find(test => test.name === effectiveTestName);
+  const pullTemplateIds = [...new Set(currentTest ? normalizeLinkedIds(currentTest) : [])];
+  const canPullPublic = pullTemplateIds.length > 1 && pullTemplateIds.includes(Number(recordRow?.template_id || templateId));
+  const pullScope = { orderNo: effectiveOrderNo, sampleId: effectiveSampleId, testName: effectiveTestName,
+    recordId, templateId: Number(recordRow?.template_id || templateId), templateIds: pullTemplateIds };
 
   const uploadExcelAttachment = async (id: string | number, file: File) => {
     const fd = new FormData();
@@ -256,7 +265,7 @@ export default function LabRecord() {
           sharedData = batch.shared_data || {};
         } catch { setRecordBatch(null); }
       } else setRecordBatch(null);
-      const merged = { ...rec.raw_data, ...rec.derived_data, ...sharedData };
+      const merged = { ...sharedData, ...rec.raw_data, ...rec.derived_data };
       setRecordRow(rec);
       setAttachments(Array.isArray(rec.attachments) ? rec.attachments : []);
       // ⚠️ 数据一致性：编辑已有记录【按录入时锁定的模板版本加载】，而不是当前最新版本——
@@ -350,99 +359,51 @@ export default function LabRecord() {
   }, [template, data]);
   const backTo = ctxOrderNo ? `/lab/order/${encodeURIComponent(ctxOrderNo)}` : '/lab';
 
-  const cancelBatchMethod = (item: any) => {
-    if (!recordBatch?.id || !item?.method_scheme_id) return;
-    let reason = '';
-    Modal.confirm({
-      title: `取消检测：${item.method_name || item.record_template_name}`,
-      icon: <StopOutlined style={{ color: '#7c3aed' }} />,
-      content: <div>
-        <Alert type="warning" showIcon style={{ marginBottom: 10 }}
-          message="原始记录和已有数据会保留，但不再参与提交、审核和报告生成。" />
-        <Input.TextArea rows={3} placeholder="请输入取消检测原因（必填）" onChange={(event) => { reason = event.target.value; }} />
-      </div>,
-      okText: '确认取消检测', cancelText: '返回', okButtonProps: { danger: true },
-      onOk: async () => {
-        if (!reason.trim()) { message.warning('请输入取消检测原因'); return Promise.reject(); }
-        await axios.post(`${API}/record-batches/${recordBatch.id}/methods/${item.method_scheme_id}/cancel`, { reason: reason.trim() });
-        const detail = (await axios.get(`${API}/record-batches/${recordBatch.id}`)).data;
-        setRecordBatch(detail);
-        if (Number(item.record_data_id) === Number(recordId)) {
-          setRecordRow((previous: any) => ({ ...previous, cancelled_at: new Date().toISOString(), cancelled_by_name: user?.display_name, cancel_reason: reason.trim() }));
-        }
-        message.success('已标记为取消检测，原始数据和审计记录已保留');
-      },
-    });
-  };
-
-  const valueIsEmpty = (value: any, fieldType?: string) => {
-    if (value == null || value === '') return true;
-    if (Array.isArray(value)) return value.length === 0;
-    if (fieldType === 'data_matrix') return !matrixHasAnyValue(value);
-    if (typeof value === 'object') return Object.keys(value).length === 0;
-    return false;
-  };
 
   /** 从同一订单/样品/项目的另一份原始记录中查找可复用数据。 */
   const openPullData = async () => {
-    if (!template || !effectiveOrderNo) { message.warning('当前记录缺少订单上下文，无法查找其他录入记录'); return; }
-    setPullOpen(true); setPullLoading(true); setPullSourceId(undefined); setPullPreview(null);
+    if (!template || !canPullPublic) return;
+    const request = ++pullRequestRef.current;
+    setPullOpen(true); setPullLoading(true); setPullSources([]); setPullSourceId(undefined); setPullPreview(null);
+    setReplacePulledValues(false);
     try {
       const [recordsResult, templatesResult] = await Promise.all([
         axios.get(`${API}/record-data?order_no=${encodeURIComponent(effectiveOrderNo)}`),
         axios.get(`${API}/record-templates`),
       ]);
       const names = new Map((templatesResult.data || []).map((item: any) => [Number(item.id), item.name]));
-      setPullSources((recordsResult.data || []).filter((item: any) =>
-        Number(item.id) !== Number(recordId || 0)
-        && String(item.sample_external_id || '') === effectiveSampleId
-        && String(item.test_item_name || '') === effectiveTestName
-        && !item.cancelled_at)
+      if (request !== pullRequestRef.current) return;
+      setPullSources((recordsResult.data || []).filter((item: any) => isRecordPullSource(item, pullScope))
         .map((item: any) => ({ ...item, template_name: names.get(Number(item.template_id)) || `模板 #${item.template_id}` })));
     } catch (error: any) { message.error(error?.response?.data?.error || '其他录入记录加载失败'); }
-    finally { setPullLoading(false); }
+    finally { if (request === pullRequestRef.current) setPullLoading(false); }
   };
 
   const previewPullData = async (sourceId: number) => {
-    if (!template) return;
-    setPullSourceId(sourceId); setPullLoading(true);
+    if (!template || !pullSources.some(source => Number(source.id) === sourceId)) return;
+    const request = ++pullRequestRef.current;
+    setPullSourceId(sourceId); setPullPreview(null); setPullLoading(true);
+    setReplacePulledValues(false);
     try {
       const source = (await axios.get(`${API}/record-data/${sourceId}`)).data;
+      if (!isRecordPullSource(source, pullScope)) throw new Error('该记录已不属于当前项目的可用来源，请重新选择');
       let sourceGroups: any[] = [];
       if (source.template_version_id) {
-        try { sourceGroups = (await axios.get(`${API}/record-templates/${source.template_id}/versions/${source.template_version_id}`)).data.field_definitions || []; }
-        catch { /* 回退当前模板版本 */ }
+        sourceGroups = (await axios.get(`${API}/record-templates/${source.template_id}/versions/${source.template_version_id}`)).data.field_definitions || [];
       }
-      if (!sourceGroups.length) sourceGroups = (await axios.get(`${API}/record-templates/${source.template_id}`)).data.field_definitions || [];
-      const sourceFields = new Map(sourceGroups.flatMap((group: any) => (group.fields || [])
-        .filter((field: any) => isRecordFieldTransferable(field, group))
-        .map((field: any) => [field.code, { field, group }])));
-      const matched: any[] = []; const unmatched: any[] = []; const skipped: any[] = []; const excluded: any[] = []; const values: Record<string, any> = {};
-      for (const group of template.groups) for (const field of group.fields) {
-        if (!field.code) continue;
-        const exclusion = getRecordFieldTransferExclusion(field, group);
-        if (exclusion) { excluded.push({ code: field.code, label: field.label, reason: exclusion }); continue; }
-        // 批次公共字段由批次共享数据自动提供，不应再从某一条记录复制。
-        if (field.data_scope === 'batch_shared') { excluded.push({ code: field.code, label: field.label, reason: '项目公共字段' }); continue; }
-        const sourceEntry: any = sourceFields.get(field.code);
-        const sourceField: any = sourceEntry?.field;
-        if (!sourceField) { unmatched.push({ code: field.code, label: field.label, reason: '来源记录没有同编码字段' }); continue; }
-        if (sourceField.type !== field.type) { unmatched.push({ code: field.code, label: field.label, reason: `字段类型不同（${sourceField.type} → ${field.type}）` }); continue; }
-        const sourceValue = source.raw_data?.[field.code];
-        if (valueIsEmpty(sourceValue, field.type)) { unmatched.push({ code: field.code, label: field.label, reason: '来源记录未填写' }); continue; }
-        if (!valueIsEmpty(data[field.code], field.type)) { skipped.push({ code: field.code, label: field.label, reason: '当前记录已有内容' }); continue; }
-        values[field.code] = JSON.parse(JSON.stringify(sourceValue));
-        matched.push({ code: field.code, label: field.label });
-      }
-      setPullPreview({ matched, unmatched, skipped, excluded, values });
-    } catch (error: any) { message.error(error?.response?.data?.error || '数据匹配失败'); setPullPreview(null); }
-    finally { setPullLoading(false); }
+      if (!source.template_version_id) sourceGroups = (await axios.get(`${API}/record-templates/${source.template_id}`)).data.field_definitions || [];
+      if (request !== pullRequestRef.current) return;
+      setPullPreview(matchPublicRecordFields(template.groups, sourceGroups, data, { ...source.batch_shared_data, ...source.raw_data }));
+    } catch (error: any) { if (request === pullRequestRef.current) { message.error(error?.response?.data?.error || error.message || '数据匹配失败'); setPullPreview(null); } }
+    finally { if (request === pullRequestRef.current) setPullLoading(false); }
   };
 
   const applyPulledData = () => {
-    if (!pullPreview?.matched?.length) return;
-    setData(previous => ({ ...previous, ...pullPreview.values }));
-    message.success(`已填充 ${pullPreview.matched.length} 个相同字段；请检查后保存草稿`);
+    if (readOnly || pullLoading || !pullPreview || !pullCount) return;
+    const patch = publicRecordTransferPatch(data, pullPreview, replacePulledValues);
+    if (!Object.keys(patch).length) { message.info('当前内容已变化，请重新选择来源核对'); return; }
+    setData(previous => ({ ...previous, ...publicRecordTransferPatch(previous, pullPreview, replacePulledValues) }));
+    message.success(`已填充 ${Object.keys(patch).length} 个字段；请核对，结束编辑时会保存`);
     setPullOpen(false);
   };
 
@@ -458,9 +419,7 @@ export default function LabRecord() {
     if (status === 'pending') {
       const missing = allFields.filter(f => {
         if (!f.required || f.type === 'computed') return false;
-        const storedValue = f.data_scope === 'batch_shared' && recordRow?.record_batch_id
-          ? sharedData[f.code]
-          : rawData[f.code];
+        const storedValue = rawData[f.code];
         // 结论模块的独立字段允许模板给默认值；录入人未覆盖时直接采用默认值，仍可在表单中改写。
         const v = f.conclusion_role && (storedValue === null || storedValue === undefined || storedValue === '')
           ? f.default_value
@@ -513,10 +472,6 @@ export default function LabRecord() {
         };
         collectPatch(rawData, savedDataRef.current.rawData, rawPatch, removeRaw);
         collectPatch(derivedData, savedDataRef.current.derivedData, derivedPatch, removeDerived);
-        if (recordRow?.record_batch_id && JSON.stringify(sharedData) !== JSON.stringify(savedDataRef.current.sharedData)) {
-          const batchResponse = await axios.put(`${API}/record-batches/${recordRow.record_batch_id}/shared-data`, { shared_data: sharedData }, { headers: lease.headers });
-          setRecordBatch((previous: any) => ({ ...previous, ...batchResponse.data, items: previous?.items || [] }));
-        }
         const response = await axios.put(`${API}/record-data/${recordId}`, {
           raw_patch: rawPatch, derived_patch: derivedPatch,
           remove_raw_fields: removeRaw, remove_derived_fields: removeDerived,
@@ -528,7 +483,7 @@ export default function LabRecord() {
         const merged = injectAuditFields(template, ensureDataMatrixDefaults(template, {
           ...(response.data.raw_data || {}), ...(response.data.derived_data || {}), ...sharedData,
         }), response.data);
-        setData(merged);
+        setData(current => rebaseRecordSave(data, current, merged));
         setRecordRow(response.data);
         savedDataRef.current = {
           rawData: response.data.raw_data || {}, derivedData: response.data.derived_data || {}, sharedData,
@@ -601,7 +556,7 @@ export default function LabRecord() {
   if (loading) return <Spin style={{ margin: '100px auto', display: 'block' }} />;
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'clip' }}>
       <div style={{ padding: '10px 16px', borderBottom: '1px solid #e8ecf3', background: '#fff', display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 1px 2px rgba(16,24,40,0.03)' }}>
         <Button onClick={() => confirmLeave(() => navigate(backTo), readOnly ? undefined : () => handleSave('draft'))}>← 返回</Button>
         {template ? (
@@ -626,8 +581,8 @@ export default function LabRecord() {
           <Tag icon={<EyeOutlined />} style={{ margin: 0 }}>只读预览</Tag>
         ) : !readOnly ? (
           <Space>
-            <Button icon={<ImportOutlined />} onClick={openPullData} disabled={!template || !effectiveOrderNo}>从其他记录拉取数据</Button>
-            <Button icon={<SaveOutlined />} onClick={() => handleSave('draft')} loading={saving} disabled={!template}>保存草稿</Button>
+            {canPullPublic && <Button icon={<ImportOutlined />} onClick={openPullData} disabled={!template || !effectiveOrderNo}>拉取公共字段</Button>}
+            {!recordId && <Button icon={<SaveOutlined />} onClick={() => handleSave('draft')} loading={saving} disabled={!template}>保存草稿</Button>}
             <Button type="primary" icon={<CheckCircleOutlined />} onClick={() => handleSave('pending')} loading={saving} disabled={!template}>提交审核</Button>
           </Space>
         ) : null}
@@ -638,33 +593,6 @@ export default function LabRecord() {
           message="当前账号没有录入权限，正在以只读方式预览。"
           style={{ borderRadius: 0 }}
         />
-      )}
-      {template && recordBatch && (
-        <Alert banner type="info" showIcon style={{ borderRadius: 0 }}
-          message={<Space wrap>
-            <b>多方法录入批次 #{recordBatch.id}</b>
-            <Tag color="blue">公共信息自动互通</Tag>
-            {(recordBatch.items || []).map((item: any) => (
-              <Space key={item.record_data_id} size={3}>
-              <Button size="small" type={String(item.record_data_id) === String(recordId) ? 'primary' : 'default'}
-                onClick={() => {
-                  const params = new URLSearchParams({ id: String(item.record_data_id), template_id: String(item.record_template_id) });
-                  if (effectiveOrderNo) params.set('order_no', effectiveOrderNo);
-                  if (effectiveSampleId) params.set('sample_id', effectiveSampleId);
-                  if (currentSample?.name || ctxSampleName) params.set('sample_name', currentSample?.name || ctxSampleName || '');
-                  if (effectiveTestName) params.set('test_name', effectiveTestName);
-                  confirmLeave(() => navigate(`/lab/record?${params.toString()}`), readOnly ? undefined : () => handleSave('draft'));
-                }}>{item.method_name || item.record_template_name}</Button>
-              {item.item_status === 'cancelled'
-                ? <Tag color="purple" title={item.cancel_reason || ''}>取消检测</Tag>
-                : has('record.entry') && ['draft', 'rejected'].includes(recordBatch.audit_status) && (
-                  <Button size="small" danger type="text" icon={<StopOutlined />}
-                    onClick={() => cancelBatchMethod(item)}>取消检测</Button>
-                )}
-              </Space>
-            ))}
-          </Space>}
-          description="公共字段保存在批次中，不从某一份记录复制；提交审核时会一次校验并提交本批次全部原始记录。" />
       )}
       {template && recordRow?.audit_status === 'rejected' && recordRow?.reject_note && (
         <Alert
@@ -680,13 +608,6 @@ export default function LabRecord() {
           description={`取消人：${recordRow.cancelled_by_name || '—'}；原因：${recordRow.cancel_reason || '—'}`}
           style={{ borderRadius: 0 }} />
       )}
-      {template && recordRow?.audit_status === 'draft' && (
-        <Alert
-          banner type="info" showIcon
-          message="草稿——尚未提交审核。填写完成后点右上角「提交审核」送审。"
-          style={{ borderRadius: 0 }}
-        />
-      )}
       {template && recordRow?.audit_status === 'reviewed' && (
         <Alert
           banner type="success" showIcon
@@ -696,7 +617,7 @@ export default function LabRecord() {
       )}
       {template && (
         <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-          <div style={{ width: '46%', borderRight: '1px solid #e8ecf3', overflow: 'auto', background: APP_BG }}>
+          <div style={{ width: '46%', minWidth: 0, minHeight: 0, borderRight: '1px solid #e8ecf3', overflow: 'auto', background: APP_BG }}>
             {currentSample && currentTest && (
               <div style={{ position: 'sticky', top: 0, zIndex: 8, padding: '12px 16px 8px', background: APP_BG, boxShadow: '0 5px 12px rgba(31, 50, 73, 0.08)' }}>
                 <RecordOrderContextCard sample={currentSample} test={currentTest} />
@@ -728,28 +649,29 @@ export default function LabRecord() {
                 listAll={readOnly} />     {/* 只读详情时这里汇总所有可下载文件（编辑器内的链接已不可点） */}
             </div>
           </div>
-          <div style={{ flex: 1 }}>
-            <TypstViewer ref={viewerRef} enableSync source={typstSource} mode="view" height="calc(100vh - 50px)"
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+            <TypstViewer ref={viewerRef} enableSync source={typstSource} mode="view" height="100%"
               downloadName={`${template?.name || '原始记录'}${ctxSampleName ? '-' + ctxSampleName : ''}.pdf`} />
           </div>
         </div>
       )}
-      <Modal open={pullOpen} title="从其他数据录入记录中拉取数据" width={720}
-        onCancel={() => setPullOpen(false)} onOk={applyPulledData} okText="填充匹配字段"
-        okButtonProps={{ disabled: !pullPreview?.matched?.length, loading: pullLoading }}>
-        <Alert type="info" showIcon style={{ marginBottom: 12 }}
-          message="系统只拉取能够确认是同一数据项的普通字段"
-          description="数据表格、图片、审核、判定/结论、计算及动态结构不会拉取；已有内容和项目公共字段也不会被覆盖。填充后仍需由工程师检查并保存。" />
+      <Modal open={pullOpen} title="拉取公共字段" width={720}
+        onCancel={() => { ++pullRequestRef.current; setPullOpen(false); }} onOk={applyPulledData} okText="填充匹配字段"
+        okButtonProps={{ disabled: readOnly || !pullCount, loading: pullLoading }}>
         <Select showSearch optionFilterProp="label" style={{ width: '100%' }} loading={pullLoading}
           value={pullSourceId} placeholder="选择一份已有数据的原始记录" onChange={previewPullData}
           options={pullSources.map(source => ({ value: Number(source.id), label: `${source.template_name} · 记录 #${source.id} · ${source.audit_status === 'reviewed' ? '已审核' : source.audit_status === 'pending' ? '待审核' : '草稿'}` }))} />
-        {!pullLoading && !pullSources.length && <div style={{ color: '#999', textAlign: 'center', padding: 24 }}>当前项目下没有其他可拉取的录入记录</div>}
+        {!pullLoading && !pullSources.length && <div style={{ color: '#999', textAlign: 'center', padding: 24 }}>其他原始记录尚未录入，暂无可拉取的数据</div>}
         {pullPreview && <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
-          <Alert type={pullPreview.matched.length ? 'success' : 'warning'} showIcon
-            message={`可填充 ${pullPreview.matched.length} 个；已有内容跳过 ${pullPreview.skipped.length} 个；规则排除 ${pullPreview.excluded?.length || 0} 个；未匹配 ${pullPreview.unmatched.length} 个`} />
-          {!!pullPreview.matched.length && <div><b>可以填充：</b><div style={{ marginTop: 5 }}>{pullPreview.matched.map((item: any) => <Tag color="green" key={item.code}>{item.label || '未命名字段'}</Tag>)}</div></div>}
-          {!!pullPreview.skipped.length && <div><b>当前记录已有内容：</b><div style={{ marginTop: 5 }}>{pullPreview.skipped.map((item: any) => <Tag key={item.code}>{item.label || '未命名字段'}</Tag>)}</div></div>}
-          {!!pullPreview.excluded?.length && <div><b>按规则不拉取：</b><div style={{ marginTop: 5 }}>{pullPreview.excluded.map((item: any) => <Tooltip title={item.reason} key={`${item.code}-${item.reason}`}><Tag>{item.label || '未命名字段'}</Tag></Tooltip>)}</div></div>}
+          {!pullPreview.matched.length && !pullPreview.skipped.length && <div style={{ color: '#999', textAlign: 'center', padding: 16 }}>没有可匹配的公共字段</div>}
+          {!!pullPreview.matched.length && <div><b>匹配的公共字段：</b><div style={{ marginTop: 5 }}>{pullPreview.matched.map((item: any) => <div key={item.code} style={{ padding: '8px 0', borderBottom: '1px solid #eee', whiteSpace: 'pre-wrap' }}><strong>{item.label || item.code}：</strong>{Array.isArray(item.value) ? item.value.join('、') : typeof item.value === 'object' ? JSON.stringify(item.value) : String(item.value)}</div>)}</div></div>}
+          {!!pullDifferences.length && <div>
+            <Checkbox checked={replacePulledValues} onChange={event => setReplacePulledValues(event.target.checked)}>使用来源值替换以下不同内容</Checkbox>
+            {pullDifferences.map((item: any) => <div key={item.code} style={{ padding: '8px 0', borderBottom: '1px solid #eee', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+              <strong>{item.label}：</strong><div style={{ color: '#777' }}>当前：{transferText(item.value)}</div><div>来源：{transferText(item.sourceValue)}</div>
+            </div>)}
+          </div>}
+          {!!pullUnchanged.length && <div><b>以下内容与来源一致，可直接确认填充：</b><div style={{ marginTop: 5 }}>{pullUnchanged.map((item: any) => <Tag key={item.code}>{item.label || '未命名字段'}</Tag>)}</div></div>}
           {!!pullPreview.unmatched.length && <div><b>需要手工填写或确认：</b><div style={{ marginTop: 5, maxHeight: 130, overflow: 'auto' }}>{pullPreview.unmatched.map((item: any) => <div key={item.code} style={{ color: '#8c5a00', lineHeight: 1.8 }}>{item.label || item.code}：{item.reason}</div>)}</div></div>}
         </div>}
       </Modal>

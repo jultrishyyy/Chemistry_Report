@@ -214,10 +214,12 @@ router.post('/leases/respond', async (req: Request, res: Response) => {
 router.post('/leases/heartbeat', async (req: Request, res: Response) => {
   const { resource_type, resource_id, lease_token } = req.body || {};
   const actor = collaborationActor(req);
+  // 允许后台休眠后用原令牌续期。转交/接管会换令牌，结束编辑会删除行，
+  // 因此过期但未被接管的编辑可恢复，旧持有人不能覆盖新持有人的锁。
   const result = await pool.query(
     `UPDATE edit_leases SET heartbeat_at=NOW(), expires_at=NOW() + ($1 || ' seconds')::interval
       WHERE resource_type=$2 AND resource_id=$3 AND holder_job_no=$4
-        AND lease_token=$5::uuid AND expires_at > NOW() RETURNING expires_at`,
+        AND lease_token=$5::uuid RETURNING expires_at`,
     [LEASE_SECONDS, resource_type, String(resource_id || ''), actor.jobNo, lease_token],
   );
   if (!result.rows.length) { res.status(423).json({ error: '编辑权已失效', code: 'edit_lease_lost' }); return; }

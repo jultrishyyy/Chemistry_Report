@@ -50,7 +50,9 @@ test('invalid/stale targets and unsupported styles or layouts cannot discard con
   assert.deepEqual(reportTextRuns(group).map(r => r.ids), [['a'], ['c'], ['d']]);
   assert.equal(reportTextRuns(group)[0].isolated, true);
   for (const layout of ['grid', 'inline', 'table', 'two-col'] as const) assert.deepEqual(reportTextRuns({ ...group, layout }), []);
-  assert.deepEqual(reportTextRuns({ ...group, section_role: 'images' }), []);
+  const imageSection = { ...group, section_role: 'images' as const, image_layout: { cols: 2 } };
+  assert.deepEqual(reportTextRuns(imageSection).map(run => run.ids), [['a'], ['c'], ['d']],
+    'ordinary text around an image grid remains editable prose');
 });
 
 test('inserting a figure in a previously bound run preserves both prose edges and other tables', () => {

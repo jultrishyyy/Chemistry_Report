@@ -4,13 +4,15 @@ import type { ReportInsertOptions } from '../../../../shared/report-document-edi
 import { continuousTextValue } from '../../../../shared/report-continuous-text';
 import ReportParagraphEditor from './ReportParagraphEditor';
 import ReportRichText from './ReportRichText';
+import ReportSectionHeading from './ReportSectionHeading';
 import { reportFontStack, reportLengthPt, REPORT_BODY_PARAGRAPH_GAP_EM } from '../../../../shared/report-body-layout';
 import { reportParagraphOuterStyle } from '../../../../shared/report-text-runs';
 
 /** One editing surface per ordinary prose section; no per-field controls. */
-export default function ReportContinuousText({ group, resolve, readOnly, font, size, onChange, onFocus, onInsert, onBoundary, onDeleteBoundary, focusRequest }: {
+export default function ReportContinuousText({ group, resolve, readOnly, font, size, onChange, onFocus, onInsert, onBoundary, onDeleteBoundary, focusRequest, onTitleChange }: {
   group: FieldGroup; resolve: (field: FieldDefinition) => string; readOnly: boolean;
   font: string; size: number; onChange: (value: string) => void; onFocus: () => void;
+  onTitleChange?: (title: string) => void;
   onBoundary?: (direction: -1 | 1) => boolean;
   onDeleteBoundary?: (direction: -1 | 1) => boolean;
   focusRequest?: { token: number; edge?: 'start' | 'end'; position?: number; onApplied?: () => void };
@@ -34,8 +36,7 @@ export default function ReportContinuousText({ group, resolve, readOnly, font, s
       marginTop: outerStyle?.space_before ? `${reportLengthPt(outerStyle.space_before, 'pt', bodySize) || 0}pt` : 0,
       marginBottom: outerStyle?.space_after ? `${reportLengthPt(outerStyle.space_after, 'pt', bodySize) || 0}pt` : 0,
       textAlign: group.style?.align, fontWeight: group.style?.weight === 'bold' ? 700 : undefined, fontStyle: group.style?.italic ? 'italic' : undefined } as CSSProperties}>
-    {!group.hide_title && group.label && <div style={{ marginBottom: group.title_gap || '.4em', fontWeight: group.title_style?.weight === 'regular' ? 400 : 700,
-      fontSize: group.title_style?.size || '1.1em', fontFamily: group.title_style?.font, color: group.title_style?.color }}>{group.label}</div>}
+    <ReportSectionHeading group={group} readOnly={readOnly} onChange={onTitleChange} />
     {readOnly ? <ReportRichText value={value} /> : <ReportParagraphEditor value={value} onChange={onChange} onBoundary={onBoundary} onDeleteBoundary={onDeleteBoundary} focusRequest={focusRequest}
       onInsert={onInsert ? (kind, _editorValue, _offset, split, options) => { if (split) onInsert(kind, value, split, options); } : undefined} />}
   </section>;

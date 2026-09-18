@@ -91,8 +91,9 @@ class Parser {
       this.consume();
       const right = this.unary(resolve, call);
       if (t.value === '/') {
-        if (right === 0) return NaN;
-        left = left / right;
+        // Consume the entire expression even after an error so IFERROR can
+        // handle e.g. 1/0*2 without leaving unparsed tokens behind.
+        left = right === 0 ? NaN : left / right;
       } else {
         left = left * right;
       }
@@ -158,6 +159,7 @@ const roundScale = (digits: number) => Math.pow(10, Math.trunc(digits));
 
 function callMathFunction(rawName: string, args: number[]): number {
   const name = rawName.toUpperCase();
+  if (name === 'IFERROR') return args.length === 2 ? (Number.isFinite(args[0]) ? args[0] : args[1]) : NaN;
   if (args.some(value => !Number.isFinite(value))) return NaN;
   const one = () => { if (args.length !== 1) return NaN; return args[0]; };
   const two = () => args.length === 2 ? args : null;
@@ -223,6 +225,7 @@ function callMathFunction(rawName: string, args: number[]): number {
       const scale = roundScale(args[1] || 0);
       return (args[0] < 0 ? Math.floor(args[0] * scale) : Math.ceil(args[0] * scale)) / scale;
     }
+    case 'TRUNC':
     case 'ROUNDDOWN': {
       if (args.length < 1 || args.length > 2) return NaN;
       const scale = roundScale(args[1] || 0);
@@ -271,6 +274,31 @@ export function evalArithmetic(expr: string, vars: Record<string, any>): number 
     return null;
   }
 }
+
+/** Validate syntax without requiring real cell values. Unknown functions must
+ * not silently disappear inside IFERROR. */
+export function validateArithmetic(expr: string): void {
+  new Parser(tokenize(expr)).parse(() => 1, (name, args) => {
+    const upper = name.toUpperCase();
+    if (!ARITHMETIC_FUNCTIONS.includes(upper)) throw new Error(`暂不支持函数 ${name}`);
+    const single = ['SQRT', 'ABS', 'EXP', 'LN', 'LOG10', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN'];
+    const double = ['IFERROR', 'POWER', 'POW', 'ROOT', 'MOD'];
+    const optional = ['LOG', 'ROUND', 'ROUNDUP', 'ROUNDDOWN', 'TRUNC', 'CEILING', 'FLOOR'];
+    if ((single.includes(upper) && args.length !== 1) || (double.includes(upper) && args.length !== 2)
+      || (optional.includes(upper) && (args.length < 1 || args.length > 2))
+      || (upper === 'PI' && args.length !== 0)
+      || (!single.includes(upper) && !double.includes(upper) && !optional.includes(upper) && upper !== 'PI' && !args.length)) {
+      throw new Error(`函数 ${name} 的参数数量不正确`);
+    }
+    return callMathFunction(name, args);
+  });
+}
+
+export const ARITHMETIC_FUNCTIONS = ['SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'PRODUCT', 'MEDIAN',
+  'VAR.S', 'VAR_S', 'STDEV.S', 'STDEV_S', 'VAR.P', 'VAR_P', 'STDEV.P', 'STDEV_P',
+  'POWER', 'POW', 'ROOT', 'SQRT', 'ABS', 'EXP', 'LN', 'LOG10', 'LOG', 'MOD',
+  'ROUND', 'ROUNDUP', 'ROUNDDOWN', 'TRUNC', 'CEILING', 'FLOOR', 'SIN', 'COS', 'TAN',
+  'ASIN', 'ACOS', 'ATAN', 'PI', 'IFERROR'];
 
 /** 提取表达式用到的所有 identifier，用于依赖关系检查和 UI 提示。 */
 export function extractIdentifiers(expr: string): string[] {

@@ -123,7 +123,11 @@ export default function ReportPreviewEditor() {
                     {`原始记录“${(w.tables || []).join('、')}”修改了表头名称，请核对报告表头及对应数据。`}
                     <ul>{(w.changes || []).map((change: any, index: number) => <li key={index}>{change.table}：{change.before || '（空）'} → {change.after || '（空）'}</li>)}</ul>
                   </>}
+                  {w.type === 'test_period_missing' && (w.detail || '接口未提供材料分单开始、结束日期，检测周期已留空')}
                   {w.type === 'compile_failed' && `Typst 编译失败：${w.detail}`}
+                  {!['equipment_missing_date', 'equipment_not_found', 'project_template_missing', 'record_missing',
+                    'record_free_grid_structure_changed', 'record_free_grid_header_changed', 'test_period_missing', 'compile_failed'].includes(w.type)
+                    && (w.detail || w.type)}
                 </li>
               ))}
             </ul>

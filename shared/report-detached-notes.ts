@@ -1,9 +1,29 @@
 import type { FieldDefinition, FieldGroup, StyleOverride } from './types';
 import { encodeReportRichDocument } from './report-rich-document';
 
+/** Remove only legacy image captions and their deterministically generated sibling notes. */
+export function removeLegacyImageNotes(input: FieldGroup[]): FieldGroup[] {
+  const groups = structuredClone(input);
+  const imageGroups = groups.filter(g => g.section_role === 'images');
+  const generated = new Set(imageGroups.map(g => `${g.id}_below_note`));
+  const isGenerated = (field: FieldDefinition) => [...generated].some(base =>
+    field.id === base || (field.id.startsWith(base + '_') && /^\d+$/.test(field.id.slice(base.length + 1))));
+  for (const group of imageGroups) {
+    if (group.image_layout) {
+      delete group.image_layout.caption; delete group.image_layout.caption_style; delete group.image_layout.caption_gap;
+    }
+    for (const field of group.fields) if (field.type === 'image') {
+      delete field.caption; delete field.caption_style; delete field.caption_gap; delete field.caption_position;
+    }
+  }
+  return groups.filter(group => !(group.hide_title && group.fields.length === 1
+    && isGenerated(group.fields[0]) && group.fields[0].code === group.fields[0].id
+    && (group.id === `${group.fields[0].id}_group` || group.id.startsWith(`${group.fields[0].id}_group_`))));
+}
+
 /** Convert supported report-only captions into independently editable prose, idempotently. */
 export function detachReportFigureNotes(input: FieldGroup[]): FieldGroup[] {
-  const groups = structuredClone(input);
+  const groups = removeLegacyImageNotes(input);
   const captionBody = (text: string) => text.trim().replace(/^(?:备注|注)\s*[:：]\s*/, '');
   const used = new Set(groups.flatMap(g => [g.id, ...g.fields.flatMap(f => [f.id, f.code])]));
   const id = (base: string) => { let result = base, i = 1; while (used.has(result)) result = `${base}_${i++}`; used.add(result); return result; };

@@ -225,7 +225,8 @@
     if title != "" { v(4pt) }
     align(subtitle_al)[#text(..subtitle_args)[#org]]
   }
-  if title != "" or org != "" { v(12pt) }
+  // 原始记录标题区与正文只留小间距；分区自身的间距仍按模板配置。
+  if title != "" or org != "" { v(4pt) }
   body
 }
 
@@ -267,22 +268,30 @@
 // 供生成器的 __cell（矩阵/内联单元格）使用，让多行文本框 / 报告里手填的多行文字在 PDF 里真的换行
 // （否则 Typst 正文会把单个换行折叠成空格）。普通单行值原样返回，不受影响。
 // 注：#field 的值不走这里（它内部用 linebreak 拆行——见 field 内注释，为配合悬挂缩进的 par()）。
+#let _literal-line(s) = s.replace("\t", "    ").replace(regex("(^ +)|( {2,})"), m => m.text.replace(" ", "\u{a0}"))
 #let multiline(v) = {
   if v == none { "" } else {
     let s = if type(v) == str { v } else { str(v) }
-    s.split("\n\n").map(p => p.split("\n").join(linebreak())).join(parbreak())
+    s.replace("\r\n", "\n").split("\n\n").map(p => p.split("\n").map(_literal-line).join(linebreak())).join(parbreak())
   }
 }
 
-#let field(label, value, unit: none, label_bold: none, label_args: (:), value_args: (:), gap: none, label_width: auto) = context {
+#let field(label, value, unit: none, label_bold: none, label_args: (:), value_args: (:), gap: none, label_width: auto, label_content: none, value_content: none, numbered_parentheses: false) = context {
   // gap（来自分区「格式·字段间距」block_spacing）优先；未给时用文档级 line_gap。
   // 这样调分区字段间距时普通字段与图/表一起变（图/表靠 set block(spacing)，字段靠这里的 above/below）。
   let lg = if gap != none { gap } else { _cfg-get("line_gap", 0.6em) }
   // 值内换行不走 multiline()：下方悬挂缩进用显式 par() 包裹，par() 内出现 parbreak 会被吞掉并告警，
   // 故空行（\n\n）在这里渲染成两个 linebreak（视觉上仍是空一行，且保持缩进对齐）。
-  let display = if value == none or value == "" { "______" } else {
+  let display = if value_content != none { value_content } else if value == none or value == "" { "______" } else {
     let s = if type(value) == str { value } else { str(value) }
-    s.split("\n").join(linebreak())
+    s.replace("\r\n", "\n").split("\n").map(line => {
+      // CJK opening punctuation is compressed at a line start, but not after the
+      // first line's label box. Box only the marker so every row has equal bounds;
+      // the remaining text can still wrap naturally within the paragraph.
+      let marker = if numbered_parentheses { line.match(regex("^（[0-9]+）")) } else { none }
+      if marker != none { [#box[#(marker.text)]#_literal-line(line.slice(marker.text.len()))] }
+      else { _literal-line(line) }
+    }).join(linebreak())
   }
   let suffix = if unit != none { " " + unit } else { "" }
   // label_width：标签固定列宽（含冒号），使所有字段的「值」对齐到同一制表位（公文/报告版面）。
@@ -290,7 +299,7 @@
   let lw = if label_width != auto { label_width } else { _cfg-get("label_width", none) }
   // 标签是否加粗：字段级 label_bold 优先，否则跟随文档 label_weight。faux-bold 兼容无粗体字体（仿宋）。
   let on = if label_bold != none { label_bold } else { _label-weight-value(_cfg-get("label_weight", "bold")) == 700 }
-  let lbl = _bold([#label], on: on)
+  let lbl = _bold(if label_content != none { label_content } else { [#label] }, on: on)
   // 字段名/字段值各自的独立文字样式（P14·14.2）：缺省空 dict ⇒ 不包 text()，向后兼容。
   let lbl_styled = if label_args.len() > 0 { text(..label_args)[#lbl] } else { lbl }
   let val_styled = if value_args.len() > 0 { text(..value_args)[#display] } else { display }

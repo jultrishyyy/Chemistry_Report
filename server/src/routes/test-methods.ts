@@ -1,9 +1,12 @@
 import { Router, type Request, type Response } from 'express';
+import { validateGroupResourceId, groupOperationError } from '../services/group-request-validation.js';
 import { pool } from '../db.js';
 import { requirePermission } from './auth.js';
 import { actorHasPermission, forkTemplate, readActor, syncToChildren, VersionFlowError } from '../services/template-versions.js';
 
 const router: Router = Router();
+router.param('id', validateGroupResourceId);
+router.param('templateId', validateGroupResourceId);
 
 const cleanCode = (value: unknown) => String(value ?? '').trim().replace(/\s+/g, '_');
 const cleanText = (value: unknown) => String(value ?? '').trim();
@@ -317,7 +320,7 @@ router.put('/components/:id', requirePermission('record_template.edit'), async (
       current_version_id: version.rows[0].id, version_no: version.rows[0].version_no,
       decorated_groups: decorateCommonGroups(prepared, component, version.rows[0]) });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 
@@ -384,7 +387,7 @@ router.post('/groups/:id/archive-request', requirePermission('record_template.ed
     await logGroupArchiveAction(db, groupId, 'archive_request', actor, { note });
     await db.query('COMMIT'); res.json({ ok: true });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 
@@ -410,7 +413,7 @@ router.post('/groups/:id/archive-request/cancel', requirePermission('record_temp
     await logGroupArchiveAction(db, groupId, 'archive_request_cancel', actor, { requested_by: requester });
     await db.query('COMMIT'); res.json({ ok: true });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 
@@ -460,7 +463,7 @@ router.post('/groups/:id/archive-review', requirePermission('record.review'), as
     });
     await db.query('COMMIT'); res.json({ ok: true, archived: true, detached_template_count: memberCount });
   } catch (error: any) {
-    await db.query('ROLLBACK'); res.status(error.status || 500).json({ error: error.message });
+    await db.query('ROLLBACK'); groupOperationError(res, error);
   } finally { db.release(); }
 });
 

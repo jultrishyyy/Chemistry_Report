@@ -15,8 +15,10 @@ window.Range.prototype.getClientRects = () => [];
 window.Range.prototype.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 0, right: 0, width: 0, height: 0 });
 window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
 const React = require('../client/node_modules/react');
+global.React = React;
 const { createRoot } = require('../client/node_modules/react-dom/client');
 const ReportContinuousText = require('../client/src/components/ReportEditor/ReportContinuousText.tsx').default;
+const ReportSectionHeading = require('../client/src/components/ReportEditor/ReportSectionHeading.tsx').default;
 const ReportParagraphEditor = require('../client/src/components/ReportEditor/ReportParagraphEditor.tsx').default;
 const ReportCellTextArea = require('../client/src/components/ReportEditor/ReportCellTextArea.tsx').default;
 const { encodeReportRichDocument, readReportRichDocument } = require('../shared/report-rich-document.ts');
@@ -30,6 +32,7 @@ const ReportImagePreview = require('../client/src/components/ReportEditor/Report
 const ReportImageLayoutToolbar = require('../client/src/components/ReportEditor/ReportImageLayoutToolbar.tsx').default;
 const ReportImageManagerPopover = require('../client/src/components/ReportEditor/ReportImageManagerPopover.tsx').default;
 const { reportFigureClickTarget } = require('../client/src/components/ReportEditor/reportFigureClick.ts');
+const { useReportPhotoFocus } = require('../client/src/components/ReportEditor/useReportPhotoFocus.ts');
 const { default: ReportFigureTools, ReportFigureToolsContext } = require('../client/src/components/ReportEditor/ReportFigureTools.tsx');
 const { canEditContinuousText, continuousTextValue } = require('../shared/report-continuous-text.ts');
 const { reportTextRuns, updateReportTextRun } = require('../shared/report-text-runs.ts');
@@ -76,6 +79,19 @@ const root = createRoot(document.getElementById('root'));
     await React.act(async () => { root.render(React.createElement(ReportContinuousText, { ...props, group: restored, readOnly: true })); });
     assert.equal(document.querySelectorAll('[contenteditable="true"], button').length, 0);
     assert.ok(document.body.textContent.includes('重开内容'));
+    let sectionTitle = '图片记录';
+    await React.act(async () => { root.render(React.createElement(ReportSectionHeading, {
+      group: { id: 'photos', label: sectionTitle, layout: 'vertical', fields: [] },
+      onChange: value => { sectionTitle = value; },
+    })); });
+    const sectionHeading = document.querySelector('[contenteditable="plaintext-only"][aria-label="分区标题"]');
+    assert.ok(sectionHeading, 'editable report section titles use inline document text');
+    assert.equal(sectionHeading.style.userSelect, 'text');
+    await React.act(async () => {
+      sectionHeading.textContent = '图片  记录\n试验结果';
+      sectionHeading.dispatchEvent(new window.Event('input', { bubbles: true }));
+    });
+    assert.equal(sectionTitle, '图片  记录\n试验结果', 'spaces and line breaks are preserved');
     const directions = [];
     await React.act(async () => { root.render(React.createElement(ReportParagraphEditor, {
       value: '正文', onChange() {}, onBoundary: direction => { directions.push(direction); return true; },
@@ -228,7 +244,7 @@ const root = createRoot(document.getElementById('root'));
         font: '', size: 10.5, onFocus() {}, onReset() {}, onChange(value) { updateReportTextRun(mixed, run.ids, value); } }))));
     await React.act(async () => { renderRuns(); });
     assert.equal(document.querySelectorAll('[role="textbox"]').length, 2, 'text before/after a table uses two prose editors');
-    assert.equal(document.querySelectorAll('input, textarea').length, 0, 'source labels and values must not become separate inputs');
+    assert.equal(document.querySelectorAll('#root input, #root textarea').length, 0, 'source labels and values must not become separate inputs');
     assert.ok(document.querySelectorAll('[role="textbox"]')[1].textContent.includes('浸渍液温度：22.2 ℃'), 'a unit-bearing field must be editable prose, not a label/value form');
     const specialSection = document.querySelectorAll('.report-continuous-text')[1];
     assert.equal(specialSection.style.letterSpacing, '1pt');
@@ -252,6 +268,10 @@ const root = createRoot(document.getElementById('root'));
         React.createElement('div', { className: 'report-document-paper' }, React.createElement(ReportParagraphEditor, { value: '缩放正文', onChange() {} })))); });
       const zoomPaper = document.querySelector('.report-paper-scaled');
       const fixedWidth = zoomPaper.style.width, oldZoom = Number(zoomPaper.style.zoom);
+      const a4WidthPx = 21 * 72 / 2.54 * 96 / 72;
+      assert.ok(Math.abs(parseFloat(fixedWidth) - a4WidthPx) < 0.01, 'editor paper uses the same physical A4 width as PDF');
+      assert.ok(Math.abs(parseFloat(zoomPaper.style.getPropertyValue('--report-paper-inset')) - ((21 * 72 / 2.54 - 480) / 2 * 96 / 72)) < 0.01,
+        'editor page inset preserves the PDF content width');
       const stableBody = document.querySelector('[role="textbox"]');
       await React.act(async () => { stableBody.focus(); });
       viewportWidth = 300;
@@ -414,6 +434,24 @@ const root = createRoot(document.getElementById('root'));
     assert.equal(reportFigureClickTarget(actualImage), 'image');
     assert.equal(reportFigureClickTarget(document.querySelector('.report-image-preview figure')), 'image');
     assert.equal(reportFigureClickTarget(document.getElementById('root')), 'space', 'outside whitespace retains the existing adjacent-prose behavior');
+    function PhotoSelectionHarness() {
+      const frame = React.useRef(null);
+      const focusPhoto = useReportPhotoFocus(frame);
+      const [active, setActive] = React.useState(false);
+      const preview = React.createElement(ReportImagePreview, { model: { ...imageModel, items: [{ title: '一' }, { title: '二' }] } });
+      return React.createElement('div', { ref: frame, tabIndex: 0, onClick: event => {
+        if (focusPhoto(event.target)) setActive(true);
+      } }, active ? React.createElement('section', null, preview) : preview);
+    }
+    await React.act(async () => { root.render(React.createElement(PhotoSelectionHarness)); });
+    const originalSlot = document.querySelector('[data-report-photo-index="1"]');
+    await React.act(async () => { originalSlot.querySelector('.report-image-empty').click(); });
+    assert.equal(originalSlot.isConnected, false, 'first selection recreates the preview as in the report editor');
+    assert.equal(document.activeElement.dataset.reportPhotoIndex, '1', 'the clicked empty slot retains focus after activation');
+    await React.act(async () => { document.querySelector('[data-report-photo-index="0"] figcaption').click(); });
+    assert.equal(document.activeElement.dataset.reportPhotoIndex, '0', 'clicking another slot selects that slot');
+    await React.act(async () => { document.querySelector('[data-report-photo-index="0"]').click(); });
+    assert.equal(document.activeElement.dataset.reportPhotoIndex, '0', 'repeated clicks do not deselect the slot');
     const imagePatches = [];
     let stylePatch;
     const toolbarProps = { value: { title_mode: 'shared', cols: 1, seamless: true },

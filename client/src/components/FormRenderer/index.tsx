@@ -1,21 +1,26 @@
+import { judgmentChoiceDefaults, judgmentChoiceValue } from '../../../../shared/conclusion-judgment-default';
 import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import dayjs from 'dayjs';
+import { useEquipmentSearch } from '../../hooks/useEquipmentSearch';
+import { equipmentCodes } from '../../../../shared/equipment-search';
+import { equipmentExpiryWarning } from '../../../../shared/equipment-expiry';
 import { Input, Select, Checkbox, DatePicker, Tag, Card, Button, Space, Upload, Modal, message, Alert, Dropdown, Tooltip, InputNumber } from 'antd';
 import { BoldOutlined, ItalicOutlined, AlignLeftOutlined, AlignCenterOutlined, AlignRightOutlined, QuestionCircleOutlined, PlusOutlined, DeleteOutlined, CameraOutlined, InfoCircleOutlined, FileImageOutlined, ToolOutlined, EditOutlined, MergeCellsOutlined, SplitCellsOutlined } from '@ant-design/icons';
 import type { FieldDefinition, FieldGroup, RecordTemplate, VariantDef, DataMatrixValue } from '../../../../shared/types';
 import { buildGroupTree } from '../../../../shared/group-tree';
+import { applyRecordLayout, canArrangeRecordField, canArrangeRecordGroup, RECORD_LAYOUT_KEY } from '../../../../shared/record-layout';
+import { compactConclusionChildren, conclusionDisplayField } from '../../../../shared/conclusion-table-layout';
+import ConclusionItemsTable from '../ConclusionItemsTable';
 import { findImageCollection, imageCollectionFromLegacy, imageCollectionKey, type RecordImageCollection } from '../../../../shared/image-collection';
-import { figureCaptionFieldKey, figureCaptionGroupKey } from '../../../../shared/figure-caption';
 import { resolveFreeGridCellReference } from '../../../../shared/free-grid-formula';
-import { applyNumericRounding } from '../../../../shared/numeric-rounding';
-import { freeGridNumberText } from '../../../../shared/free-grid-number';
+import { freeGridNumberText, roundFreeGridValue } from '../../../../shared/free-grid-number';
 import { freeGridAddress, freeGridFormulaLabel } from '../../../../shared/free-grid-formula-label';
 import { columnName } from '../../../../shared/excel-import';
 import FreeGridNumberInput from '../FreeGridNumberInput';
 import FreeGridNumberSettings from '../FreeGridNumberSettings';
 import { editSampleAxes, readSampleAxes, type SampleAxisEntry } from '../../../../shared/free-grid-samples';
 import { entryRangeOnly, entrySpanRanges, rangesIntersect, entryInsertionIndex, resolveEntrySelection, ORIGINAL_STRUCTURE_MESSAGE } from '../../../../shared/free-grid-entry-structure';
-import { buildFreeGridLayout } from '../../../../shared/free-grid-layout';
+import { buildFreeGridLayout, freeGridFormulaSample } from '../../../../shared/free-grid-layout';
 import { BRAND } from '../../theme';
 import { IS_TOUCH } from '../../utils/device';
 import { parseSpreadsheetClipboard } from '../../utils/spreadsheetClipboard';
@@ -42,6 +47,12 @@ const dateInput = (field: FieldDefinition, value: any, onChange: (v: any) => voi
     value={value && dayjs(String(value)).isValid() ? dayjs(String(value)) : null}
     onChange={(d) => onChange(d ? d.format(dateStorageFormat(field.date_precision)) : '')} />
 );
+
+function JudgmentRequirementInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [custom, setCustom] = useState(false);
+  return <SelectWithCustom field={{ id: 'judgment', code: 'judgment', label: '判定要求', ...judgmentChoiceDefaults }}
+    value={custom ? { custom: value } : judgmentChoiceValue(value)} onChange={next => { setCustom(!!next && typeof next === 'object'); onChange(typeof next === 'object' && next ? next.custom ?? '' : next ?? ''); }} />;
+}
 
 function RecordConclusionField({ field, value, onChange }: {
   field: FieldDefinition;
@@ -101,13 +112,8 @@ function RecordConclusionField({ field, value, onChange }: {
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) minmax(180px, 0.7fr)', gap: 10, marginBottom: 10, padding: 10, border: '1px solid #d6e4ff', borderRadius: 6, background: '#f7faff' }}>
           {cfg.project_summary.judgment_enabled !== false ? <div>
             <div style={{ color: '#596579', fontSize: 12, marginBottom: 4 }}>总项目判定要求</div>
-            <AutoGrowTextArea size="small" value={current.project_judgment_requirement}
-              placeholder={(cfg.project_summary.judgment_options || []).join(' / ') || '请输入总项目判定要求'}
-              onChange={(event) => onChange({ ...current, project_judgment_requirement: event.target.value })} />
-            {!!cfg.project_summary.judgment_options?.length && <Space size={[3, 3]} wrap style={{ marginTop: 3 }}>
-              {cfg.project_summary.judgment_options.map(option => <Tag key={option} style={{ cursor: 'pointer', margin: 0 }}
-                onClick={() => onChange({ ...current, project_judgment_requirement: option })}>{option}</Tag>)}
-            </Space>}
+            <JudgmentRequirementInput value={current.project_judgment_requirement}
+              onChange={project_judgment_requirement => onChange({ ...current, project_judgment_requirement })} />
           </div> : <div />}
           {cfg.project_summary.conclusion_enabled !== false && <div>
             <div style={{ color: '#596579', fontSize: 12, marginBottom: 4 }}>总结论</div>
@@ -141,13 +147,8 @@ function RecordConclusionField({ field, value, onChange }: {
                   ...(execution_status === 'completed' ? {} : { report_enabled: false }),
                 })} /></td>
               <td style={conclusionCellStyle}>
-                <AutoGrowTextArea size="small" value={item.judgment_requirement}
-                  placeholder={(definition.judgment_options || []).join(' / ') || '请输入判定要求'}
-                  onChange={(event) => patchItem(index, { judgment_requirement: event.target.value })} />
-                {!!definition.judgment_options?.length && <Space size={[3, 3]} wrap style={{ marginTop: 3 }}>
-                  {definition.judgment_options.map(option => <Tag key={option} style={{ cursor: 'pointer', margin: 0 }}
-                    onClick={() => patchItem(index, { judgment_requirement: option })}>{option}</Tag>)}
-                </Space>}
+                <JudgmentRequirementInput value={item.judgment_requirement}
+                  onChange={judgment_requirement => patchItem(index, { judgment_requirement })} />
               </td>
               <td style={conclusionCellStyle}><Select size="small" showSearch allowClear style={{ width: '100%' }}
                 disabled={!completed} value={item.conclusion || undefined}
@@ -189,6 +190,9 @@ import {
   uniqueCode,
 } from '../../../../shared/matrix-flatten';
 import { execute, executeWithFullPrecision, topologicalOrder } from '../../../../shared/formula-engine';
+import { FormulaError, isFormulaError, invalidGridReference } from '../../../../shared/formula-error';
+import { formulaAwaitingInput } from '../../../../shared/formula-entry-display';
+import { completeGridFormula, gridOutputText } from '../../../../shared/grid-missing-display';
 
 interface FormRendererProps {
   /** Read-only import simulation; keeps the full template for cross-table formula evaluation. */
@@ -215,7 +219,8 @@ type FreeGridDisplayAxis = { id: string; idx: number; sample: number | null };
 
 const freeFormulaOverrideKey = (runtimeKey: string) => `__formula_override__::${runtimeKey}`;
 
-function ConfirmableFormulaValue({ value, displayValue, automaticValue, formulaText, override, label, onSave, onClear }: {
+function ConfirmableFormulaValue({ value, displayValue, automaticValue, formulaText, override, label, onSave, onClear, awaitingInput = false }: {
+  awaitingInput?: boolean;
   value: any;
   automaticValue?: any;
   formulaText?: string;
@@ -228,30 +233,31 @@ function ConfirmableFormulaValue({ value, displayValue, automaticValue, formulaT
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const overridden = !!override;
+  const waiting = awaitingInput && !overridden;
   const calculated = automaticValue !== undefined ? automaticValue : value;
   const showEditor = () => {
-    setDraft(String(override?.value ?? value ?? ''));
+    setDraft(waiting ? '' : String(override?.value ?? value ?? ''));
     setOpen(true);
   };
   const confirm = () => {
     if (!draft.trim()) { message.warning('修正值不能为空'); return; }
     onSave({
       value: draft,
-      calculated_value: calculated ?? null,
+      calculated_value: isFormulaError(calculated) ? calculated.code : calculated ?? null,
       confirmed_at: new Date().toISOString(),
     });
     setOpen(false);
   };
   return <>
     <Button type="text" size="small" onClick={showEditor}
-      title={overridden ? '人工修正值；点击修改或恢复公式' : '公式自动计算；点击可在确认后人工修正'}
+      title={waiting ? '公式格：录入来源数据后自动计算' : isFormulaError(value) ? `${value.code}：${value.message}` : overridden ? '人工修正值；点击修改或恢复公式' : '公式自动计算；点击可在确认后人工修正'}
       style={{
         width: '100%', minWidth: 56, height: 'auto', padding: '3px 6px', borderRadius: 4,
         border: `1px solid ${overridden ? '#ffc069' : '#d3adf7'}`,
-        background: overridden ? '#fff7e6' : '#f7f0ff', color: overridden ? '#ad4e00' : '#531dab',
+        background: overridden ? '#fff7e6' : '#f7f0ff', color: !waiting && isFormulaError(value) ? '#cf1322' : overridden ? '#ad4e00' : '#531dab',
       }}>
-      <strong>{value === null || value === undefined || value === '' ? '—' : displayValue ?? String(value)}</strong>
-      <span aria-label={overridden ? '公式值已人工修正' : '公式计算值'} style={{ marginLeft: 5, fontSize: 11, fontStyle: 'italic' }}>ƒ{overridden ? '*' : ''}</span>
+      <strong>{waiting || isFormulaError(value) ? '/' : gridOutputText(displayValue ?? value, true, true)}</strong>
+      <span aria-label={waiting ? '公式格，等待录入' : overridden ? '公式值已人工修正' : '公式计算值'} style={{ marginLeft: waiting ? 0 : 5, fontSize: waiting ? 14 : 11, fontStyle: 'italic' }}>ƒ{overridden ? '*' : ''}</span>
     </Button>
     <Modal open={open} title="确认修改公式计算结果" okText="确认使用修正值" cancelText="取消"
       onOk={confirm} onCancel={() => setOpen(false)}
@@ -262,7 +268,7 @@ function ConfirmableFormulaValue({ value, displayValue, automaticValue, formulaT
       <div style={{ marginBottom: 8 }}>公式格：{label}</div>
       {formulaText && <div style={{ marginBottom: 8, padding: 8, background: '#fafafa', overflowWrap: 'anywhere', fontFamily: 'monospace' }}>{formulaText}</div>}
       <div style={{ marginBottom: 12, padding: '8px 10px', borderRadius: 6, background: '#f7f0ff', color: '#531dab' }}>
-        公式自动计算结果：<strong>{String(calculated ?? '—')}</strong>
+        公式自动计算结果：<strong>{waiting ? '等待录入' : String(calculated ?? '—')}</strong>
       </div>
       <Input autoFocus value={draft} onChange={event => setDraft(event.target.value)} placeholder="请输入人工修正值" />
       <div style={{ marginTop: 10, color: '#ad6800', fontSize: 12 }}>
@@ -321,6 +327,17 @@ export default function FormRenderer({
   template, data, onChange, onFocusField, activeFieldCode, previewFieldCode,
   recordId, excelAttachments, onExcelImported, uploadCtx,
 }: FormRendererProps) {
+  template = useMemo(() => applyRecordLayout(template, data), [template, data]);
+  const setRecordLayout = (kind: 'groups' | 'fields', key: string, value: string | boolean | undefined) => {
+    const current = data[RECORD_LAYOUT_KEY] || {};
+    const next = { ...(current[kind] || {}) };
+    if (value === undefined) delete next[key]; else next[key] = value;
+    onChange({ ...data, [RECORD_LAYOUT_KEY]: { ...current, [kind]: next } });
+  };
+  const layoutControl = (group: FieldGroup) => canArrangeRecordGroup(group) ? <Select size="small"
+    aria-label={`${group.label}PDF文字排版`} title="仅调整 PDF 排版" value={group.layout === 'two-col' ? 'two-col' : 'vertical'}
+    style={{ width: 90 }} options={[{ label: '单栏', value: 'vertical' }, { label: '双栏', value: 'two-col' }, { label: '跟随模板', value: 'inherit' }]}
+    onChange={value => setRecordLayout('groups', group.id, value === 'inherit' ? undefined : value)} /> : null;
   // 自由表格选择格的受控展开状态：焦点/方向键移动到格子时不展开，Enter 或鼠标点击才展开。
   const [openFreeGridChoice, setOpenFreeGridChoice] = useState<string | null>(null);
   const [freeGridStructureField, setFreeGridStructureField] = useState<string | null>(null);
@@ -361,42 +378,14 @@ export default function FormRenderer({
     const changed = Object.entries(derived).some(([key, value]) => JSON.stringify(data[key]) !== JSON.stringify(value));
     if (changed) onChange({ ...data, ...derived });
   }, [template, data, onChange]);
-  const removeValue = (code: string) => {
-    const next = { ...data };
-    delete next[code];
-    const derived = computeDerivedMerged(template, next);
-    onChange({ ...next, ...derived });
-  };
-  const captionEditor = (key: string, templateValue?: string) => {
-    const overridden = Object.prototype.hasOwnProperty.call(data, key);
-    const value = overridden ? String(data[key] ?? '') : (templateValue || '');
-    return (
-      <div style={{
-        margin: '7px 0 10px', padding: '8px 10px', display: 'flex', alignItems: 'flex-start', gap: 8,
-        border: '1px solid #e4e9f1', borderRadius: 6, background: '#fafbfd',
-      }}>
-        <span style={{ flexShrink: 0, paddingTop: 4, color: '#596579', fontSize: 12, fontWeight: 600 }}>备注：</span>
-        <AutoGrowTextArea size="small" autoSize={{ minRows: 1, maxRows: 4 }} value={value}
-          placeholder="可选；不填写则不显示"
-          onChange={(event) => handleChange(key, event.target.value)} />
-        {overridden && (
-          <Button size="small" type="link" style={{ flexShrink: 0, paddingInline: 2 }}
-            title="删除本次覆盖，恢复模板中的默认备注"
-            onClick={() => removeValue(key)}>恢复模板</Button>
-        )}
-        {!overridden && templateValue && (
-          <Tag bordered={false} style={{ flexShrink: 0, margin: '3px 0 0', color: '#667085' }}>模板默认</Tag>
-        )}
-      </div>
-    );
-  };
   // Excel 导入面板放在【第一张可导入数据表】之前（数据表区域，不再悬在表单最顶部）
   const firstImportFieldId = template.groups
     .flatMap(g => g.fields)
     .find(f => (f.type === 'data_matrix' && f.matrix?.excel_import?.enabled)
       || (f.type === 'free_grid' && f.free_table?.excel_import?.enabled))?.id;
 
-  const renderField = (field: FieldDefinition, currentGroup?: FieldGroup) => {
+  const renderField = (field: FieldDefinition, currentGroup?: FieldGroup, compact = false) => {
+    field = conclusionDisplayField(field);
     const value = data[field.code];
 
     // 版式·间隔：纯排版空白，录入端不可交互，仅示意占位（实际高度按模板，PDF 上才精确）
@@ -514,10 +503,12 @@ export default function FormRenderer({
         if (fieldCode === field.code) return formulaValue(cellKey, sampleIndex);
         const runtimeNode = `${fieldCode}::${cellKey}::${sampleIndex ?? 'x'}`;
         if (crossCache.has(runtimeNode)) return crossCache.get(runtimeNode);
-        if (crossVisiting.has(runtimeNode)) return null;
+        if (crossVisiting.has(runtimeNode)) return new FormulaError('#CYCLE!', '公式存在循环引用');
         crossVisiting.add(runtimeNode);
         const sourceField = allFreeFields.find(item => item.code === fieldCode);
-        const sourceTable = sourceField?.free_table;
+        const sourceTable = data[fieldCode]?.[FREE_GRID_STRUCTURE_KEY] ?? sourceField?.free_table;
+        const missing = invalidGridReference(sourceTable, cellKey);
+        if (missing) { crossVisiting.delete(runtimeNode); return missing; }
         const sourceRawValue = data[fieldCode];
         const sourceRaw: Record<string, any> = sourceRawValue && typeof sourceRawValue === 'object' && !Array.isArray(sourceRawValue) ? sourceRawValue : {};
         const sourceFormula = sourceTable?.cell_formulas?.[cellKey];
@@ -532,16 +523,13 @@ export default function FormRenderer({
               const ref = resolveFreeGridCellReference(source, fieldCode);
               sourceData[source] = crossFormulaValue(ref.fieldCode, ref.cellKey, sampleIndex);
             }
-            result = executeWithFullPrecision(sourceFormula, sourceData);
+            result = completeGridFormula(executeWithFullPrecision(sourceFormula, sourceData), (sourceFormula.sources || []).map((source: string) => sourceData[source]));
           }
         } else {
           const sampleKey = sampleIndex != null ? `${cellKey}::s${sampleIndex}` : cellKey;
           result = gridText(sourceRaw[sampleKey] ?? sourceRaw[cellKey] ?? sourceTable?.cells?.[cellKey] ?? '');
         }
-        const sourceIsData = sourceTable?.cell_types?.[cellKey] === 'number'
-          || !!sourceTable?.input_cells?.[cellKey]
-          || !!sourceTable?.cell_formulas?.[cellKey];
-        result = applyNumericRounding(result, sourceTable?.cell_rounding?.[cellKey] ?? (sourceIsData ? sourceTable?.default_rounding : undefined));
+        result = roundFreeGridValue(result, sourceTable, cellKey);
         crossVisiting.delete(runtimeNode);
         crossCache.set(runtimeNode, result);
         return result;
@@ -549,17 +537,21 @@ export default function FormRenderer({
       // 自由表格公式在录入页即时计算（不落库，PDF 端使用同一 execute 引擎重新计算）。
       // 样品带内按当前样品号取来源值；固定格自动回退到模板键。
       const formulaCache = new Map<string, any>();
+      const awaitingFormulaInput = new Set<string>();
       const formulaVisiting = new Set<string>();
       const formulaValue = (templateKey: string, sampleIndex: number | null, ignoreManual = false): any => {
+        if (ft.cell_formulas?.[templateKey]) sampleIndex = freeGridFormulaSample(layout, templateKey, sampleIndex);
         const runtimeKey = sampleIndex != null ? `${templateKey}::s${sampleIndex}` : templateKey;
         const cacheKey = ignoreManual ? `${runtimeKey}::automatic` : runtimeKey;
         if (formulaCache.has(cacheKey)) return formulaCache.get(cacheKey);
-        if (formulaVisiting.has(cacheKey)) return null;
+        if (formulaVisiting.has(cacheKey)) return new FormulaError('#CYCLE!', '公式存在循环引用');
+        const missing = invalidGridReference(ft, templateKey);
+        if (missing) return missing;
         formulaVisiting.add(cacheKey);
         const formula = ft.cell_formulas?.[templateKey];
         let result: any;
         if (formula) {
-          const manual = ignoreManual ? undefined : gridVal[freeFormulaOverrideKey(runtimeKey)];
+          const manual = ignoreManual ? undefined : gridVal[freeFormulaOverrideKey(runtimeKey)] ?? gridVal[freeFormulaOverrideKey(templateKey)];
           if (manual && typeof manual === 'object' && manual.value !== undefined) {
             result = manual.value;
           } else {
@@ -595,12 +587,15 @@ export default function FormRenderer({
             });
           }
           result = executeWithFullPrecision(formulaForRun, sourceData);
+          result = completeGridFormula(result, (formulaForRun.sources || []).map(source => sourceData[source]));
+          if (formulaAwaitingInput((formulaForRun.sources || []).map(source => sourceData[source]), result)) {
+            awaitingFormulaInput.add(cacheKey);
+          }
           }
         } else {
           result = gridText(gridVal[runtimeKey] ?? gridVal[templateKey] ?? cells[templateKey] ?? '');
         }
-        const isDataCell = ft.cell_types?.[templateKey] === 'number' || !!ft.input_cells?.[templateKey] || !!ft.cell_formulas?.[templateKey];
-        result = applyNumericRounding(result, ft.cell_rounding?.[templateKey] ?? (isDataCell ? ft.default_rounding : undefined));
+        result = roundFreeGridValue(result, ft, templateKey);
         formulaVisiting.delete(cacheKey);
         formulaCache.set(cacheKey, result);
         return result;
@@ -1013,6 +1008,7 @@ export default function FormRenderer({
                               value={formulaValue(k, sIdx)} displayValue={freeGridNumberText(formulaValue(k, sIdx), ft, k, true)}
                               override={gridVal[freeFormulaOverrideKey(vk)]}
                               automaticValue={formulaValue(k, sIdx, true)}
+                              awaitingInput={awaitingFormulaInput.has(freeGridFormulaSample(layout, k, sIdx) != null ? `${k}::s${freeGridFormulaSample(layout, k, sIdx)}` : k)}
                               label={freeGridAddress(ft, k)}
                               formulaText={freeGridFormulaLabel(ft.cell_formulas![k], field.code,
                                 code => code === field.code ? ft : data[code]?.[FREE_GRID_STRUCTURE_KEY] || allFreeFields.find(f => f.code === code)?.free_table,
@@ -1101,11 +1097,11 @@ export default function FormRenderer({
 
     return (
       <div key={field.id} style={fieldRowStyle}>
-        <label style={labelStyle}>
+        {!compact && <label style={labelStyle}>
           {field.label}
           {field.required && <span style={{ color: 'red' }}>*</span>}
           ：
-        </label>
+        </label>}
         {renderInput(field, value, (v) => handleChange(field.code, v), uploadCtx)}
         {field.unit && <span style={{ color: '#999', marginLeft: 4 }}>{field.unit}</span>}
         {field.description && <span style={{ color: '#aaa', fontSize: 11, marginLeft: 8 }}>{field.description}</span>}
@@ -1143,14 +1139,23 @@ export default function FormRenderer({
       }}
     >
       {content}
-      {(field.type === 'image' && group.section_role !== 'images')
-        && captionEditor(figureCaptionFieldKey(field.code), field.caption)}
     </div>
   );
 
   const renderGroupFields = (group: FieldGroup) => {
     if (group.section_role !== 'images') {
-      return group.fields.map(field => focusWrap(field, group, renderField(field, group)));
+      // PDF layout must not rearrange inputs or remount them when the layout changes.
+      return group.fields.map(field => <div key={field.id} style={{ minWidth: 0 }}>
+          {group.layout === 'two-col' && canArrangeRecordField(field) && <div style={{ textAlign: 'right' }}>
+            <Dropdown trigger={['click']} menu={{ items: [
+              { key: 'toggle', label: field.full_width ? '跟随双栏' : '独占一行' },
+              { key: 'inherit', label: '跟随模板' },
+            ], onClick: ({ key }) => setRecordLayout('fields', field.code, key === 'inherit' ? undefined : !field.full_width) }}>
+              <Button type="text" size="small" aria-label={`${field.label}PDF排版`} title="PDF 排版">⋯</Button>
+            </Dropdown>
+          </div>}
+          {focusWrap(field, group, renderField(field, group))}
+        </div>);
     }
     const firstImageIndex = group.fields.findIndex(field => field.type === 'image');
     if (firstImageIndex < 0) return group.fields.map(field => focusWrap(field, group, renderField(field, group)));
@@ -1172,7 +1177,6 @@ export default function FormRenderer({
               if (field) onFocusField?.(field, group, `__image_item__:${itemId}`);
             }}
           />
-          {captionEditor(figureCaptionGroupKey(group.id), group.image_layout?.caption)}
         </>
       ), `image-collection-${group.id}`);
     });
@@ -1188,13 +1192,17 @@ export default function FormRenderer({
       {buildGroupTree(template.groups).map(({ group, children }) => (
         <Card
           key={group.id} size="small" title={sectionTitle(group.label)}
+          extra={layoutControl(group)}
           style={{ marginBottom: 14, borderColor: '#e8ecf3' }}
           styles={{ header: { background: '#fafbfd', borderBottom: '1px solid #eef1f6', minHeight: 40 } }}
         >
           {renderGroupFields(group)}
-          {children.map(child => (
+          <ConclusionItemsTable groups={compactConclusionChildren(group, children)}
+            renderCell={(field, child) => focusWrap(field, child, renderField(field, child, true))} />
+          {children.filter(child => !compactConclusionChildren(group, children).includes(child)).map(child => (
             <Card
               key={child.id} type="inner" size="small" title={sectionTitle(child.label)}
+              extra={layoutControl(child)}
               style={{ margin: '10px 0 4px 12px', borderColor: '#e8ecf3' }}
               styles={{ header: { background: '#fafbfd' } }}
             >
@@ -1322,7 +1330,7 @@ function StaticContentField({ field, template }: { field: FieldDefinition; templ
 function renderInput(field: FieldDefinition, value: any, onChange: (v: any) => void, uploadCtx?: { orderNo?: string; recordDir?: string }) {
   switch (field.type) {
     case 'text':
-      return <AutoGrowTextArea size="small" value={typeof value === 'object' ? '' : (value || '')} onChange={(e) => onChange(e.target.value)} style={{ width: 240 }} />;
+      return <AutoGrowTextArea size="small" autoSize={{ minRows: 2, maxRows: 12 }} value={typeof value === 'object' ? '' : (value ?? '')} onChange={(e) => onChange(e.target.value)} style={{ width: 320, maxWidth: '100%' }} />;
 
     case 'number':
       return (
@@ -1341,7 +1349,7 @@ function renderInput(field: FieldDefinition, value: any, onChange: (v: any) => v
 
     case 'textarea':
       return <AutoGrowTextArea value={value || ''} onChange={(e) => onChange(e.target.value)}
-        autoSize={{ minRows: 2, maxRows: 3 }} style={{ width: 320 }} />;
+        autoSize={{ minRows: 2, maxRows: 12 }} style={{ width: 320, maxWidth: '100%' }} />;
 
     case 'device_ref':
       return <DeviceRefField field={field} value={value} onChange={onChange} />;
@@ -1447,14 +1455,14 @@ function CheckboxWithCustom({ field, value, onChange }: { field: FieldDefinition
  * 已选项以 chip 显示设备名+管理编号；可移除。
  */
 function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; value: any; onChange: (v: any) => void }) {
-  const codes: string[] = Array.isArray(value) ? value : [];
+  const codes = equipmentCodes(value);
+  const currentCodes = useRef(codes);
+  currentCodes.current = codes;
   const config = field.device_ref_config || {};
-  const presetCodes = useMemo(() => config.preset_asset_codes || [], [config.preset_asset_codes]);
+  const presetCodes = useMemo(() => equipmentCodes(config.preset_asset_codes), [config.preset_asset_codes]);
   const allowLibrarySearch = config.allow_library_search !== false;
   const single = config.selection_mode === 'single';
-  const [search, setSearch] = useState('');
-  const [options, setOptions] = useState<any[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
+  const { keyword: search, setKeyword: setSearch, items: options, loading: searchLoading, error: searchError } = useEquipmentSearch();
   const [selectedDetails, setSelectedDetails] = useState<Record<string, any>>({});
   const [showLibrarySearch, setShowLibrarySearch] = useState(presetCodes.length === 0);
 
@@ -1463,38 +1471,53 @@ function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; va
     const missing = Array.from(new Set([...codes, ...presetCodes])).filter(c => !selectedDetails[c]);
     if (!missing.length) return;
     fetch(`/api/equipment/lookup?codes=${encodeURIComponent(missing.join(','))}`)
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : Promise.reject())
       .then((rows: any[]) => {
-        const next = { ...selectedDetails };
-        rows.forEach(r => { next[r.asset_code] = r; });
-        setSelectedDetails(next);
+        if (!Array.isArray(rows)) return;
+        setSelectedDetails(previous => {
+          const next = { ...previous };
+          rows.forEach(r => { if (typeof r?.asset_code === 'string') next[r.asset_code] = r; });
+          return next;
+        });
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [codes.join('|'), presetCodes.join('|')]);
 
-  // 远程搜索（debounce 300ms）
-  useEffect(() => {
-    if (!search.trim()) { setOptions([]); return; }
-    setSearchLoading(true);
-    const t = setTimeout(() => {
-      fetch(`/api/equipment?keyword=${encodeURIComponent(search.trim())}&limit=20`)
-        .then(r => r.json())
-        .then(d => setOptions(d.items || []))
-        .catch(() => setOptions([]))
-        .finally(() => setSearchLoading(false));
-    }, 300);
-    return () => clearTimeout(t);
-  }, [search]);
 
   const remove = (code: string) => onChange(codes.filter(c => c !== code));
-  const add = (code: string, detail?: any) => {
+  const add = async (code: string, detail?: any) => {
     if (codes.includes(code)) {
       message.warning('该设备已添加');
       return;
     }
-    if (detail) setSelectedDetails(prev => ({ ...prev, [code]: detail }));
-    onChange(single ? [code] : [...codes, code]);
+    // 快捷候选详情尚未加载时也必须先检查，避免漏掉到期提醒。
+    if (!detail) {
+      try {
+        const response = await fetch(`/api/equipment/lookup?codes=${encodeURIComponent(code)}`);
+        if (!response.ok) throw new Error();
+        const rows = await response.json();
+        detail = rows.find((row: any) => row.asset_code === code);
+        if (!detail) throw new Error();
+      } catch {
+        message.error('暂时无法获取设备信息，请稍后重试');
+        return;
+      }
+    }
+    setSelectedDetails(prev => ({ ...prev, [code]: detail }));
+    if (/停用|报废|不合格/.test(detail.status || '')) {
+      message.warning(`${detail.name || code}当前状态为“${detail.status}”，请选择其他设备`);
+      return;
+    }
+    const warning = equipmentExpiryWarning(detail);
+    const select = () => onChange(single ? [code] : [...new Set([...currentCodes.current, code])]);
+    if (warning) {
+      Modal.confirm({
+        title: '设备已过期，是否继续使用？',
+        content: `${detail.name || code}（${code}）${warning}。继续使用后可正常提交审核。`,
+        okText: '继续使用', cancelText: '重新选择', onOk: select,
+      });
+    } else select();
   };
 
   const statusColor = (status?: string) => status === '合格' ? 'green'
@@ -1508,7 +1531,7 @@ function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; va
           <Space size={[6, 6]} wrap>
             {presetCodes.map(code => {
               const detail = selectedDetails[code];
-              const invalid = detail?.status && /(超期|停用|报废|不合格)/.test(detail.status);
+              const invalid = !!equipmentExpiryWarning(detail) || !!(detail?.status && /(停用|报废|不合格)/.test(detail.status));
               return (
                 <Button key={code} size="small" disabled={codes.includes(code)} danger={invalid}
                   onClick={() => add(code, detail)}>
@@ -1535,7 +1558,7 @@ function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; va
           onSearch={setSearch}
           filterOption={false}
           placeholder="按管理编号、仪器名称、型号搜索设备库"
-          notFoundContent={search ? (searchLoading ? '搜索中…' : '未找到匹配设备') : '输入关键字开始搜索'}
+          notFoundContent={search ? (searchLoading ? '搜索中…' : searchError || '未找到匹配设备') : '输入关键字开始搜索'}
           style={{ minWidth: 320, marginBottom: 8 }}
           onSelect={(v) => {
             const detail = options.find(o => o.asset_code === v);
@@ -1551,7 +1574,7 @@ function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; va
                   {o.model && <span style={{ color: '#888', fontSize: 11, marginLeft: 4 }}>{o.model}</span>}
                   <div style={{ fontSize: 11, color: '#666', fontFamily: 'monospace' }}>{o.asset_code}</div>
                 </div>
-                {o.status && <Tag color={statusColor(o.status)}>{o.status}</Tag>}
+                {(equipmentExpiryWarning(o) || o.status) && <Tag color={equipmentExpiryWarning(o) ? 'orange' : statusColor(o.status)}>{equipmentExpiryWarning(o) ? '已过期' : o.status}</Tag>}
               </div>
             ),
           }))}
@@ -1562,11 +1585,12 @@ function DeviceRefField({ field, value, onChange }: { field: FieldDefinition; va
         {codes.map(c => {
           const d = selectedDetails[c];
           return (
-            <Tag key={c} closable onClose={() => remove(c)} style={{ margin: 0 }}>
+            <Tag key={c} closable onClose={() => remove(c)} color={equipmentExpiryWarning(d) ? 'orange' : undefined} title={equipmentExpiryWarning(d)} style={{ margin: 0 }}>
               {d ? (
                 <>
                   <strong>{d.name}</strong>
                   <span style={{ color: '#888', fontFamily: 'monospace', marginLeft: 4 }}>({c})</span>
+                  {equipmentExpiryWarning(d) && <span> · 已过期</span>}
                 </>
               ) : (
                 <span style={{ fontFamily: 'monospace' }}>{c}</span>

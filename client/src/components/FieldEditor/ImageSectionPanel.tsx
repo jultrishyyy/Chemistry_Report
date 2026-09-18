@@ -9,7 +9,7 @@ type ILayout = NonNullable<FieldGroup['image_layout']>;
  * 「图片版式」Popover（记录模板编辑器·图片分区）——只管【表内标题 + 排布】：
  *   · 表内标题：共用 / 每张一个（共用→填共用标题；每张→模板字段名作为录入初始名称）+ 表内标题样式；
  *   · 排布：每行几张 / 尺寸 / 独立框·粘连 / 单数独占 / 共用时跨页表头（ImageLayoutControls）。
- * 「大标题 / 图表上方标签 / 图表下方备注」在分区标题栏的「格式(A)」里设（ImageSectionNotes），互不重复。
+ * 图外标题和备注通过普通文本字段编辑。滚动由外层设置卡统一管理。
  */
 export default function ImageSectionPanel({ value, onChange, inheritedFont = 'Songti SC', inheritedSize = 10, defaultInset = 6 }: {
   value: ILayout;
@@ -24,10 +24,6 @@ export default function ImageSectionPanel({ value, onChange, inheritedFont = 'So
     <div style={{
       width: 'min(520px, calc(100vw - 64px))',
       maxWidth: '100%',
-      maxHeight: 'calc(100vh - 150px)',
-      overflowX: 'hidden',
-      overflowY: 'auto',
-      overscrollBehavior: 'contain',
       paddingRight: 6,
     }}>
       <ImageLayoutControls value={v}
@@ -54,7 +50,7 @@ export default function ImageSectionPanel({ value, onChange, inheritedFont = 'So
 
       <div style={{ fontSize: 11, color: '#888', marginTop: 8, lineHeight: 1.7 }}>
         模板图片字段提供录入时的初始图片项；录入人员可继续增删、改名和排序。「每行」＝每行几张图片。<b>共用</b>＝整组一个表内标题（上方填；粘连时可跨页重复表头）；<b>每张</b>＝使用录入后的图片名称作标题（始终与其图片同页）。<br />
-        「大标题 / 图表上方标签 / 图表下方备注」在分区标题栏的<b>「格式(A)」</b>里设。
+        图片上方或下方的说明请添加普通文本字段。
       </div>
     </div>
   );

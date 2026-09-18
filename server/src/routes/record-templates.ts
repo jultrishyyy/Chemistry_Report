@@ -10,8 +10,42 @@ import { pool } from '../db.js';
 import { assertEditLease } from '../services/collaboration.js';
 import { ensureRecordIdentityFields } from '../../../shared/record-template-normalize.js';
 import { isRecordFieldTransferable } from '../../../shared/record-field-transfer.js';
+import { reportBindingReview } from '../../../shared/report-binding-review.js';
 
 const router = Router();
+
+/** Read-only impact preview. Never publishes a draft or rewrites report mappings. */
+router.post('/:id/report-impact', async (req: Request, res: Response) => {
+  if (!actorHasPermission(req as any, 'record_template.edit') && !actorHasPermission(req as any, 'record.review')) {
+    res.status(403).json({ error: '当前账号无检查关联项目权限' }); return;
+  }
+  const groups = req.body?.groups;
+  if (!Array.isArray(groups) || groups.some(g => !g || !Array.isArray(g.fields) || g.fields.some((f: any) => !f || typeof f !== 'object'))) {
+    res.status(400).json({ error: '模板内容不完整，请刷新后重试' }); return;
+  }
+  try {
+    const source = await pool.query('SELECT id FROM record_templates WHERE id=$1 AND archived_at IS NULL', [Number(req.params.id)]);
+    if (!source.rows.length) { res.status(404).json({ error: '原始记录模板不存在' }); return; }
+    const reports = await pool.query(
+      `SELECT t.id, t.name, v.field_definitions, v.layout_options, v.id AS version_id,
+              v.status AS checked_status
+         FROM report_templates t
+         LEFT JOIN LATERAL (
+           SELECT pv.* FROM report_template_versions pv
+            WHERE pv.template_id=t.id
+              AND (pv.id=t.current_version_id OR
+                (t.current_version_id IS NULL AND pv.status IN ('draft','pending','rejected')))
+            ORDER BY pv.version_no DESC, pv.id DESC LIMIT 1
+         ) v ON TRUE
+        WHERE t.linked_record_template_id=$1 AND t.template_kind='project' AND t.archived_at IS NULL
+        ORDER BY t.name, t.id`, [Number(req.params.id)]);
+    res.json({ templates: reports.rows.map(row => ({
+      id: row.id, name: row.name, checked: !!row.version_id,
+      checked_status: row.checked_status || null,
+      issues: row.version_id ? reportBindingReview(row.field_definitions || [], groups, row.layout_options?.conclusions || []) : [],
+    })) });
+  } catch (e: any) { sendError(res, e); }
+});
 
 /** 业务流错误带 status（409 冲突 / 403 权限），其余 500 */
 function sendError(res: Response, e: any, fallback = 500) {

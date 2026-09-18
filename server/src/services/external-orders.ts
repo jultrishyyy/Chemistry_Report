@@ -157,17 +157,12 @@ export function parseSampleList(rawList: any): { samples: ExternalSample[]; warn
     if (usedIds.has(id)) { let k = 2; while (usedIds.has(`${id}#${k}`)) k++; id = `${id}#${k}`; }
     usedIds.add(id);
 
-    const seen = new Set<string>();
+    const byName = new Map<string, ExternalTestInfo>();
     const test_infos: ExternalTestInfo[] = [];
     for (const rt of (Array.isArray(rs?.TaskList) ? rs.TaskList : [])) {
       const tname = s(rt?.ProjectName);
       if (!tname) continue;
-      if (seen.has(tname)) {
-        warnings.push(`样品「${name}」存在重复测试项目「${tname}」，已合并为一项`);
-        continue;
-      }
-      seen.add(tname);
-      test_infos.push({
+      const parsed: ExternalTestInfo = {
         task_id: s(rt?.TaskId),
         name: tname,
         standard: s(rt?.StandardNo),
@@ -185,7 +180,25 @@ export function parseSampleList(rawList: any): { samples: ExternalSample[]; warn
         test_remark: s(rt?.TestRemark),
         material_uploader: s(rt?.MaterialUploader),
         remark: s(rt?.Remark),
-      });
+      };
+      const previous = byName.get(tname);
+      if (previous) {
+        // record_data 目前仍以“样品 + 项目名”唯一定位；重复项目不能拆成两条，但也不能直接
+        // 丢弃后续任务。上游可能在后续同名任务才补 StartDate/EndDate。
+        const starts = [previous.start_date, parsed.start_date].filter(Boolean) as string[];
+        const ends = [previous.end_date, parsed.end_date].filter(Boolean) as string[];
+        previous.start_date = starts.length ? starts.sort()[0] : undefined;
+        previous.end_date = ends.length ? ends.sort().slice(-1)[0] : undefined;
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key !== 'name' && !previous[key as keyof ExternalTestInfo] && value != null) {
+            (previous as any)[key] = value;
+          }
+        }
+        warnings.push(`样品「${name}」存在重复测试项目「${tname}」，已合并并保留日期等有效字段`);
+        continue;
+      }
+      byName.set(tname, parsed);
+      test_infos.push(parsed);
     }
     return { id, name, barcode: s(rs?.BarCode), sort_no: s(rs?.SampleSortNo), model: s(rs?.Model), test_infos };
   });

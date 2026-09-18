@@ -18,11 +18,11 @@ const source = { name: 'Data', grid: [[1.245]], merges: [], blocked: [], notices
 const plan = planExcelImport(field, {}, source, { r0: 0, r1: 0, c0: 0, c1: 0 }, 'row', [0]);
 assert.deepEqual(plan.issues, []);
 assert.equal(plan.value['a::x'], 1.245, 'retain source precision for later rule changes');
-assert.equal(freeGridNumberText(plan.value['a::x'], table, 'a::x'), '1.240');
+assert.equal(freeGridNumberText(plan.value['a::x'], table, 'a::x'), '1.245', 'format precision overrides the legacy rounding digits');
 const template = { name: 'T', version: 1, groups: [{ id: 'g', label: 'G', fields: [field] }] };
 const html = renderToStaticMarkup(React.createElement(FormRenderer, { template, data: { f: plan.value }, onChange: () => { throw Error('render must not mutate'); } }));
-assert.ok(html.includes('>1.240</textarea>'), 'imported input uses rounding then formatting');
-assert.ok(renderFreeGridTypst(field, table, plan.value).includes('1.240'), 'PDF agrees with entry display');
+assert.ok(html.includes('>1.245</textarea>'), 'imported input uses rounding then formatting');
+assert.ok(renderFreeGridTypst(field, table, plan.value).includes('1.245'), 'PDF agrees with entry display');
 for (const value of ['', '  ', null, undefined, true, '<0.01', '未检出']) {
   assert.equal(applyNumericRounding(value, table.default_rounding), value, 'non-numeric/empty values do not become zero');
 }
@@ -35,15 +35,15 @@ assert.equal(freeGridNumberText(1.2456789, exempt, 'a::x'), '1.2456789', 'explic
 const overridden = { ...table, cell_rounding: { 'a::x': { mode: 'none' } }, cell_number_fmt: { 'a::x': { mode: 'significant', digits: 4 } } };
 assert.equal(freeGridNumberText(1.245, overridden, 'a::x'), '1.245');
 assert.equal(freeGridNumberText(1.245, { ...overridden, cell_number_fmt: { 'a::x': { mode: 'scientific', digits: 2 } } }, 'a::x'), '1.25e+0');
-const withInstance = { ...plan.value, __free_table_structure__: { ...table, default_rounding: { mode: 'half_up', digits: 2 } } };
+const withInstance = { ...plan.value, __free_table_structure__: { ...table, default_number_fmt: { mode: 'decimals', digits: 2 }, default_rounding: { mode: 'half_up' } } };
 const instanceHtml = renderToStaticMarkup(React.createElement(FormRenderer, { template, data: { f: withInstance }, onChange: () => {} }));
-assert.ok(instanceHtml.includes('>1.250</textarea>'), 'persisted instance rules override template');
-assert.ok(renderFreeGridTypst(field, table, withInstance).includes('1.250'), 'PDF uses saved instance rounding');
+assert.ok(instanceHtml.includes('>1.25</textarea>'), 'persisted instance rules override template');
+assert.ok(renderFreeGridTypst(field, table, withInstance).includes('1.25'), 'PDF uses saved instance rounding');
 const formulaTable = { ...table, rows: [...table.rows, { id: 'total' }], cell_formulas: { 'total::x': { type: 'sum', sources: ['a::x'] } } };
 const formulaField = { ...field, free_table: formulaTable };
 const formulaTemplate = { ...template, groups: [{ id: 'g', label: 'G', fields: [formulaField] }] };
 const formulaHtml = renderToStaticMarkup(React.createElement(FormRenderer, { template: formulaTemplate, data: { f: plan.value }, onChange: () => {} }));
-assert.ok(formulaHtml.includes('<strong>1.240</strong>'), 'downstream formula consumes rounded value and respects display format');
+assert.ok(formulaHtml.includes('<strong>1.245</strong>'), 'downstream formula consumes rounded value and respects display format');
 const noRuleTable = { ...formulaTable, default_number_fmt: undefined, default_rounding: undefined };
 const noRuleField = { ...field, free_table: noRuleTable };
 const noRuleTemplate = { ...template, groups: [{ id: 'g', label: 'G', fields: [noRuleField] }] };
@@ -53,7 +53,7 @@ assert.ok(noRuleHtml.includes('<strong>1.2456789</strong>'));
 assert.ok(noRuleHtml.includes('>1.2456789</textarea>'));
 assert.ok(renderFreeGridTypst(noRuleField, noRuleTable, precise).includes('1.2456789'), 'PDF preserves unconfigured formula precision too');
 const previewHtml = renderToStaticMarkup(React.createElement(FormRenderer, { template: formulaTemplate, data: { f: plan.value }, previewFieldCode: 'f', onChange: () => { throw Error('preview must not write'); } }));
-assert.ok(previewHtml.includes('inert=""') && previewHtml.includes('<strong>1.240</strong>'));
+assert.ok(previewHtml.includes('inert=""') && previewHtml.includes('<strong>1.245</strong>'));
 assert.ok(!previewHtml.includes('>导入 Excel<'), 'target preview never recursively mounts an import wizard');
 const before = JSON.stringify(table);
 const original = React.useState;
@@ -67,11 +67,13 @@ function nodes(node) {
 const settings = () => nodes(Settings({ table, cellKeys: ['a::x'], onChange: value => { updated = value; } }));
 try {
   const popup = Settings({ table, cellKeys: ['a::x'], onChange: value => { updated = value; } });
+  assert.ok(!settings().some(n => n.props['aria-label'] === '修约位数'), 'no second precision input');
   assert.equal(popup.props.rootClassName, 'free-grid-number-settings-popup');
   scope = 'table'; popup.props.onOpenChange(true);
   assert.equal(scope, 'selection', 'opening settings never silently reuses whole-table scope');
   settings().find(n => n.type === Select && n.props['aria-label'] === '修约方式').props.onChange('truncate');
   assert.equal(updated.cell_rounding['a::x'].mode, 'truncate');
+  assert.equal(updated.cell_rounding['a::x'].digits, undefined, 'new rules only store the rounding method');
   assert.equal(updated.default_rounding.mode, 'half_even');
   scope = 'table';
   settings().find(n => n.type === Select && n.props['aria-label'] === '数字格式').props.onChange('scientific');

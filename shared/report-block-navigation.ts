@@ -27,9 +27,9 @@ const paragraph = (field?: FieldDefinition) => field?.type === 'text' && field.r
 const empty = () => ({ type: 'paragraph' as const });
 const blank = (node: any) => node?.type === 'paragraph' && !node.content?.length;
 
-/** Keep table/image-section layout rules intact; ordinary vertical sections can host prose. */
+/** Vertical document sections can host prose around figures; image_layout only controls the image grid itself. */
 export function canContinueReportBlocks(group: FieldGroup): boolean {
-  return (!group.layout || group.layout === 'vertical') && group.section_role !== 'images' && !group.image_layout;
+  return !group.layout || group.layout === 'vertical';
 }
 
 /** Explicit Enter beside a figure; reuse an existing blank edge, not duplicate it. */

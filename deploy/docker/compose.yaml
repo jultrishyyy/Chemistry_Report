@@ -1,0 +1,96 @@
+name: cdr-report
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16-bookworm}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-cdr_report}
+      POSTGRES_USER: ${DB_USER:-cdr}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/system.env}
+      LOAD_SNAPSHOT_ON_EMPTY: ${LOAD_SNAPSHOT_ON_EMPTY:-1}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../seed-data:/seed:ro
+      - ./init-db.sh:/docker-entrypoint-initdb.d/10-restore-snapshot.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U ${DB_USER:-cdr} -d ${DB_NAME:-cdr_report}']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  app:
+    image: ${APP_IMAGE:-cdr-report:latest}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 75s
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - '${HTTP_PORT:-5173}:5173'
+    environment:
+      INTEGRATIONS_PROFILE: ${INTEGRATIONS_PROFILE:-demo}
+      DB_HOST: db
+      DB_PORT: '5432'
+      DB_DATABASE: ${DB_NAME:-cdr_report}
+      DB_USER: ${DB_USER:-cdr}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/system.env}
+      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      DB_CONNECTION_TIMEOUT_MS: ${DB_CONNECTION_TIMEOUT_MS:-5000}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://127.0.0.1:5173}
+      AUTH_COMMON_LOGIN_URL: ${AUTH_COMMON_LOGIN_URL:-}
+      AUTH_LOCAL_ADMIN: ${AUTH_LOCAL_ADMIN:-}
+      AUTH_LOCAL_ADMIN_PWD: ${AUTH_LOCAL_ADMIN_PWD:-}
+      AUTH_APP_ID: ${AUTH_APP_ID:-chemistry}
+      AUTH_PWD_HASH: ${AUTH_PWD_HASH:-sha1}
+      AUTH_TIMEOUT_MS: ${AUTH_TIMEOUT_MS:-10000}
+      DELIVERY_SOAP_ENDPOINT: ${DELIVERY_SOAP_ENDPOINT:-}
+      DELIVERY_TARGET_NAMESPACE: ${DELIVERY_TARGET_NAMESPACE:-http://tempuri.org/}
+      DELIVERY_METHOD: ${DELIVERY_METHOD:-AcceptReportFromDiGui}
+      DELIVERY_PARAM_ID_NAME: ${DELIVERY_PARAM_ID_NAME:-sysNumber}
+      DELIVERY_PARAM_FILE_NAME: ${DELIVERY_PARAM_FILE_NAME:-file}
+      DELIVERY_PARAM_JOBNO_NAME: ${DELIVERY_PARAM_JOBNO_NAME:-jobNo}
+      DELIVERY_SOAP_ACTION: ${DELIVERY_SOAP_ACTION:-http://tempuri.org/IChemistryService/AcceptReportFromDiGui}
+      DELIVERY_CANCEL_METHOD: ${DELIVERY_CANCEL_METHOD:-CancelFlowFromDiGui}
+      DELIVERY_CANCEL_PARAM_ID_NAME: ${DELIVERY_CANCEL_PARAM_ID_NAME:-sysNumber}
+      DELIVERY_CANCEL_PARAM_JOBNO_NAME: ${DELIVERY_CANCEL_PARAM_JOBNO_NAME:-jobNo}
+      DELIVERY_CANCEL_SOAP_ACTION: ${DELIVERY_CANCEL_SOAP_ACTION:-http://tempuri.org/IChemistryService/CancelFlowFromDiGui}
+      DELIVERY_TASK_STATE_METHOD: ${DELIVERY_TASK_STATE_METHOD:-UpdateMaterialTaskState}
+      DELIVERY_TASK_STATE_PARAM_ID_NAME: ${DELIVERY_TASK_STATE_PARAM_ID_NAME:-taskId}
+      DELIVERY_TASK_STATE_PARAM_STATE_NAME: ${DELIVERY_TASK_STATE_PARAM_STATE_NAME:-testState}
+      DELIVERY_TASK_STATE_SOAP_ACTION: ${DELIVERY_TASK_STATE_SOAP_ACTION:-http://tempuri.org/IChemistryService/UpdateMaterialTaskState}
+      DELIVERY_SOAP_VERSION: ${DELIVERY_SOAP_VERSION:-1.1}
+      DELIVERY_TIMEOUT_MS: ${DELIVERY_TIMEOUT_MS:-30000}
+      LOAD_SNAPSHOT_ON_EMPTY: ${LOAD_SNAPSHOT_ON_EMPTY:-1}
+      TYPST_MAX_CONCURRENCY: ${TYPST_MAX_CONCURRENCY:-2}
+      TYPST_MAX_QUEUE: ${TYPST_MAX_QUEUE:-40}
+      TYPST_QUEUE_TIMEOUT_MS: ${TYPST_QUEUE_TIMEOUT_MS:-15000}
+      TYPST_MEMORY_CACHE_MB: ${TYPST_MEMORY_CACHE_MB:-128}
+      TYPST_DISK_CACHE_MB: ${TYPST_DISK_CACHE_MB:-2048}
+      TYPST_CACHE_MAX_FILES: ${TYPST_CACHE_MAX_FILES:-2000}
+      RUN_MIGRATIONS: '1'
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-60000}
+    volumes:
+      - uploads:/data/uploads
+      - legacy_uploads:/app/server/uploads
+      - cache:/data/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+volumes:
+  postgres_data:
+  uploads:
+  legacy_uploads:
+  cache:
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-10.250.241.0/24}

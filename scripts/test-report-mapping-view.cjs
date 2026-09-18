@@ -42,3 +42,26 @@ for (const axis of ['row', 'col']) {
   assert.equal((render().match(/data-grid-cell=/g) || []).length, 3, 'actual merges must still render');
   console.log(`${axis}: source controls and actual merge geometry passed`);
 }
+
+// Empty cells use one icon; text (including a unit-only header) is rendered once.
+{
+  const ft = {
+    rows: [{ id: 'r' }], columns: ['a', 'b', 'c', 'd'].map(id => ({ id, label: '' })),
+    cells: { 'r::b': '普通文字唯一', 'r::c': '单位表头唯一', 'r::d': '公式文字唯一' },
+    header_cells: { 'r::c': true },
+    cell_unit_bindings: { 'r::c': { source: 'literal', text: 'mm' } },
+    cell_bindings: { 'r::d': { source: 'record_free_formula_cell', field_code: 'source', cell_key: 'r::d' } },
+  };
+  const source = { id: 's', code: 'source', type: 'free_grid', label: '来源', free_table: { ...ft, header_cells: {}, cell_bindings: {}, cell_formulas: { 'r::d': { type: 'sum', sources: [] } } } };
+  const html = renderToStaticMarkup(React.createElement(FreeGridCanvas, {
+    field: { id: 't', code: 'target', type: 'free_grid', free_table: ft },
+    linkedRecord: { groups: [{ id: 'g', fields: [source] }] }, editorMode: 'report-project', onChange: () => {},
+  }));
+  assert.equal((html.match(/aria-label="添加映射"/g) || []).length, 1);
+  assert.ok(html.includes('data-report-sample-region-toolbar'));
+  assert.ok(html.includes('设为试样区'));
+  assert.ok(!html.includes('点击添加映射'));
+  assert.ok(!html.includes('添加内容映射'));
+  for (const text of ['普通文字唯一', '单位表头唯一', '公式文字唯一']) assert.equal(html.split(text).length - 1, 1, text);
+  console.log('minimal mapping placeholders and single text rendering passed');
+}

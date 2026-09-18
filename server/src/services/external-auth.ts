@@ -14,7 +14,7 @@
  *   code='0010' 为成功。
  *
  * 当前：未配置 common_login_url 时走 mock（任意账号即登录成功，便于演示）；配置后走真实 HTTP GET。
- * 真实接入只需配 config/auth.local.json（common_login_url / app_id），无需改代码。
+ * 真实接入只需配 deploy/system.env（SERVER_OA_LOGIN_URL / AUTH_APP_ID），无需改代码。
  * Node 全局 fetch 默认不走 http_proxy，内网直连——无需额外设置。
  * 完整对接细节与排错手册见项目根目录《外部OA登录对接.md》。
  */
@@ -36,7 +36,7 @@ export interface LoginIdentity {
 import { createHash } from 'crypto';
 import { authConfig } from '../../../config/index.js';
 
-/** 原认证系统地址（含路径前缀，如 http://172.19.0.27/grgtapi/common-api）。缺省为空＝mock 模式。配 config/auth.local.json 或 AUTH_COMMON_LOGIN_URL。 */
+/** 原认证系统地址（含路径前缀，如 http://172.19.0.27/grgtapi/common-api）。缺省为空＝mock 模式，由 deploy/system.env 注入。 */
 const COMMON_LOGIN_URL = String(authConfig.common_login_url || process.env.COMMON_LOGIN_URL || '').replace(/\/+$/, '');
 /** 接入方应用标识，由 OA 分配（现场=chemistry）。空＝不发送该参数。配 app_id 或 AUTH_APP_ID。 */
 const COMMON_LOGIN_APP_ID = String(authConfig.app_id ?? process.env.COMMON_LOGIN_APP_ID ?? 'chemistry');

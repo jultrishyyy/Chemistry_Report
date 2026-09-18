@@ -4,6 +4,14 @@ import { readSampleAxes } from './free-grid-samples';
 type Table = NonNullable<FieldDefinition['free_table']>;
 export type FreeGridDisplayAxis = { id: string; idx: number; sample: number | null };
 
+/** 局部试样区外的同行/列公式也使用该展开行/列的试样编号，与 PDF 展开一致。 */
+export function freeGridFormulaSample(layout: { axisIsRow: boolean; displayRows: FreeGridDisplayAxis[]; displayCols: FreeGridDisplayAxis[] }, key: string, sample: number | null): number | null {
+  if (sample != null) return sample;
+  const [row, col] = key.split('::');
+  return (layout.axisIsRow ? layout.displayRows : layout.displayCols)
+    .find(item => item.id === (layout.axisIsRow ? row : col))?.sample ?? null;
+}
+
 /** Recording, paste/import and PDF share the same sample order and merged cells. */
 export function buildFreeGridLayout(ft: Table, raw: Record<string, any>, sampleIndices?: Record<string, number[]>) {
   const bands = (ft.sample_bands?.length ? ft.sample_bands

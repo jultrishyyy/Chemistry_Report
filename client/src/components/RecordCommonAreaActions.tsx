@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Form, Input, Modal, Select, Space, message } from 'antd';
+import { Button, Form, Input, Modal, Select, Space, Tooltip, message } from 'antd';
 import { ApartmentOutlined, PlusOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import type { RecordTemplate } from '../../../shared/types';
@@ -46,7 +46,9 @@ export default function RecordCommonAreaActions({ readOnly, templateGroupId, onF
           ? families.find(group => Number(group.id) === Number(value)) || { id: value, name: `项目组 #${value}` }
           : null)}
         options={families.map(group => ({ value: Number(group.id), label: group.name }))} />
-      <Button size="small" type="text" icon={<PlusOutlined />} disabled={readOnly} onClick={() => setCreateOpen(true)}>新建项目组</Button>
+      <Tooltip title="新建项目组"><span style={{ display: 'inline-flex' }}>
+        <Button size="small" type="text" icon={<PlusOutlined />} aria-label="新建项目组" disabled={readOnly} onClick={() => setCreateOpen(true)} />
+      </span></Tooltip>
     </Space>
     <Modal title="新建项目组" open={createOpen} onOk={createFamily} onCancel={() => setCreateOpen(false)} okText="创建并选择">
       <Form form={form} layout="vertical"><Form.Item name="name" label="项目组名称" rules={[{ required: true }]}><Input /></Form.Item></Form>

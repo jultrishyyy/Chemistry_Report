@@ -12,7 +12,7 @@
  *
  * 协议：SOAP over HTTP(S)。默认 SOAP 1.1（text/xml + SOAPAction），可配 1.2（application/soap+xml）。
  * 配置在 config/interfaces.{demo|server}.json 的 report_delivery + DELIVERY_* 环境变量：
- *   soap_endpoint     业务系统 SOAP 端点 URL（**空＝mock，不真发只返回成功** → 对方收不到，生产必须配成
+ *   soap_endpoint     业务系统 SOAP 端点 URL（**空＝明确失败，不冒充发送成功**，生产必须配成
  *                     http://172.18.0.97:8003/Lab/Chemistry）
  *   method            方法名（默认 AcceptReportFromDiGui）
  *   param_id_name / param_file_name / param_jobno_name  三个入参标签名（默认 sysNumber / file / jobNo）
@@ -84,7 +84,11 @@ function xmlEscape(v: string): string {
   return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 function xmlUnescape(v: string): string {
-  return v.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  if (v.startsWith('<![CDATA[') && v.endsWith(']]>')) return v.slice(9, -3);
+  return v.replace(/&#(x[0-9a-f]+|\d+);/gi, (_, n) => {
+    const code = /^x/i.test(n) ? parseInt(n.slice(1), 16) : Number(n);
+    return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+  }).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
 /** 取某标签内文本（忽略命名空间前缀）。 */
 function pickTag(xml: string, tag: string): string | undefined {
@@ -153,12 +157,12 @@ function buildTaskStateEnvelope(taskId: string, testState: 0 | 1): string {
 export async function submitReportToDiGui(sysNumber: string, pdfBase64: string, jobNo = ''): Promise<DeliverResult> {
   if (!sysNumber) return { ok: false, error: 'SysNumber 为空' };
   if (!pdfBase64) return { ok: false, error: '报告文件为空' };
-  if (!jobNo) console.warn(`[external-delivery] ⚠️ SysNumber=${sysNumber} 的 jobNo 为空——业务系统可能拒收（操作人未登录/缺 X-User-Job 工号）`);
+  if (!jobNo.trim()) return { ok: false, error: '操作人工号 jobNo 为空，不能回传报告' };
 
-  // ── mock：未配置 SOAP 端点时只校验并返回成功（便于全流程演示/联调）──
+  // Missing configuration must never produce a persisted false delivery success.
   if (!ENDPOINT) {
     console.log(`[external-delivery] (mock) 回传报告 SysNumber=${sysNumber} jobNo=${jobNo || '(空)'}，PDF ${pdfBase64.length} 字节(base64)`);
-    return { ok: true, ref: `MOCK-${sysNumber}` };
+    return { ok: false, error: '未配置业务系统 SOAP 地址，报告未发送；请使用 server 接口配置' };
   }
 
   // ── 真实接入：SOAP over HTTP ──
@@ -180,8 +184,17 @@ export async function submitReportToDiGui(sysNumber: string, pdfBase64: string, 
     // 取方法返回值 AcceptReportFromDiGuiResult（string）作为回执
     const resultRaw = pickTag(text, `${METHOD}Result`);
     const result = resultRaw != null ? xmlUnescape(resultRaw.trim()) : '';
+    if (!result) return { ok: false, error: '业务系统未返回报告接收结果' };
     let ref: string | undefined = result || undefined;
-    try { const j = JSON.parse(result); if (j && (j.ref || j.Ref)) ref = j.ref || j.Ref; } catch { /* 非 JSON，原样作回执 */ }
+    try {
+      const j = JSON.parse(result);
+      const msg = j?.Msg ?? j?.msg;
+      if (j === false || j?.ok === false || j?.success === false || j?.Error || j?.error
+        || (msg != null && String(msg).trim().toUpperCase() !== 'OK')) {
+        return { ok: false, error: `业务系统拒收报告：${String(j?.Error || j?.error || msg || result).slice(0, 300)}` };
+      }
+      if (j && (j.ref || j.Ref)) ref = j.ref || j.Ref;
+    } catch { if (/^(false|fail(?:ed)?|error)|失败|错误|拒绝/i.test(result)) return { ok: false, error: `业务系统拒收报告：${result.slice(0, 300)}` }; }
     return { ok: true, ref };
   } catch (e: any) {
     const isTimeout = e?.name === 'TimeoutError' || /aborted|timeout/i.test(String(e?.message));
@@ -201,11 +214,11 @@ export async function cancelReportFlowFromDiGui(sysNumber: string, jobNo = ''): 
   if (!sysNumber) return { ok: false, error: 'SysNumber 为空' };
   if (!jobNo) return { ok: false, error: '操作人工号 jobNo 为空，不能发起外部撤回' };
 
-  // 未配置端点时保持演示环境可用，并完整模拟双方约定的回包。
+  // Never unlock local editing by simulating an external withdrawal receipt.
   if (!ENDPOINT) {
     const receipt = JSON.stringify({ Msg: 'OK', RecordState: '草稿' });
     console.log(`[external-delivery] (mock) 撤回送审 SysNumber=${sysNumber} jobNo=${jobNo}`);
-    return { ok: true, recordState: '草稿', receipt };
+    return { ok: false, receipt, error: '未配置业务系统 SOAP 地址，未向外部发送撤回请求；本地状态保持不变' };
   }
 
   const envelope = buildCancelEnvelope(sysNumber, jobNo);

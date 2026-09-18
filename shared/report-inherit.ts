@@ -243,6 +243,8 @@ function convertField(f: FieldDefinition): { field: FieldDefinition; kind: Inher
   if (f.type === 'image') {
     const out: FieldDefinition = JSON.parse(JSON.stringify(f));
     out.image_source_code = f.code;
+    delete out.caption; delete out.caption_style; delete out.caption_gap;
+    out.image_seamless = true; // Newly imported report pictures default to joined frames.
     delete out.image_photos;
     delete out.image_items;
     return { field: out, kind: 'image' };
@@ -298,7 +300,13 @@ export function buildProjectGroupsFromRecord(record: Pick<RecordTemplate, 'group
       }
     }
     // 保留分区外壳（即便字段全被跳过也保留结构，便于用户在其中手动补字段）
-    outGroups.push({ ...JSON.parse(JSON.stringify(g)), fields: outFields });
+    const group: FieldGroup = { ...JSON.parse(JSON.stringify(g)), fields: outFields };
+    if (g.section_role === 'images' || g.image_layout) {
+      group.image_layout = { ...group.image_layout, seamless: true };
+      group.image_source_group_id = g.id;
+      delete group.image_layout.caption; delete group.image_layout.caption_style; delete group.image_layout.caption_gap;
+    }
+    outGroups.push(group);
   }
 
   return { groups: outGroups, mapped, manual, theme_config: { ...DEFAULT_PROJECT_THEME_CONFIG } };

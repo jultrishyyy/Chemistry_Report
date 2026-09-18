@@ -8,11 +8,9 @@
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { authConfig } from '../../../config/index.js';
+import { authConfig, integrationsProfile } from '../../../config/index.js';
 import { pool } from '../db.js';
 import { loginViaCommonLogin, isMockLogin } from '../services/external-auth.js';
-// ⚠️ TEMP_LOGIN_WHITELIST（临时登录白名单·试运行阶段，后续整体删除）——见 server/src/temp-login-whitelist/index.ts
-import { isLoginAllowed, TEMP_LOGIN_DENIED_MESSAGE } from '../temp-login-whitelist/index.js';
 import {
   ALL_PERMISSIONS, PERMISSION_LABELS,
   normalizePermissions, permissionsForRoles, type Role, type Permission, type AppUser, type RoleDefinition,
@@ -85,10 +83,10 @@ router.post('/login', async (req: Request, res: Response) => {
   // ── 本地管理员旁路（破冰用）──
   // 内网只用 OA 登录时，OA 不认识此账号 → 没有管理员可审批首批用户的角色申请。
   // 配 config/auth.json 的 local_admin / local_admin_pwd（默认 admin/123）即可用本账号【跳过 OA】直接登入，
-  // 始终拥有 admin 角色 + active。分配了真实管理员后，把 local_admin_pwd 置空（auth.local.json）即关闭。
+  // 始终拥有 admin 角色 + active。server 模式在 deploy/system.env 中把本地管理员留空即关闭。
   const adminName = String(authConfig.local_admin || '').trim();
   const adminPwd = String(authConfig.local_admin_pwd ?? '');
-  if (adminName && adminPwd && String(loginName).trim() === adminName && String(pwd ?? '') === adminPwd) {
+  if (integrationsProfile !== 'server' && adminName && adminPwd && String(loginName).trim() === adminName && String(pwd ?? '') === adminPwd) {
     // 首登即建档为 admin 角色；已存在则刷新 last_login + 解除停用 + 确保含 admin 角色（破冰账号必须始终可用，
     // 保留其它已分配角色不变）。
     const r = await pool.query(
@@ -104,14 +102,6 @@ router.post('/login', async (req: Request, res: Response) => {
     const au = rowToUser(r.rows[0]);
     console.log('[auth] 本地管理员旁路登录 job=%s', adminName);
     res.json({ ...(await withPerms(au)), token: '', modify_pwd_tips: '' });
-    return;
-  }
-
-  // ⚠️ TEMP_LOGIN_WHITELIST（临时登录白名单·后续删除）：只有白名单工号 + 本地管理员账号能触发登录接口；
-  // 其余工号一律拒绝、【不调用】外部登录接口。删除时把这段连同上方 import 一起删掉、再删 temp-login-whitelist 文件夹。
-  if (!isLoginAllowed(String(loginName), adminName)) {
-    console.log('[auth] 临时白名单拦截登录 loginName=%s', loginName);
-    res.status(403).json({ error: TEMP_LOGIN_DENIED_MESSAGE });
     return;
   }
 

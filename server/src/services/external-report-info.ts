@@ -170,7 +170,7 @@ export async function matchRequisitionScope(
 
   // 录入数据：按 (sample_external_id, test_item_name) 分桶
   const rd = await pool.query(
-    'SELECT id, template_id, sample_external_id, test_item_name, audit_status FROM record_data WHERE order_no = $1',
+    'SELECT rd.id, rd.template_id, rd.sample_external_id, rd.test_item_name, rd.audit_status, rt.name AS record_template_name FROM record_data rd LEFT JOIN record_templates rt ON rt.id=rd.template_id WHERE rd.order_no = $1 AND rd.cancelled_at IS NULL',
     [order_no],
   );
   const recByKey = new Map<string, any[]>();
@@ -184,9 +184,10 @@ export async function matchRequisitionScope(
   // （否则会生成出结构不完整/无法编辑的报告）。
   const pt = await pool.query(
     `SELECT t.id, t.name, t.linked_record_template_id,
-            t.host_manufacturer_id,t.updated_at,
+            CASE WHEN pf.id IS NOT NULL THEN pf.host_manufacturer_id ELSE t.host_manufacturer_id END AS host_manufacturer_id,t.updated_at,
             cv.id AS version_id, cv.version_no, cv.layout_options
        FROM report_templates t
+     LEFT JOIN report_project_template_families pf ON pf.id=t.report_project_family_id
      JOIN report_template_versions cv ON cv.id = t.current_version_id AND cv.status = 'approved'
      WHERE t.template_kind = 'project' AND t.archived_at IS NULL AND t.linked_record_template_id IS NOT NULL
      ORDER BY t.name, t.id`,
@@ -247,7 +248,12 @@ export async function matchRequisitionScope(
         continue;
       }
       // 有 record_data：优先 reviewed 排前
+      const orderTest = (orderSample.test_infos || []).find((test: any) => test.name === projectName);
+      const methodIds = orderTest?.linked_template_ids || (orderTest?.linked_template_id ? [orderTest.linked_template_id] : []);
+      const methodOrder = (id: number) => { const index = methodIds.map(Number).indexOf(Number(id)); return index < 0 ? methodIds.length + Number(id) : index; };
       recs.sort((a, b) => {
+        const methodDifference = methodOrder(a.template_id) - methodOrder(b.template_id);
+        if (methodDifference) return methodDifference;
         const reviewedOrder = Number(b.audit_status === 'reviewed') - Number(a.audit_status === 'reviewed');
         return reviewedOrder || Number(b.id) - Number(a.id);
       });
@@ -255,8 +261,7 @@ export async function matchRequisitionScope(
         const candidates = projByRecTpl.get(r.template_id) || [];
         const saved = savedByKey.get(`${scopeKey}::${Number(r.id)}`)
           || savedByRecordId.get(Number(r.id));
-        // 项目模板只能由文员在“报告配置”中确认。即使只有一个候选，也仅作为推荐项显示，
-        // 不再静默写入/自动生成，避免匹配成为不可校对的黑箱。
+        // 匹配保留有效的人工选择；未选择时由生成流程按首页主机厂和候选顺序决定默认模板。
         const selected = saved
           ? candidates.find(c => Number(c.id) === Number(saved.project_template_id))
           : undefined;
@@ -264,6 +269,7 @@ export async function matchRequisitionScope(
           record_data_id: r.id,
           record_data_status: r.audit_status,
           record_template_id: r.template_id,
+          record_template_name: r.record_template_name,
           project_template_id: selected?.id ?? null,
           project_template_version_id: selected?.version_id ?? null,
           project_template_candidates: candidates,
@@ -280,7 +286,7 @@ export async function matchRequisitionScope(
         status: 'matched',
         note: !anyReviewed ? '已找到录入数据，但尚未审核通过'
           : !anyCandidates ? '项目报告模板未审核通过或未配置，暂不能生成'
-          : needsChoice ? '存在多个关联的项目报告模板，请确认本次出报告使用哪一份'
+          : needsChoice ? '生成时自动使用默认项目模板，也可展开改选'
           : undefined,
         assignments,
       });

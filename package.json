@@ -11,6 +11,10 @@
     "serve": "cd server && PORT=${PORT:-5173} pnpm start",
     "serve:demo": "INTEGRATIONS_PROFILE=demo pnpm serve",
     "serve:server": "INTEGRATIONS_PROFILE=server pnpm serve",
+    "system:mock": "sh ./system.sh mock",
+    "system:server": "sh ./system.sh server",
+    "snapshot": "sh ./system.sh snapshot",
+    "package:offline": "sh ./system.sh package",
     "migrate": "tsx db/migrate.ts",
     "convert-xls": "bash scripts/convert-xls.sh"
   },

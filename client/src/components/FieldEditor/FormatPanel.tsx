@@ -43,7 +43,7 @@ interface Props {
 }
 
 // 仅列出 demo_v1/fonts/ 里已打包的字体（系统只用这个目录渲染，跨服务器一致）。
-// 加字体：把 .ttf 放进 fonts/ 并在此加一行（value=typst family 名）。详见 fonts/README.md。
+// 加字体：把已授权的 .ttf 放进 fonts/ 并在此加一行（value=Typst family 名），再重建镜像。
 export const REPORT_FONTS = [
   { value: '', label: '默认字体' },
   { value: 'Songti SC', label: '宋体' },

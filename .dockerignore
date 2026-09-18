@@ -1,0 +1,26 @@
+.git
+**/node_modules
+**/dist
+**/.DS_Store
+**/*.log
+**/*.local.json
+**/.env*
+config/interfaces.server.json
+server/uploads
+.local-migrations
+docs
+*.docx
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+!seed-data/uploads.tar.gz
+!seed-data/legacy-uploads.tar.gz
+*.tgz
+session.txt
+samples/converted
+samples/poc-screenshots
+deploy/docker/.env
+# Generated JS beside TS can otherwise shadow current code at runtime.
+shared/*.js
+shared/*.d.ts

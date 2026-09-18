@@ -107,13 +107,16 @@ router.delete('/:orderNo', requirePermission('record.entry'), async (req: Reques
     await client.query(`DELETE FROM rework_tickets WHERE order_no = $1`, [orderNo]);
     await client.query(`DELETE FROM reports WHERE order_no = $1`, [orderNo]);
     await client.query(`DELETE FROM report_batches WHERE order_no = $1`, [orderNo]);
+    await client.query(`DELETE FROM record_batch_items WHERE record_data_id IN (SELECT id FROM record_data WHERE order_no = $1)`, [orderNo]);
     await client.query(`DELETE FROM record_data WHERE order_no = $1`, [orderNo]);
+    await client.query(`DELETE FROM record_batches WHERE order_no = $1`, [orderNo]);
     await client.query(`DELETE FROM work_orders WHERE order_no = $1`, [orderNo]);
     await client.query('COMMIT');
     res.json({ ok: true, order_no: orderNo });
   } catch (e: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('删除订单失败', e);
+    res.status(500).json({ error: '删除订单失败，数据未删除，请刷新后重试。' });
   } finally {
     client.release();
   }
@@ -199,8 +202,8 @@ router.put('/:orderNo/link', requirePermission('record.entry'), async (req: Requ
     if (action === 'remove') {
       // 已审核通过的数据受保护：拒绝解除关联（解锁须走报告端「退回原始记录」rework）
       const reviewed = await client.query(
-        `SELECT 1 FROM record_data WHERE ${matchWhere} AND audit_status = 'reviewed' LIMIT 1`, ctxParams);
-      if (reviewed.rows.length) {
+        `SELECT id, audit_status FROM record_data WHERE ${matchWhere} FOR UPDATE`, ctxParams);
+      if (reviewed.rows.some(row => row.audit_status === 'reviewed')) {
         await client.query('ROLLBACK');
         res.status(409).json({ error: '该原始记录已审核通过，不能解除关联。如需修改，请先从报告端「退回原始记录」解锁。' });
         return;
@@ -228,14 +231,32 @@ router.put('/:orderNo/link', requirePermission('record.entry'), async (req: Requ
            WHERE record_data_id IN (SELECT id FROM record_data WHERE ${matchWhere})`,
         ctxParams
       );
+      // 批次明细使用 RESTRICT 外键，必须在同一事务内先解除明细，再删除录入记录。
+      // 按模板身份匹配所有版本；不能仅匹配当前审核通过的模板版本。
+      const detached = await client.query(
+        `DELETE FROM record_batch_items WHERE record_data_id IN (SELECT id FROM record_data WHERE ${matchWhere}) RETURNING batch_id`, ctxParams,
+      );
+      const batchIds = [...new Set(detached.rows.map(row => row.batch_id))];
       const del = await client.query(`DELETE FROM record_data WHERE ${matchWhere}`, ctxParams);
       removedRecords = del.rowCount || 0;
+      if (batchIds.length) {
+        // 仅清理受影响的空批次，保留同批次其他模板的录入数据。
+        await client.query(`DELETE FROM record_batches b WHERE b.id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM record_batch_items i WHERE i.batch_id=b.id)
+          AND NOT EXISTS (SELECT 1 FROM record_data r WHERE r.record_batch_id=b.id)`, [batchIds]);
+        await client.query(`UPDATE record_batches b SET audit_status = COALESCE((
+          SELECT r.audit_status FROM record_batch_items i JOIN record_data r ON r.id=i.record_data_id
+          WHERE i.batch_id=b.id AND i.item_status='active' AND r.cancelled_at IS NULL
+          ORDER BY CASE r.audit_status WHEN 'pending' THEN 1 WHEN 'rejected' THEN 2 WHEN 'draft' THEN 3 ELSE 4 END LIMIT 1
+        ), 'draft'), updated_at=NOW() WHERE b.id = ANY($1::int[])`, [batchIds]);
+      }
     }
     await client.query('COMMIT');
     res.json({ ...updated.rows[0], removed_records: removedRecords });
   } catch (err: any) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    console.error('修改原始记录关联失败', err);
+    res.status(500).json({ error: '关联修改失败，原有数据已保留，请刷新后重试。' });
   } finally {
     client.release();
   }

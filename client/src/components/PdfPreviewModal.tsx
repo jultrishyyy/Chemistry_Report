@@ -28,7 +28,7 @@ export default function PdfPreviewModal({ open, title, loadPdf, downloadName = '
     setLoading(true);
     setError('');
     setUrl('');
-    loaderRef.current()
+    Promise.resolve().then(() => loaderRef.current())
       .then(next => {
         createdUrl = next;
         if (active) setUrl(next);
@@ -52,8 +52,8 @@ export default function PdfPreviewModal({ open, title, loadPdf, downloadName = '
       style={{ top: 16, paddingBottom: 0 }}
       styles={{
         container: {
-          height: 'min(820px, calc(100vh - 32px))',
-          maxHeight: 'calc(100vh - 32px)',
+          height: 'min(820px, calc(100dvh - 32px))',
+          maxHeight: 'calc(100dvh - 32px)',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',

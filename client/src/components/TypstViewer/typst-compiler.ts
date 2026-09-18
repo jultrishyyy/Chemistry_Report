@@ -1,11 +1,15 @@
 import axios from 'axios';
+import { ByteLru } from '../../../../shared/byte-lru';
 
 const API_BASE = '';
-const cache = new Map<string, string>();
+// Cache bytes, never a URL owned (and revoked) by a preview or download.
+const cache = new ByteLru<Blob>(50, 32 * 1024 * 1024, (blob, source) => blob.size + source.length * 2);
 
-export async function compileTypst(source: string): Promise<string> {
-  if (cache.has(source)) {
-    return cache.get(source)!;
+export async function compileTypst(source: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
+  const cached = cache.get(source);
+  if (cached) {
+    return URL.createObjectURL(cached);
   }
 
   let response;
@@ -13,7 +17,7 @@ export async function compileTypst(source: string): Promise<string> {
     response = await axios.post(
       `${API_BASE}/api/typst/compile`,
       { source },
-      { responseType: 'blob' }
+      { responseType: 'blob', signal, ...(signal ? { headers: { 'X-Preview-Request': '1' } } : {}) }
     );
   } catch (err: any) {
     // 编译失败（422）时响应体是 blob（JSON），responseType:'blob' 让 axios 不解析它——
@@ -32,23 +36,14 @@ export async function compileTypst(source: string): Promise<string> {
     throw err;
   }
 
+  signal?.throwIfAborted();
   const blob = new Blob([response.data], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
 
-  if (cache.size >= 50) {
-    const firstKey = cache.keys().next().value!;
-    const oldUrl = cache.get(firstKey)!;
-    URL.revokeObjectURL(oldUrl);
-    cache.delete(firstKey);
-  }
-  cache.set(source, url);
+  cache.set(source, blob);
 
-  return url;
+  return URL.createObjectURL(blob);
 }
 
 export function clearCompileCache() {
-  for (const url of cache.values()) {
-    URL.revokeObjectURL(url);
-  }
   cache.clear();
 }

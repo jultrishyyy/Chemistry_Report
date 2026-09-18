@@ -1,5 +1,6 @@
 import type { FieldGroup, FieldDefinition, SectionRole } from '../../../../shared/types';
 import type { EditorMode } from './field-types';
+import { judgmentChoiceDefaults } from '../../../../shared/conclusion-judgment-default';
 
 /**
  * 签字栏 / 签发分区：含「签名行」字段（编制/审核/批准）。该分区版面按参考样张固化、
@@ -33,6 +34,18 @@ export interface SectionPreset {
  * 签字栏预设（report 模式）= 编制/审核/批准签名行 + 签发日期(右对齐,接口取号) + 报告备注/资质备注(6pt)，
  * 钉在页面底部；空行间距按参考样张「3.1 报告首页」实测（编制↔签发 5em、签发↔备注 3em）。
  */
+const coverHeading = (id: () => string, code: string, text: string): FieldDefinition => ({
+  id: id(), code, type: 'text', label: text, hide_label: true,
+  binding: { source: 'literal', text }, style: { font: 'FangSong', size: '10pt', weight: 'regular' },
+});
+
+export function sectionPresetsForEditor(mode: EditorMode): SectionPreset[] {
+  const presets = SECTION_PRESETS.filter(preset => !preset.editors || preset.editors.includes(mode));
+  if (mode !== 'report-cover') return presets;
+  const order = ['basic', 'signature_block', 'cover_sample_table', 'cover_conclusion', 'cover_sample_photos'];
+  return order.flatMap(key => presets.filter(preset => preset.key === key));
+}
+
 export const SECTION_PRESETS: SectionPreset[] = [
   {
     key: 'basic',
@@ -92,7 +105,7 @@ export const SECTION_PRESETS: SectionPreset[] = [
     key: 'images',
     label: '图片记录',
     icon: '📷',
-    hint: '每张图一个字段（图位）；版式/标题/备注在分区「图片版式 / 格式(A)」里统一设',
+    hint: '每张图一个图位；版式在图片设置中调整，说明或备注请添加文本字段',
     editors: ['record'],
     build: (id) => ({
       id: id(),
@@ -111,7 +124,7 @@ export const SECTION_PRESETS: SectionPreset[] = [
     key: 'conclusion',
     label: '结论',
     icon: '✅',
-    hint: '结论模块：项目名称、判定要求、结论均为独立字段；可继续添加子项目',
+    hint: '名称、判定要求、限值、结论四个独立字段；可继续添加子项目',
     editors: ['record'],
     build: (id) => ({
       id: id(),
@@ -121,7 +134,8 @@ export const SECTION_PRESETS: SectionPreset[] = [
       conclusion_kind: 'project',
       fields: [
         { id: id(), code: 'conclusion_project_name', label: '项目名称', type: 'text', required: true, conclusion_role: 'project_name' },
-        { id: id(), code: 'conclusion_judgment', label: '判定要求', type: 'textarea', required: true, conclusion_role: 'judgment_requirement' },
+        { id: id(), code: 'conclusion_judgment', label: '判定要求', ...judgmentChoiceDefaults, required: true, conclusion_role: 'judgment_requirement' },
+        { id: id(), code: 'conclusion_limit', label: '限值', type: 'text', conclusion_role: 'limit' },
         { id: id(), code: 'conclusion_result', label: '结论', type: 'select', required: true,
           options: ['符合', '不符合'], allow_custom: true, conclusion_role: 'conclusion' },
       ] as FieldDefinition[],
@@ -149,13 +163,13 @@ export const SECTION_PRESETS: SectionPreset[] = [
   },
   {
     key: 'signature_block',
-    label: '签字栏（首页）',
+    label: '签署信息',
     icon: '🖊️',
-    hint: '编制/审核/批准 签名行 + 签发日期(右对齐·接口取号) + 报告备注/资质备注(6pt)；钉在页面底部，间距按参考样张',
+    hint: '编制、审核、批准、签发日期及报告备注，默认固定在首页底部。',
     editors: ['report-cover'],
     build: (id) => ({
       id: id(),
-      label: '签字栏',
+      label: '签署信息',
       hide_title: true,           // 签名行自解释，不显示「签字栏」小标题
       layout: 'vertical',
       section_role: 'other' as SectionRole,
@@ -181,53 +195,61 @@ export const SECTION_PRESETS: SectionPreset[] = [
   // ===== 首页（report-cover）专属预设 =====
   {
     key: 'cover_conclusion',
-    label: '检测结论汇总表',
+    label: '检测结论',
     icon: '📋',
     hint: '【首页】检测结论汇总表，行=各项目结论，生成报告时按订单项目自动展开',
     editors: ['report-cover'],
     build: (id) => ({
       id: id(),
       label: '检测结论',
+      hide_title: true,
       layout: 'vertical',
       section_role: 'conclusion' as SectionRole,
       fields: [
-        { id: id(), code: 'conclusion_summary', label: '检测结论', type: 'report_conclusion_table', hide_label: false,
+        coverHeading(id, 'conclusion_heading', '检测结论：'),
+        { id: id(), code: 'conclusion_summary', label: '检测结论表', type: 'report_conclusion_table', hide_label: true,
           conclusion_table: { columns: ['index', 'project', 'result'] } },
       ] as FieldDefinition[],
     }),
   },
   {
     key: 'cover_sample_table',
-    label: '样品信息表',
+    label: '样品信息',
     icon: '🧾',
-    hint: '【首页】多样品时自动列出 样品编号/样品名称/零件号（放检测结论表前），单样品自动折叠；默认显示「样品信息：」标签，标签与表距 12pt',
+    hint: '样品信息标题和样品信息表；表格按原规则在多样品时显示。',
     editors: ['report-cover'],
     build: (id) => ({
       id: id(),
       label: '样品信息',
-      hide_title: true,           // 分区不再出小标题——标题由字段 label「样品信息：」承担（避免重复）
+      hide_title: true,           // 标题由独立文字字段承担，避免重复。
       layout: 'vertical',
       section_role: 'other' as SectionRole,
       fields: [
-        // hide_label:false → 显示字段 label 作标题（居左、跟随模板字体）；label_gap 12pt＝标题↔表距离
-        { id: id(), code: 'sample_info_table', label: '样品信息：', type: 'report_sample_table', hide_label: false, label_gap: '12pt',
+        // 标题和表格分开，允许单独设置文字格式与间距。
+        coverHeading(id, 'sample_info_heading', '样品信息：'),
+        { id: id(), code: 'sample_info_table', label: '样品信息表', type: 'report_sample_table', hide_label: true,
           sample_table: { columns: ['index', 'name', 'model'] } },
       ] as FieldDefinition[],
     }),
   },
   {
     key: 'cover_sample_photos',
-    label: '样品照片',
+    label: '样品描述',
     icon: '📷',
-    hint: '【首页】文员编辑首页时上传的样品照片（独占整行，可多张）',
+    hint: '添加样品照片、说明文字和样品描述表。',
     editors: ['report-cover'],
     build: (id) => ({
       id: id(),
-      label: '样品照片',
+      label: '样品描述',
+      hide_title: true,
       layout: 'vertical',
       section_role: 'images' as SectionRole,
       fields: [
-        { id: id(), code: 'cover_sample_photo', label: '样品照片', type: 'image', image_layout: 'loose', allow_multiple: true },
+        coverHeading(id, 'sample_description_heading', '样品描述：'),
+        { id: id(), code: 'sample_description_table', label: '样品描述表', type: 'report_sample_description_table', hide_label: true,
+          sample_description_table: { unique_label: '唯一性编号', description_label: '样品描述', default_description: '见原始样品照片', unique_width: '1fr', description_width: '3.5fr' } },
+        { id: id(), code: 'cover_sample_photo', label: '原样照片表', type: 'report_photo_table', hide_label: true,
+          photo_table: { caption_label: '', caption_text: '', header: '原始样品', cols: 1 } },
       ] as FieldDefinition[],
     }),
   },
@@ -244,16 +266,18 @@ export const SECTION_PRESETS: SectionPreset[] = [
       layout: 'vertical',
       section_role: 'results' as SectionRole,
       fields: [
-        { id: id(), code: 'result_table', label: '检测结果', type: 'report_result_table',
-          result_table: {
+        { id: id(), code: 'result_table', label: '检测结果', type: 'free_grid',
+          free_table: {
             columns: [
               { id: 'col_item', label: '项目' },
               { id: 'col_standard', label: '标准要求' },
               { id: 'col_result', label: '测试结果' },
               { id: 'col_conclusion', label: '结论' },
             ],
-            rows: [{ id: 'r1', label: '', is_conclusion: true, conclusion_col_id: 'col_conclusion' }],
-            cells: [],
+            rows: [{ id: 'header' }, { id: 'r1' }],
+            cells: { 'header::col_item': '项目', 'header::col_standard': '标准要求', 'header::col_result': '测试结果', 'header::col_conclusion': '结论' },
+            header_cells: { 'header::col_item': true, 'header::col_standard': true, 'header::col_result': true, 'header::col_conclusion': true },
+            repeat_header_rows: 1,
           } },
       ] as FieldDefinition[],
     }),

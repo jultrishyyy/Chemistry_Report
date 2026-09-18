@@ -13,7 +13,7 @@ import { generateTypst, generateTypstWithData } from '../../../../shared/typst-g
 import { useDeviceMap } from '../../utils/deviceMap';
 import { dedupeTemplateIdentity, buildFieldDefaults } from '../../../../shared/matrix-flatten';
 import { generateMockData } from '../../../../shared/mock-data';
-import { BASE_TEMPLATES } from '../../../../shared/base-templates';
+import { BASE_TEMPLATES } from '../../../../shared/base-templates.ts';
 import type { RecordTemplate } from '../../../../shared/types';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 import { useAutoSave } from '../../hooks/useAutoSave';
@@ -24,6 +24,7 @@ import { useExclusiveEditLease } from '../../hooks/useCollaboration';
 import axios from 'axios';
 import { ensureRecordIdentityFields } from '../../../../shared/record-template-normalize';
 import RecordCommonAreaActions from '../../components/RecordCommonAreaActions';
+import RecordReportImpact from '../../components/RecordReportImpact';
 import EditAttemptGuard from '../../components/EditAttemptGuard';
 
 const API = '/api';
@@ -382,6 +383,15 @@ export default function RecordTemplateEditor() {
       } else {
         const res = await axios.post(`${API}/record-templates`, payload);
         setTemplate({ ...t, id: res.data.id });
+        // 首次（包括自动）保存由无 ID 切换到持久化模板，接续当前编辑会话。
+        // 不然 URL 更新启用编辑锁后，刚创建的模板会突然变为只读。
+        try {
+          await axios.post(`${API}/collaboration/leases/acquire`, {
+            resource_type: 'record_template', resource_id: String(res.data.id),
+          });
+        } catch {
+          message.warning('模板已保存，编辑连接暂未恢复，请点击“开始编辑”继续。');
+        }
         if (!options.silent) message.success('创建成功（v1 直接生效）');
         navigate(`/record-templates/editor?id=${res.data.id}`, { replace: true });
       }
@@ -496,6 +506,7 @@ export default function RecordTemplateEditor() {
             onFamilyChange={(group) => setTemplateFamily(group ? { id: Number(group.id), name: group.name } : null)} />
         )}
         <div style={{ flex: 1 }} />
+        {template.id && !permissionPreview && <RecordReportImpact id={template.id} groups={template.groups} />}
         <DocumentCollaborationStatus resourceType="record_template" resourceId={templateId}
           canEdit={!permissionPreview && !viewingVersion && !pendingReview} lease={lease}
           onSaveBeforeRelease={() => handleSave()}

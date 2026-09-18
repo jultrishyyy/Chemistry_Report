@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Collapse, Form, Input, Modal, Select, Space, Table, Tag, Tooltip, message } from 'antd';
+import { Button, Collapse, Form, Input, Modal, Segmented, Select, Space, Table, Tag, Tooltip, message } from 'antd';
 import { EditOutlined, LinkOutlined, PlusOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import TestTemplateGroupArchiveActions from './TestTemplateGroupArchiveActions';
+import { visibleReportGroups } from '../utils/reportGroupVisibility';
 
 type TemplateKind = 'cover' | 'project';
 
@@ -23,19 +24,20 @@ export default function ReportProjectFamilyManagerModal({
   const [templates, setTemplates] = useState<any[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [groupSearch, setGroupSearch] = useState('');
+  const [groupScope, setGroupScope] = useState<'current' | 'all'>('current');
   const [editingFamily, setEditingFamily] = useState<any | null>(null);
   const [attachFamily, setAttachFamily] = useState<any | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [attachForm] = Form.useForm();
-  const templateLabel = kind === 'project' ? '项目模板' : '首页模板';
+  const templateLabel = '模板';
 
   const load = async () => {
     try {
       const [familyResult, manufacturerResult, templateResult] = await Promise.all([
-        axios.get(`/api/report-project-families?kind=${kind}`),
+        axios.get('/api/report-project-families'),
         axios.get('/api/host-manufacturers'),
-        axios.get(`/api/report-templates?kind=${kind}`),
+        axios.get('/api/report-templates'),
       ]);
       setFamilies(familyResult.data || []);
       setManufacturers(manufacturerResult.data || []);
@@ -46,22 +48,29 @@ export default function ReportProjectFamilyManagerModal({
   };
 
   useEffect(() => { if (open) load(); }, [open, kind]);
+  useEffect(() => { if (open) { setGroupScope('current'); setGroupSearch(''); } }, [open, kind]);
   const refresh = async () => { await load(); onChanged?.(); };
   const visibleFamilies = useMemo(() => {
-    const scoped = groupId == null ? families : families.filter(family => Number(family.id) === Number(groupId));
+    const scoped = visibleReportGroups(families, kind, { all: groupScope === 'all', groupId });
     const keyword = groupSearch.trim().toLowerCase();
     if (!keyword || groupId != null) return scoped;
     return scoped.filter(family => [family.name, family.description, family.host_manufacturer_name,
       ...(family.templates || []).map((template: any) => template.name)]
       .some(value => String(value || '').toLowerCase().includes(keyword)));
-  }, [families, groupId, groupSearch]);
+  }, [families, groupId, groupSearch, groupScope, kind]);
   const selectedFamily = groupId == null ? null : families.find(family => Number(family.id) === Number(groupId));
 
   const createFamily = async () => {
     try {
       const values = await createForm.validateFields();
-      await axios.post('/api/report-project-families', { ...values, template_kind: kind });
+      await axios.post('/api/report-project-families', {
+        ...values,
+        host_manufacturer_id: values.host_manufacturer_id ?? null,
+        template_kind: kind,
+      });
       message.success('项目组已创建');
+      // Empty groups are intentionally absent from the current-type view.
+      setGroupScope('all'); setGroupSearch('');
       setCreateOpen(false);
       createForm.resetFields();
       await refresh();
@@ -109,21 +118,23 @@ export default function ReportProjectFamilyManagerModal({
     return 2;
   };
   const candidatesFor = (family: any) => templates
-    .filter(template => !template.report_project_family_id)
+    .filter(template => ['cover', 'project'].includes(template.template_kind) && !template.report_project_family_id)
     .sort((a, b) => candidatePriority(a, family) - candidatePriority(b, family)
       || String(a.name).localeCompare(String(b.name)));
   const candidateLabel = (template: any) => {
     const state = template.current_version_no
       ? `已生效 v${template.current_version_no}`
       : template.open_draft?.status === 'pending' ? '待审核' : '未审核';
-    return `${template.name} · ${template.host_manufacturer_name || '未设置主机厂'} · ${state}`;
+    return `${template.template_kind === 'cover' ? '首页' : '项目'} · ${template.name} · ${template.host_manufacturer_name || '未设置主机厂'} · ${state}`;
   };
 
   return <>
     <Modal open={open} onCancel={onClose} width={1080}
-      title={selectedFamily ? `管理项目组 · ${selectedFamily.name}` : '管理项目组'}
+      title={selectedFamily ? `管理项目组 · ${selectedFamily.name}` : '管理项目组（首页与项目共用）'}
       footer={<Button onClick={onClose}>关闭</Button>}>
-      {groupId == null && <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+      {groupId == null && <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+        <Segmented value={groupScope} onChange={value => setGroupScope(value as 'current' | 'all')}
+          options={[{ label: kind === 'cover' ? '首页相关项目组' : '项目模板相关组', value: 'current' }, { label: '全部项目组', value: 'all' }]} />
         <Input.Search allowClear value={groupSearch} onChange={event => setGroupSearch(event.target.value)}
           placeholder="搜索项目组名称、说明、主机厂或组内模板" style={{ width: 360 }} />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => {
@@ -148,23 +159,26 @@ export default function ReportProjectFamilyManagerModal({
           children: <>
             <div style={{ textAlign: 'right', marginBottom: 8 }}><Space wrap>
               {onCreateTemplate && <Button size="small" type="primary" icon={<PlusOutlined />}
-                onClick={() => onCreateTemplate(family)}>新建并加入</Button>}
+                onClick={() => onCreateTemplate(family)}>新建{kind === 'cover' ? '首页' : '项目'}模板并加入</Button>}
               <Button size="small" icon={<LinkOutlined />} onClick={() => {
                 setAttachFamily(family); attachForm.resetFields();
               }}>加入已有{templateLabel}</Button>
             </Space></div>
             <Table size="small" pagination={false} rowKey="id" dataSource={family.templates || []} columns={[
               { title: templateLabel, dataIndex: 'name' },
-              ...(kind === 'project' ? [{
+              { title: '类型', dataIndex: 'template_kind', render: (value: string) => value === 'cover' ? '首页模板' : '项目模板' },
+              { title: '主机厂', dataIndex: 'host_manufacturer_name', render: (value: string) => value || <Tag>未关联</Tag> },
+              ...[{
                 title: '关联原始记录', dataIndex: 'linked_record_template_name',
-                render: (value: string) => value || <Tag color="warning">未关联</Tag>,
-              }] : []),
+                render: (value: string, row: any) => row.template_kind === 'cover' ? '—' : value || <Tag color="warning">未关联</Tag>,
+              }],
               { title: '版本', render: (_: any, row: any) => row.version_no ? `v${row.version_no} · ${row.status}` : '尚未生效' },
             ]} />
           </>,
         }))} />
       {!visibleFamilies.length && <div style={{ textAlign: 'center', color: '#98a2b3', padding: 32 }}>
-        {groupId == null ? '尚未建立项目组' : '该项目组已不存在或已删除'}
+        {groupId != null ? '该项目组已不存在或已删除' : groupSearch.trim() ? '没有匹配的项目组'
+          : groupScope === 'current' ? '暂无当前类型的项目组，可切换“全部项目组”查看或加入已有组' : '尚未建立项目组'}
       </div>}
     </Modal>
 

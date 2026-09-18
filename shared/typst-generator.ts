@@ -1,10 +1,18 @@
+import { removeLegacyImageNotes } from './report-detached-notes';
 import { readSampleAxes, sampleAxesKey, type SampleAxisEntry } from './free-grid-samples';
-import { recordSampleBands } from './free-grid-binding';
+import { formatChoiceValue } from './choice-display';
+import { applyRecordLayout, canArrangeRecordField, recordLayoutRows } from './record-layout';
+import { hideAutomaticSampleTable } from './report-table-visibility';
+import { recordSampleBands, sampleHasEnteredData } from './free-grid-binding';
 import { buildFreeGridLayout } from './free-grid-layout';
 import type { RecordTemplate, FieldGroup, FieldDefinition, DataMatrixValue, DataMatrixConfig, MatrixParameterDef, MatrixSummaryRowDef, MatrixSummaryColDef, CellBinding, StyleOverride, Formula } from './types';
 import { buildGroupTree } from './group-tree';
+import { compactConclusionChildren, CONCLUSION_COLUMNS, conclusionDisplayField } from './conclusion-table-layout';
+import { fixedFirstPageSignature } from './signature-position';
+import { freeGridNumberText, roundFreeGridValue, formatGridNumber } from './free-grid-number';
 import { REPORT_BODY_PARAGRAPH_GAP_EM } from './report-body-layout';
 import { projectReportTextRuns } from './report-text-runs';
+import { coverPartText, coverTextSegments } from './cover-text-selection';
 import { reportTypstLineBox } from './report-line-box';
 import {
   collectTypstDataKeys,
@@ -17,14 +25,15 @@ import {
   applyMatrixSummaryFormulas,
 } from './matrix-flatten.ts';
 import { executeWithFullPrecision } from './formula-engine.ts';
+import { FormulaError, formulaErrorText, invalidGridReference } from './formula-error';
+import { completeGridFormula, gridOutputText } from './grid-missing-display';
 import { collectionItemFields, findImageCollection, imageCollectionFromLegacy, type RecordImageCollection } from './image-collection';
 import { formatDateByPrecision } from './date-precision';
 import { applyFigureCaptionOverrides, isFigureCaptionDataKey } from './figure-caption';
 import { remapFreeGridFormula, resolveFreeGridCellReference } from './free-grid-formula';
-import { applyNumericRounding } from './numeric-rounding';
 import { legacyMatrixReportContext } from './legacy-matrix-bridge.ts';
 import { TABLE_TITLE_TYPES } from './report-figure-title';
-import { storedReportRichDocument, richDocumentToTypst, reportRichPlainText, readReportRichDocument } from './report-rich-document';
+import { storedReportRichDocument, richDocumentToTypst, reportRichPlainText, readReportRichDocument, encodeReportRichDocument, type ReportRichNode } from './report-rich-document';
 import { reportProjectHeadingValue } from './report-project-heading';
 import { reportImageTitleStyle } from './report-image-title-style';
 import { projectContinuousGroups, continuousTextValue, canEditContinuousText } from './report-continuous-text';
@@ -221,27 +230,33 @@ export function generateTypst(template: RecordTemplate): string {
 
   // 嵌套分区：按 group-tree 分桶，子分区嵌在父 #section 体内（父区块样式自然级联）。
   // 用下标循环以支持「模块」：vertical_align 组 + 后续 module_span-1 组作为一个整体锚定/不拆页。
-  const tree = buildGroupTree(template.groups);
+  // Fixed signatures are page-owned, including legacy nested signing sections.
+  // Lift only the render projection; keep the stored hierarchy and field order intact.
+  const tree = buildGroupTree(template.groups).flatMap(entry => {
+    const pageOwned = (group: FieldGroup) => fixedFirstPageSignature(group) || group.signature_position === 'current_page_bottom';
+    const fixedChildren = entry.children.filter(pageOwned);
+    if (!fixedChildren.length || fixedFirstPageSignature(entry.group)) return [entry];
+    const parent = entry.group;
+    const inherited = Object.fromEntries(Object.entries(parent.style || {}).filter(([key]) => ['font', 'size', 'weight', 'italic', 'color', 'align', 'tracking', 'line_height', 'block_spacing'].includes(key)));
+    return [{ ...entry, children: entry.children.filter(child => !pageOwned(child)) }, ...fixedChildren.map(group => ({
+      group: { ...group, label_width: group.label_width ?? parent.label_width, style: { ...inherited, ...group.style }, module_span: 1 }, children: [],
+    }))];
+  });
   // 首页签发区不能继续使用正文流末尾的 `v(1fr)`：正文一旦装不下，整个签发区就会被分页到第二页。
   // 将首个“签名行 + 钉底”分区提前声明成第一页底部浮动块。float 会为它保留版面，正文自动绕开并在
   // 空间不足时续到下一页，因此既不会覆盖正文，也不会把签发区挤走。普通钉底分区仍保留原行为。
-  const fixedSignatureIndex = tree.findIndex(({ group }) =>
-    group.style?.vertical_align === 'bottom' && group.fields.some(field => field.signature_line));
+  const fixedSignatureIndex = tree.findIndex(({ group }) => fixedFirstPageSignature(group));
+  const signatureSpan = fixedSignatureIndex < 0 ? 0 : Math.max(1, Math.min(tree[fixedSignatureIndex].group.module_span || 1, tree.length - fixedSignatureIndex));
   if (fixedSignatureIndex >= 0) {
     const signatureGroup = tree[fixedSignatureIndex].group;
-    const signatureBody = renderGroupEntry(tree[fixedSignatureIndex], template);
+    const signatureBody = tree.slice(fixedSignatureIndex, fixedSignatureIndex + signatureSpan).map(entry => renderGroupEntry(entry, template)).join('\n');
     const clearance = lenTypst(signatureGroup.style?.block_spacing, 'pt') || lineGapTypst(template);
     const offset = lenTypst(signatureGroup.style?.vertical_offset, 'pt');
     lines.push(`#place(bottom, float: true, scope: "parent", clearance: ${clearance})[`);
-    if (signatureGroup.style?.keep_together) {
-      lines.push('#block(width: 100%, breakable: false)[');
-      lines.push(signatureBody);
-      lines.push(']');
-    } else {
-      lines.push('#block(width: 100%)[');
-      lines.push(signatureBody);
-      lines.push(']');
-    }
+    // A fixed signing area must never split across pages.
+    lines.push('#block(width: 100%, breakable: false)[');
+    lines.push(signatureBody);
+    lines.push(']');
     // 在浮动块内部增加尾部高度，等价于旧版“从页底向上抬 vertical_offset”。
     if (offset) lines.push(`#v(${offset})`);
     lines.push(']');
@@ -249,19 +264,26 @@ export function generateTypst(template: RecordTemplate): string {
   }
   let gi = 0;
   while (gi < tree.length) {
-    if (gi === fixedSignatureIndex) { gi += 1; continue; }
+    if (gi === fixedSignatureIndex) { gi += signatureSpan; continue; }
     const group = tree[gi].group;
     if (group.page_break_before) lines.push('#pagebreak(weak: true)');
     // 垂直分布（整页）：弹性间距必须在「页流层」发，不能埋进 #block/#section（块内 1fr 不撑开）。
     // center=上下各 1fr（内容居中）/ bottom=上方 1fr（钉底）/ top|缺省=不动。
-    const vAlign = group.style?.vertical_align;
+    const vAlign = group.signature_position === 'flow' ? undefined : group.signature_position === 'current_page_bottom' ? 'bottom' : group.style?.vertical_align;
     const isAnchored = vAlign === 'center' || vAlign === 'bottom';
     // 模块跨组数（仅锚定组生效）：本组 + 后续 span-1 组当作一个模块整体
-    const span = isAnchored ? Math.max(1, Math.min(group.module_span || 1, tree.length - gi)) : 1;
-    if (isAnchored) lines.push('#v(1fr)');
+    const available = fixedSignatureIndex > gi ? fixedSignatureIndex - gi : tree.length - gi;
+    const span = isAnchored ? Math.max(1, Math.min(group.module_span || 1, available)) : 1;
+    const currentPageSignature = group.signature_position === 'current_page_bottom';
+    if (currentPageSignature) lines.push(`#place(bottom, float: true, scope: "parent", clearance: ${lineGapTypst(template)})[`);
+    else if (isAnchored) lines.push('#v(1fr)');
     // 渲染模块内各组到一个缓冲；keep_together 时整块不拆页
     const moduleStr = tree.slice(gi, gi + span).map(e => renderGroupEntry(e, template)).join('\n');
-    if (group.style?.keep_together) {
+    const containsPictures = tree.slice(gi, gi + span).some(entry => [entry.group, ...entry.children]
+      .some(g => g.fields.some(f => ['image', 'report_photo_table', 'report_image_gallery'].includes(f.type))));
+    // A whole image section must not defeat row-level pagination, even when
+    // an inherited section style requested keeping its contents together.
+    if ((group.style?.keep_together && !containsPictures) || currentPageSignature) {
       lines.push('#block(breakable: false)[');
       lines.push(moduleStr);
       lines.push(']');
@@ -271,6 +293,7 @@ export function generateTypst(template: RecordTemplate): string {
     // 钉底偏移：模块从页底再抬 offset（给印章/二维码留位）
     const vOff = lenTypst(group.style?.vertical_offset, 'pt');
     if (vAlign === 'bottom' && vOff) lines.push(`#v(${vOff})`);
+    if (currentPageSignature) lines.push(']');
     if (vAlign === 'center') lines.push('#v(1fr)');  // 居中：内容后再补一段 1fr，与前段对称
     lines.push('');
     gi += span;
@@ -284,13 +307,25 @@ function renderGroupEntry(entry: { group: FieldGroup; children: FieldGroup[] }, 
   const { group, children } = entry;
   const out: string[] = [posMarker('group', group.id)];
   const parts: string[] = [applyBlockStyle(generateGroupContent(group, template), group.style)];
+  const compactChildren = compactConclusionChildren(group, children);
+  if (compactChildren.length) {
+    const rows = compactChildren.map(child => CONCLUSION_COLUMNS.map((column, index) => {
+      const field = child.fields.find(candidate => candidate.conclusion_role === column.role);
+      const body = field ? applyBlockStyle(generateFieldBlock({ ...field, hide_label: true }, template, '0pt'), child.style) : '';
+      return `table.cell(breakable: false)[${index === 0 ? posMarker('group', child.id) : ''}\n${body}\n${field?.unit ? escapeTypst(field.unit) : ''}],`;
+    }).join('\n')).join('\n');
+    parts.push(`#table(columns: (1fr, 1.4fr, 1fr, 0.8fr), inset: 6pt, stroke: 0.5pt, align: left + horizon,
+      table.header(repeat: true, ${CONCLUSION_COLUMNS.map(column => `[#strong[${column.label}]]`).join(', ')}),
+      ${rows}\n)`);
+  }
   for (const child of children) {
+    if (compactChildren.includes(child)) continue;
     if (child.page_break_before) parts.push('#pagebreak(weak: true)');
     parts.push(posMarker('group', child.id));
     if (!child.hide_title) {
       // 子分区标题：faux-bold 感知 + 可选 title_style（与顶级分区同口径）；标题↔内容距离＝title_gap（缺省 0.4em）
       const childTitleGap = lenTypst(child.title_gap, 'pt') || '0.4em';
-      parts.push(`#block(sticky: true, above: 0.8em, below: ${childTitleGap})[#text(${titleTextArgs(child.title_style, '1.05em')})[${escapeTypst(child.label)}]]`);
+      parts.push(`#block(sticky: true, above: 0.8em, below: ${childTitleGap})[#text(${titleTextArgs(child.title_style, '1.05em')}, "${escapeTypst(child.label)}")]`);
     }
     parts.push(applyBlockStyle(generateGroupContent(child, template), child.style));
   }
@@ -348,6 +383,13 @@ function generateGroupContent(group: FieldGroup, template: RecordTemplate): stri
   }
 
   // 把字段切成「连续块」：矩阵、静态说明/资料独立一块（强制全宽 vertical）。
+  if (group.layout === 'two-col') {
+    const gap = lenTypst(group.style?.block_spacing, 'pt') || undefined;
+    return sectionGap + recordLayoutRows({ ...group, fields: group.fields.filter(f => !shouldSkipStandaloneField(template, f)) })
+      .map(row => row.every(f => canArrangeRecordField(f) && !f.full_width)
+        ? generateTwoCol(row, template, gap, group.style?.align)
+        : generateVertical(row, template, gap, group.label_width)).join('\n');
+  }
   // 静态内容不能送入 inline/table/grid 的普通字段渲染器，否则会被当作空录入值，
   // 导致“录入页能看见、PDF 却不显示”。其余连续字段才按分区 layout 渲染。
   type Chunk =
@@ -364,7 +406,7 @@ function generateGroupContent(group: FieldGroup, template: RecordTemplate): stri
   };
   // 多列布局（grid/two-col）：忽略 spacer（版式留白是为竖排设计的；在多列里它会把字段流切成
   // 单字段块、看起来仍是竖排——违背"把字段都排进列"的本意。列间距由 grid 的 row-gutter 统一给）。
-  const isMultiCol = group.layout === 'grid' || group.layout === 'two-col';
+  const isMultiCol = group.layout === 'grid';
   // 多列行间距：分区「格式·字段间距」(group.style.block_spacing) 驱动 grid 的 row-gutter，
   // 让"在分区格式里调间距"对多列也生效（否则只认写死的文档行距）。空＝走文档行距。
   const multiColRowGutter = lenTypst(group.style?.block_spacing, 'pt') || undefined;
@@ -402,8 +444,6 @@ function generateGroupContent(group: FieldGroup, template: RecordTemplate): stri
         parts.push(generateInline(ch.fields, template)); break;
       case 'table':
         parts.push(generateTable(group, ch.fields, template)); break;
-      case 'two-col':
-        parts.push(generateTwoCol(ch.fields, template, multiColRowGutter, group.style?.align)); break;
       case 'grid':
         parts.push(generateGrid(ch.fields, template, group.grid_columns, multiColRowGutter, group.style?.align)); break;
       default:
@@ -426,6 +466,7 @@ function generateFieldBlock(f: FieldDefinition, template: RecordTemplate, fieldG
 }
 
 function generateFieldBlockInner(f: FieldDefinition, template: RecordTemplate, fieldGap?: string, labelWidth?: string): string {
+  f = conclusionDisplayField(f);
   if (shouldSkipStandaloneField(template, f)) return '';
   // Report-owned direct uploads can live between prose blocks, outside an image
   // section. They must not fall through to a scalar data.<code> field.
@@ -548,7 +589,8 @@ ${renderRecordConclusionTypst(f, undefined)}
   if (f.hide_label) {
     // 无字段名（声明/备注/段落）：只渲染值，value_style 行内套 text()
     const vDict = fieldPartTextDict(f.value_style, true);
-    const val = vDict === '(:)' ? `#multiline(data.${f.code})` : `#text(..${vDict})[#multiline(data.${f.code})]`;
+    const value = coverPartMarkup(f, 'value') ?? `#multiline(data.${f.code})`;
+    const val = vDict === '(:)' ? value : `#text(..${vDict})[${value}]`;
     const body = `  #if data.${f.code} == none or data.${f.code} == "" or data.${f.code} == "—" [] else [#block[${val}]]`;
     return applyBlockStyle(body, f.style);
   }
@@ -576,7 +618,9 @@ ${renderRecordConclusionTypst(f, undefined)}
     : (labelWidth !== undefined ? labelWidth : labelWidthTypst(template));
   const labelWidthArg = effLabelWidth === 'none' ? ', label_width: none'
     : `, label_width: ${lenTypst(effLabelWidth, 'em') || effLabelWidth}`;
-  const body = `  #field("${escapeTypst(f.label)}", data.${f.code}${unitArg}${labelBoldArg}${labelArgsArg}${valueArgsArg}${gapArg}${labelWidthArg})`;
+  const labelMarkup = coverPartMarkup(f, 'label'), valueMarkup = coverPartMarkup(f, 'value');
+  const inlineArgs = `${labelMarkup != null ? `, label_content: [${labelMarkup}]` : ''}${valueMarkup != null ? `, value_content: [${valueMarkup}]` : ''}${f.choice_display?.layout === 'lines' && f.choice_display.marker === 'number_parentheses' ? ', numbered_parentheses: true' : ''}`;
+  const body = `  #field("${escapeTypst(f.label)}", data.${f.code}${unitArg}${labelBoldArg}${labelArgsArg}${valueArgsArg}${gapArg}${labelWidthArg}${inlineArgs})`;
   // 字段级块样式（段前后/对齐/缩进，作用于普通 #field；内联/矩阵走区块级级联）
   return f.style ? applyBlockStyle(body, f.style) : body;
 }
@@ -593,11 +637,16 @@ function generateSignatureRow(fields: FieldDefinition[], template: RecordTemplat
   // 列：每个签名 = (标签 auto) + (下划线 1fr)
   const colSpec = vis.map(() => 'auto, 1fr').join(', ');
   const cells = vis.map(f => {
-    const label = escapeTypst(f.label);
-    const onLine = `#if data.${f.code} == none or data.${f.code} == "" [ ] else [#multiline(data.${f.code})]`;
+    const label = coverPartMarkup(f, 'label') ?? escapeTypst(f.label);
+    const onLine = `#if data.${f.code} == none or data.${f.code} == "" [ ] else [${coverPartMarkup(f, 'value') ?? `#multiline(data.${f.code})`}]`;
     // 下划线整体下移 3pt（move dy），让横线比标签基线稍低一点
-    const lblStroke = lw === '700' ? fauxBoldStroke(f.label_style?.font) : '';
-    return `text(weight: ${lw}${lblStroke})[${label}], move(dy: 3pt, box(width: 100%, height: 1.5em, stroke: (bottom: 0.6pt), inset: (bottom: 2pt))[#align(center + bottom)[${onLine}]])`;
+    const labelBold = f.label_style?.weight ? f.label_style.weight === 'bold' : f.label_bold ?? lw === '700';
+    const lblStroke = labelBold ? fauxBoldStroke(f.label_style?.font) : '';
+    const labelDict = fieldPartTextDict(f.label_style, false), valueDict = fieldPartTextDict(f.value_style, true);
+    const value = valueDict === '(:)' ? onLine : `#text(..${valueDict})[${onLine}]`;
+    const valueSize = lenTypst(f.value_style?.size, 'pt');
+    const valueHeight = valueSize ? `1.5 * ${valueSize}` : '1.5em';
+    return `text(..${labelDict}, weight: ${labelBold ? '700' : '400'}${lblStroke})[${label}], move(dy: 3pt, box(width: 100%, height: ${valueHeight}, stroke: (bottom: 0.6pt), inset: (bottom: 2pt))[#align(center + bottom)[${value}]])`;
   }).join(',\n    ');
   return `  #grid(columns: (${colSpec}), column-gutter: 10pt, align: bottom,\n    ${cells}\n  )`;
 }
@@ -644,7 +693,11 @@ function generateTable(group: FieldGroup, fields: FieldDefinition[], template: R
 function generateTwoCol(fields: FieldDefinition[], template: RecordTemplate, rowGutter?: string, groupAlign?: 'left' | 'center' | 'right'): string {
   const visible = fields.filter(f => !shouldSkipStandaloneField(template, f));
   if (!visible.length) return '';
-  return renderMultiCol(visible, template, 2, '24pt', rowGutter, groupAlign);
+  const cells = visible.map(f => {
+    const align = f.style?.align || groupAlign || 'left';
+    return `[#align(${align})[${cellFieldInner(f, template)}]]`;
+  });
+  return `#grid(columns: (1fr, 1fr), column-gutter: 24pt, row-gutter: ${rowGutter || lineGapTypst(template)}, ${cells.join(', ')})`;
 }
 
 function generateGrid(fields: FieldDefinition[], template: RecordTemplate, gridColumns?: number, rowGutter?: string, groupAlign?: 'left' | 'center' | 'right'): string {
@@ -669,8 +722,8 @@ function labelWeightTypst(template: RecordTemplate): string {
 
 /** 多列格子内的字段内容（label：value，含名/值样式；不含外层 [] 与对齐）。 */
 function cellFieldInner(f: FieldDefinition, template: RecordTemplate): string {
-  const label = escapeTypst(f.label);
-  const unit = f.unit ? ` + " ${escapeTypst(f.unit)}"` : '';
+  const label = coverPartMarkup(f, 'label') ?? escapeTypst(f.label);
+  const unit = !f.hide_label && f.unit ? ` + " ${escapeTypst(f.unit)}"` : '';
   const lw = labelWeightTypst(template);
   // 字段名加粗：label_style.weight 优先 → 存量 label_bold → 文档默认 label_weight
   const labelBold = f.label_style?.weight === 'bold' ? true
@@ -681,10 +734,19 @@ function cellFieldInner(f: FieldDefinition, template: RecordTemplate): string {
   const labelDict = fieldPartTextDict(f.label_style, false);
   const valueDict = fieldPartTextDict(f.value_style, true);
   const labelArgs = labelDict === '(:)' ? '' : `, ..${labelDict}`;
-  const rawVal = `#if data.${f.code} == none or data.${f.code} == "" { "______" } else { str(data.${f.code})${unit} }`;
+  const partial = coverPartMarkup(f, 'value');
+  const rawVal = f.hide_label
+    ? `#if data.${f.code} == none or data.${f.code} == "" or data.${f.code} == "—" [] else [${partial ?? `#multiline(data.${f.code})`}]`
+    : partial != null
+    ? `#if data.${f.code} == none or data.${f.code} == "" { "______" } else [${partial}${f.unit ? `#text(" ${escapeTypst(f.unit)}")` : ''}]`
+    : `#if data.${f.code} == none or data.${f.code} == "" { "______" } else { str(data.${f.code})${unit} }`;
   const valueTxt = valueDict === '(:)' ? rawVal : `#text(..${valueDict})[${rawVal}]`;
-  const labelStroke = effLw === '700' ? fauxBoldStroke(f.label_style?.font) : '';
-  return `#text(weight: ${effLw}${labelStroke}${labelArgs})[${label}]：${valueTxt}`;
+  const labelStroke = effLw === '700' ? fauxBoldStroke(f.label_style?.font || f.style?.font) : ', stroke: none';
+  const content = f.hide_label ? valueTxt : `#text(weight: ${effLw}${labelStroke}${labelArgs})[${label}]：${valueTxt}`;
+  // Scoped text(), not block(): retain the grid's row-gutter and cell positions.
+  // Independent label/value styles remain inside this inherited field style.
+  const fieldDict = fieldPartTextDict(f.style, true);
+  return fieldDict === '(:)' ? content : `#text(..${fieldDict})[${content}]`;
 }
 
 /**
@@ -1214,6 +1276,18 @@ const LATIN_ONLY_FONTS = new Set(['Arial', 'Times New Roman']);
  * 与 styleSetRules 同口径：中文字体垫 Arial 让英文/数字默认 Arial；无粗体字体加描边模拟粗体。
  * label 一侧 weight 走 #field 的 label_bold 通道（复用主题 faux-bold），故 includeWeight=false。
  */
+function coverPartMarkup(field: FieldDefinition, part: 'label' | 'value'): string | undefined {
+  const styles = field.cover_text_styles?.[part];
+  if (!styles?.spans.length || (part === 'value' && (field.rich || field.formula || (field.binding && field.binding.source !== 'literal')))) return undefined;
+  const text = coverPartText(field, part);
+  if (styles.text !== text) return undefined;
+  return coverTextSegments(text, styles).map(segment => {
+    const content = segment.text.split(/(\n\n|\n)/).map(text => text === '\n\n' && field.hide_label && part === 'value' ? '#parbreak()' : text === '\n\n' ? '#linebreak()#linebreak()' : text === '\n' ? '#linebreak()' : `#text(${JSON.stringify(text)})`).join('');
+    const dict = fieldPartTextDict(segment.style, true);
+    return dict === '(:)' ? content : `#text(..${dict})[${content}]`;
+  }).join('');
+}
+
 function fieldPartTextDict(style: StyleOverride | undefined, includeWeight: boolean): string {
   if (!style) return '(:)';
   const t: string[] = [];
@@ -1226,9 +1300,9 @@ function fieldPartTextDict(style: StyleOverride | undefined, includeWeight: bool
     if (style.weight === 'bold') {
       t.push('weight: "bold"');
       if (isNoBoldFont(style.font || _docFont)) t.push('stroke: 0.015em');
-    } else if (style.weight === 'regular') t.push('weight: "regular"');
+    } else if (style.weight === 'regular') t.push('weight: "regular", stroke: none');
   }
-  if (style.italic) t.push('style: "italic"');
+  if (style.italic != null) t.push(`style: "${style.italic ? 'italic' : 'normal'}"`);
   if (style.color && /^#?[0-9a-fA-F]{6}$/.test(style.color)) t.push(`fill: rgb("${style.color.replace('#', '')}")`);
   return t.length ? `(${t.join(', ')})` : '(:)';
 }
@@ -1508,7 +1582,7 @@ function generateImageGroupContent(group: FieldGroup): string {
   const inset = imageFields[0].image_table_style?.inset_pt ?? 6;
   // 照片来源：首页(content_doc)文员上传的 image_photos 直接在模板期渲染（首页不经 generateTypstWithData，
   // __IMAGE_GROUP__ 不会被替换）；原始记录模板里 image_photos 为空＝占位框，由 generateTypstWithData 用 record_data 替换。
-  const body = imageFields.map(f => renderImageFieldUnified(f, Array.isArray(f.image_photos) ? f.image_photos : [], stroke, inset)).join('\n\n');
+  const body = imageFields.map(f => renderImageFieldUnified({ ...f, caption: undefined }, Array.isArray(f.image_photos) ? f.image_photos : [], stroke, inset)).join('\n\n');
   return `// __IMAGE_GROUP__:${group.id}__
 ${body}
 // __IMAGE_END__:${group.id}__`;
@@ -1710,7 +1784,7 @@ ${labelRow}    ${cells},
   // 原始记录图片分区（renderImageGroupTypst/renderImageFieldUnified 不传 seamless）：保持原样，零回退。
   if (opts.seamless === undefined) return blocks.join('\n\n');
   // 报告图库自动模式（传了 seamless）：显式块间距覆盖 wrapFigure 的 0pt——粘连=0pt、独立=0.8em。
-  return `#block(width: 100%)[\n#set block(spacing: ${opts.seamless ? '0pt' : '0.8em'})\n${blocks.join('\n')}\n]`;
+  return `#block(width: 100%, breakable: true)[\n#set block(spacing: ${opts.seamless ? '0pt' : '0.8em'})\n${blocks.join('\n')}\n]`;
 }
 
 /**
@@ -1719,7 +1793,8 @@ ${labelRow}    ${cells},
  * 从关联原始记录 ctx.record_raw_data 取。布局/四类文字/分区级版式两处完全共用。
  */
 function renderImageGroupTypst(group: FieldGroup, photosOf: (f: FieldDefinition) => any[], collection?: RecordImageCollection): string {
-  const fields = collection ? collectionItemFields(group, collection) : group.fields.filter(f => f.type === 'image');
+  const fields = (collection ? collectionItemFields(group, collection) : group.fields.filter(f => f.type === 'image'))
+    .map(field => ({ ...field, caption: undefined }));
   if (!fields.length) return '';
   const effectivePhotosOf = (field: FieldDefinition) => collection
     ? (Array.isArray(field.image_photos) ? field.image_photos : [])
@@ -1752,7 +1827,8 @@ function renderImageGroupTypst(group: FieldGroup, photosOf: (f: FieldDefinition)
   const topLabel = sl.top_label && sl.top_label.trim()
     ? `#block(below: ${lenTypst(sl.top_label_gap, 'pt') || '0.4em'})[#text(${titleTextArgs(sl.top_label_style, '1em')})[${escapeTypst(sl.top_label)}]]\n`
     : '';
-  const cap = sl.caption && sl.caption.trim() ? captionTypst(sl.caption, sl.caption_gap, 'above', sl.caption_style) : '';
+  // 图片分区只展示整组图片；旧版隐含备注不再输出，说明请使用独立文本字段。
+  const cap = '';
   // 是否设了「分区级布局」——仅看布局/表内标题相关键（不含 top_label/caption），故单设上方标签/下方备注不会把布局翻成分区级
   const hasLayout = !!collection || sl.cols != null || sl.title_mode != null || sl.width_cm != null || sl.height_cm != null
     || sl.solo != null || sl.seamless != null || sl.shared_title != null || sl.label_style != null;
@@ -1856,6 +1932,7 @@ function replaceDataLetBlock(source: string, merged: Record<string, any>): strin
 }
 
 export function generateTypstWithData(template: RecordTemplate, data: Record<string, any>, opts?: { deviceMap?: Record<string, { name?: string }> }): string {
+  template = applyRecordLayout(template, data);
   // 原始记录允许为本次录入覆盖模板中的图/表备注；显式空值代表本次不显示。
   template = applyFigureCaptionOverrides(template, data);
   let source = generateTypst(template);
@@ -2018,8 +2095,7 @@ export function flattenDataForDisplay(template: RecordTemplate, data: Record<str
       }).filter(Boolean);
       result[f.code] = lines.join('；  ');
     } else if (f.type === 'checkbox' && Array.isArray(val)) {
-      const items = val.map((v: any) => (v && typeof v === 'object' && v.custom ? v.custom : v)).filter(Boolean);
-      result[f.code] = items.join('、');
+      result[f.code] = formatChoiceValue(val, f.choice_display);
     } else if (f.type === 'select' && val && typeof val === 'object' && 'custom' in val) {
       result[f.code] = (val as any).custom ?? '';
     } else if (f.type === 'device_ref' && Array.isArray(val)) {
@@ -2146,30 +2222,33 @@ function formatDateOnly(s: string): string {
   }
 }
 
-function resolveRecordFreeFormulaCell(fieldCode: string, cellKey: string, ctx: ReportRenderCtx, sampleIndex?: number): string {
+function resolveRecordFreeFormulaCell(fieldCode: string, cellKey: string, ctx: ReportRenderCtx, sampleIndex?: number, preserveErrors = false): any {
   const fields = ctx.linked_record_template?.groups?.flatMap(group => group.fields || []) || [];
   const target = fields.find(item => item.code === fieldCode);
-  if (!target?.free_table) return '—';
-  const cache: Record<string, string> = {};
+  if (!target?.free_table) return preserveErrors ? new FormulaError('#REF!', '来源表格不可用') : '—';
+  const cache: Record<string, unknown> = {};
   const visiting = new Set<string>();
-  const valueOf = (ownerFieldCode: string, key: string, currentSample: number | undefined = sampleIndex): string => {
+  const valueOf = (ownerFieldCode: string, key: string, currentSample: number | undefined = sampleIndex): unknown => {
     const node = `${ownerFieldCode}::${key}::${currentSample ?? "fixed"}`;
     if (Object.prototype.hasOwnProperty.call(cache, node)) return cache[node];
-    if (visiting.has(node)) return '';
+    if (visiting.has(node)) return new FormulaError('#CYCLE!', '公式存在循环引用');
     visiting.add(node);
     const owner = fields.find(item => item.code === ownerFieldCode);
-    const ft = owner?.free_table;
     const raw = ctx.record_raw_data?.[ownerFieldCode];
     const rawObj: Record<string, any> = raw && typeof raw === 'object' ? raw : {};
+    const instance = rawObj.__free_table_structure__;
+    const ft = instance && Array.isArray(instance.rows) && Array.isArray(instance.columns) ? instance : owner?.free_table;
+    const missing = invalidGridReference(ft, key);
+    if (missing) { visiting.delete(node); return missing; }
     const formula = ft?.cell_formulas?.[key];
     let value: unknown;
     if (formula) {
       const runtimeKey = currentSample != null ? `${key}::s${currentSample}` : key;
       const manual = rawObj[`__formula_override__::${runtimeKey}`];
       if (manual && typeof manual === 'object' && manual.value !== undefined) {
-        value = applyNumericRounding(manual.value, ft.cell_rounding?.[key] ?? ft.default_rounding);
+        value = roundFreeGridValue(manual.value, ft, key);
         visiting.delete(node);
-        cache[node] = value === null || value === undefined ? '' : String(value);
+        cache[node] = value;
         return cache[node];
       }
       const sources: Record<string, unknown> = {};
@@ -2202,13 +2281,13 @@ function resolveRecordFreeFormulaCell(fieldCode: string, cellKey: string, ctx: R
         if (firstSampleKey) value = rawObj[firstSampleKey];
       }
     }
-    const isDataCell = ft?.cell_types?.[key] === 'number' || !!ft?.input_cells?.[key] || !!ft?.cell_formulas?.[key];
-    value = applyNumericRounding(value, ft?.cell_rounding?.[key] ?? (isDataCell ? ft?.default_rounding : undefined));
+    value = roundFreeGridValue(value, ft, key);
     visiting.delete(node);
-    cache[node] = value === null || value === undefined ? '' : String(value);
+    cache[node] = value;
     return cache[node];
   };
-  return valueOf(fieldCode, cellKey);
+  const result = valueOf(fieldCode, cellKey);
+  return preserveErrors ? result : formulaErrorText(result);
 }
 
 /** 解析数据绑定为字符串值；带时间的日期统一规整为「年-月-日」(formatDateOnly)。 */
@@ -2274,7 +2353,10 @@ function resolveBindingInner(b: CellBinding | undefined, ctx: ReportRenderCtx): 
       const v = ctx.record_flat_data?.[b.field_code];
       // 处理 select 自定义值 / checkbox 数组
       if (v && typeof v === 'object' && 'custom' in v) return String((v as any).custom ?? '');
-      if (Array.isArray(v)) return v.map(x => typeof x === 'object' && 'custom' in x ? (x as any).custom : x).filter(x => x).join('、');
+      if (Array.isArray(v)) {
+        const field = ctx.linked_record_template?.groups.flatMap(group => group.fields).find(field => field.code === b.field_code);
+        return formatChoiceValue(v, field?.choice_display);
+      }
       return v === null || v === undefined || v === '' ? '—' : String(v);
     }
     case 'record_field_unit': {
@@ -2307,13 +2389,13 @@ function resolveBindingInner(b: CellBinding | undefined, ctx: ReportRenderCtx): 
       const raw = ctx.record_raw_data?.[b.field_code];
       const v = raw && typeof raw === 'object' ? (raw as any)[b.cell_key] : undefined;
       const f = ctx.linked_record_template?.groups?.flatMap(g => g.fields || []).find(x => x.code === b.field_code);
-      const sourceTable = f?.free_table;
-      const sourceIsData = sourceTable?.cell_types?.[b.cell_key] === 'number' || !!sourceTable?.input_cells?.[b.cell_key];
-      const rule = sourceTable?.cell_rounding?.[b.cell_key] ?? (sourceIsData ? sourceTable?.default_rounding : undefined);
-      if (v !== null && v !== undefined) return freeGridValueText(applyNumericRounding(v, rule));
+      const instance = raw && typeof raw === 'object' ? raw.__free_table_structure__ : undefined;
+      const sourceTable = instance && Array.isArray(instance.rows) && Array.isArray(instance.columns) ? instance : f?.free_table;
+      if (sourceTable?.cell_formulas?.[b.cell_key]) return resolveRecordFreeFormulaCell(b.field_code, b.cell_key, ctx);
+      if (v !== null && v !== undefined) return freeGridValueText(roundFreeGridValue(v, sourceTable, b.cell_key));
       // 可编辑固定文字带有模板默认值；只有既无录入覆盖、又无默认值时才显示占位符。
-      const fallback = f?.free_table?.cells?.[b.cell_key];
-      return fallback === null || fallback === undefined || fallback === '' ? '—' : String(applyNumericRounding(fallback, rule));
+      const fallback = sourceTable?.cells?.[b.cell_key];
+      return fallback === null || fallback === undefined || fallback === '' ? '—' : String(roundFreeGridValue(fallback, sourceTable, b.cell_key));
     }
     case 'record_free_template_cell': {
       const f = ctx.linked_record_template?.groups?.flatMap(g => g.fields || []).find(x => x.code === b.field_code);
@@ -2435,6 +2517,7 @@ type FreeBand = {
   matrix_code?: string;
   source_field?: string;
   source_band_id?: string;
+  source_axis_mapping?: 'ordinal';
   sample_filter?: { mode: 'all' | 'indices'; indices?: number[] };
 };
 function applyBandSampleFilter(sids: string[], band: FreeBand): string[] {
@@ -2506,14 +2589,35 @@ function expandFreeGridBand(
     const sourceTable = ctx.linked_record_template?.groups.flatMap(group => group.fields).find(field => field.code === mb.source_field)?.free_table;
     if (sourceTable) sourceAxis = recordSampleBands(sourceTable).find(source => source.id === (mb.source_band_id || 'legacy'))?.axis || mb.axis;
     sourceEntries = readSampleAxes(rawObj, mb.source_band_id || 'legacy');
+    // Older recordings saved one s0 value per template row, without axis metadata.
+    // Treat those rows as separate samples rather than one inseparable block.
+    const sourceBand = sourceTable && recordSampleBands(sourceTable).find(b => b.id === (mb.source_band_id || 'legacy'));
+    if (!sourceEntries && sourceBand && sourceBand.refs.length > 1
+      && rawObj[`__sample_count__::${sourceBand.id}`] == null && rawObj.__sample_count__ == null) {
+      sourceEntries = Array.from({ length: deriveFreeGridSampleCount(rawObj, mb.source_band_id) }, (_, sample) =>
+        sourceBand.refs.map(ref => ({ ref, sample }))).flat();
+    }
     const N = sourceEntries ? sourceEntries.length : deriveFreeGridSampleCount(rawObj, mb.source_band_id);
+    if (!sourceEntries && mb.source_axis_mapping === 'ordinal' && sourceTable) {
+      const refs = recordSampleBands(sourceTable).find(source => source.id === (mb.source_band_id || 'legacy'))?.refs || [];
+      if (refs.length) sourceEntries = Array.from({ length: N }, (_, sample) => ({ ref: refs[sample % refs.length], sample }));
+    }
     sids = applyBandSampleFilter(Array.from({ length: N }, (_, i) => String(i)), mb);
+    // Keep original source indices so skipping an empty middle sample cannot
+    // shift bindings, formula overrides, selected units or explicit filters.
+    if (sourceTable) sids = sids.filter(sid => {
+      const entry = sourceEntries?.[Number(sid)];
+      return sampleHasEnteredData(sourceTable, rawObj, mb.source_band_id || 'legacy', entry?.sample ?? Number(sid), entry?.ref);
+    });
     concretize = (b, sid, i) => {
       const entry = sourceEntries?.[Number(sid)];
       const sourceIndex = entry?.sample ?? Number(sid);
       if (entry && (b.source === 'record_free_cell_sample' || b.source === 'record_free_formula_cell_sample') && b.field_code === mb.source_field) {
         const [r, c] = b.cell_key.split('::');
         b = { ...b, cell_key: sourceAxis === 'row' ? `${entry.ref}::${c}` : `${r}::${entry.ref}` };
+        if (mb.source_axis_mapping === 'ordinal' && sourceTable) {
+          b = { ...b, source: sourceTable.cell_formulas?.[b.cell_key] ? 'record_free_formula_cell_sample' : 'record_free_cell_sample' };
+        }
       }
       if (b.source === 'record_free_cell_sample') {
         const sourceRaw = ctx.record_raw_data?.[b.field_code] || {};
@@ -2521,10 +2625,8 @@ function expandFreeGridBand(
         const templateField = ctx.linked_record_template?.groups?.flatMap(g => g.fields || []).find(x => x.code === b.field_code);
         const fallback = templateField?.free_table?.cells?.[b.cell_key];
         const sourceTable = templateField?.free_table;
-        const sourceIsData = sourceTable?.cell_types?.[b.cell_key] === 'number' || !!sourceTable?.input_cells?.[b.cell_key];
-        const rule = sourceTable?.cell_rounding?.[b.cell_key] ?? (sourceIsData ? sourceTable?.default_rounding : undefined);
         const value = v ?? fallback ?? '';
-        return { source: 'literal', text: freeGridValueText(applyNumericRounding(value, rule)) };
+        return { source: 'literal', text: freeGridValueText(roundFreeGridValue(value, sourceTable, b.cell_key)) };
       }
       if (b.source === 'record_sample_index') return { source: 'literal', text: String(i + 1) };
       if (b.source === 'record_free_formula_cell_sample') return { source: 'literal', text: resolveRecordFreeFormulaCell(b.field_code, b.cell_key, ctx, sourceIndex) };
@@ -2561,15 +2663,35 @@ function expandFreeGridBand(
   const layout = buildFreeGridLayout({ ...ft, sample_band: undefined,
     sample_bands: [{ id: mb.id, axis: mb.axis, refs: mb.refs, cross_refs: mb.cross_refs }] },
     sourceEntries ? { [sampleAxesKey(mb.id)]: sids.map((sid, i) => ({
-      ref: mb.refs.includes(sourceEntries![Number(sid)].ref) ? sourceEntries![Number(sid)].ref : mb.refs[0], sample: i,
+      ref: mb.source_axis_mapping === 'ordinal' ? mb.refs[Number(sid) % mb.refs.length]
+        : mb.refs.includes(sourceEntries![Number(sid)].ref) ? sourceEntries![Number(sid)].ref : mb.refs[0], sample: i,
     })) } : {},
     { [mb.id]: sids.map((_, i) => i) });
   const expandedId = (item: { id: string; sample: number | null }) =>
     item.sample == null ? item.id : `${item.id}#${sids[item.sample]}`;
   const expandedSpans: NonNullable<typeof ft.spans> = {};
+  const mergedAnchorAliases = new Map<string, string>();
   for (const [position, span] of layout.spans) {
     const [ri, ci] = position.split(',').map(Number);
-    expandedSpans[`${expandedId(layout.displayRows[ri])}::${expandedId(layout.displayCols[ci])}`] = { rowspan: span.rs, colspan: span.cs };
+    const targetKey = `${expandedId(layout.displayRows[ri])}::${expandedId(layout.displayCols[ci])}`;
+    expandedSpans[targetKey] = { rowspan: span.rs, colspan: span.cs };
+    // Filtering can remove the merge's original anchor axis. Move its content
+    // and formatting to the first visible cell of the surviving merged range.
+    for (const [anchor, originalSpan] of Object.entries(ft.spans || {})) {
+      const [ar, ac] = anchor.split('::');
+      const r = rows.findIndex(row => row.id === ar), c = cols.findIndex(col => col.id === ac);
+      const visibleRow = layout.displayRows[ri], visibleCol = layout.displayCols[ci];
+      if (r < 0 || c < 0 || visibleRow.idx < r || visibleRow.idx >= r + (originalSpan.rowspan || 1)
+        || visibleCol.idx < c || visibleCol.idx >= c + (originalSpan.colspan || 1)) continue;
+      const sample = visibleRow.sample ?? visibleCol.sample;
+      const sourceKey = sample != null && touches(ar, ac) ? remapKey(ar, ac, sids[sample]) : anchor;
+      if (sourceKey !== targetKey) mergedAnchorAliases.set(targetKey, sourceKey);
+      break;
+    }
+  }
+  function moveMergedAnchors<T>(values: Record<string, T>): Record<string, T> {
+    for (const [target, source] of mergedAnchorAliases) if (Object.hasOwn(values, source)) values[target] = values[source];
+    return values;
   }
   function remap<T>(m: Record<string, T> | undefined, xf?: (v: T, sid: string, i: number) => T): Record<string, T> {
     const out: Record<string, T> = {};
@@ -2578,7 +2700,7 @@ function expandFreeGridBand(
       if (!touches(rid, cid)) { out[k] = v; continue; }
       sids.forEach((sid, i) => { out[remapKey(rid, cid, sid)] = xf ? xf(v, sid, i) : v; });
     }
-    return out;
+    return moveMergedAnchors(out);
   }
   const newRows = layout.displayRows.map(item => ({ ...rows[item.idx], id: expandedId(item) }));
   const newCols = layout.displayCols.map(item => ({ ...cols[item.idx], id: expandedId(item) }));
@@ -2594,7 +2716,7 @@ function expandFreeGridBand(
         out[k] = { ...f, sources: (f.sources || []).flatMap(s => { const [sr, sc] = s.split('::'); return touches(sr, sc) ? sids.map(sid => remapKey(sr, sc, sid)) : [s]; }) };
       }
     }
-    return out;
+    return moveMergedAnchors(out);
   }
   return {
     ...ft,
@@ -2762,20 +2884,20 @@ function freeGridValueText(value: unknown): string {
 function fmtFreeGridCell(raw: string, fmt: { mode: string; digits: number } | undefined, unit: string | undefined): string {
   let inner: string;
   const n = Number(raw);
-  if (fmt && fmt.mode !== 'none' && raw !== '' && Number.isFinite(n)) {
+  if (fmt && fmt.mode !== 'none' && raw.trim() !== '' && Number.isFinite(n)) {
     if (fmt.mode === 'scientific') {
-      const [mant, exp] = n.toExponential(Math.min(20, Math.max(0, fmt.digits ?? 2))).split('e');
+      const [mant, exp] = formatGridNumber(raw, { mode: 'scientific', digits: fmt.digits }).split('e');
       inner = `$${mant} times 10^(${parseInt(exp, 10)})$`;   // 数学模式：9.4 × 10¹
     } else if (fmt.mode === 'significant') {
       // toPrecision 会在极大/极小值时返回 "1.23e-5"。有效数字仍须保留
       // toPrecision 的尾数与补零语义，但 PDF 采用与“科学计数法”一致的 ×10 上标排版。
-      const value = n.toPrecision(Math.min(21, Math.max(1, fmt.digits ?? 2)));
+      const value = formatGridNumber(raw, { mode: 'significant', digits: fmt.digits });
       const exponent = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))[eE]([+-]?\d+)$/.exec(value);
       inner = exponent
         ? `$${exponent[1]} times 10^(${parseInt(exponent[2], 10)})$`
         : escapeTypstMarkup(value);
     } else {
-      inner = escapeTypstMarkup(n.toFixed(Math.min(20, Math.max(0, fmt.digits ?? 2))));
+      inner = escapeTypstMarkup(formatGridNumber(raw, { mode: 'decimals', digits: fmt.digits }));
     }
   } else {
     inner = escapeTableText(String(raw));
@@ -2794,7 +2916,9 @@ function fmtFreeGridCell(raw: string, fmt: { mode: string; digits: number } | un
 export function resolveReportFreeGridValues(field: FieldDefinition, ft: NonNullable<FieldDefinition['free_table']>, dataOverride?: Record<string, any>, ctx?: ReportRenderCtx): Record<string, string> {
   const rows = ft.rows || [], cols = ft.columns || [];
   const cellFormulas = ft.cell_formulas || {};
-  const resolved: Record<string, string> = {};
+  // Keep typed errors until every dependency has finished. Converting to text
+  // inside recursion would make IFERROR see ordinary text instead of an error.
+  const resolved: Record<string, unknown> = {};
   for (const r of rows) for (const c of cols) {
     const key = `${r.id}::${c.id}`;
     if (cellFormulas[key]) continue;
@@ -2803,14 +2927,15 @@ export function resolveReportFreeGridValues(field: FieldDefinition, ft: NonNulla
     const baseValue = bindVal != null ? freeGridValueText(bindVal)
       : ov != null ? freeGridValueText(ov)
       : (ft.cells?.[key] ?? '');
-    const isDataCell = ft.cell_types?.[key] === 'number' || !!ft.input_cells?.[key] || !!ft.cell_bindings?.[key];
-    resolved[key] = String(applyNumericRounding(baseValue, ft.cell_rounding?.[key] ?? (isDataCell ? ft.default_rounding : undefined)) ?? '');
+    resolved[key] = String(roundFreeGridValue(baseValue, ft, key) ?? '');
   }
   const formulaVisiting = new Set<string>();
-  const resolveFormula = (key: string): string => {
+  const resolveFormula = (key: string): unknown => {
+    const missing = invalidGridReference(ft, key);
+    if (missing) return missing;
     if (!cellFormulas[key]) return resolved[key] ?? '';
     if (Object.prototype.hasOwnProperty.call(resolved, key)) return resolved[key];
-    if (formulaVisiting.has(key)) return '';
+    if (formulaVisiting.has(key)) return new FormulaError('#CYCLE!', '公式存在循环引用');
     formulaVisiting.add(key);
     const f = cellFormulas[key];
     const manual = dataOverride?.[`__formula_override__::${key}`];
@@ -2819,18 +2944,35 @@ export function resolveReportFreeGridValues(field: FieldDefinition, ft: NonNulla
       const reference = resolveFreeGridCellReference(source, field.code);
       formulaData[source] = reference.fieldCode === field.code
         ? resolveFormula(reference.cellKey)
-        : (ctx ? resolveRecordFreeFormulaCell(reference.fieldCode, reference.cellKey, ctx) : '');
+        : (ctx ? resolveRecordFreeFormulaCell(reference.fieldCode, reference.cellKey, ctx, undefined, true) : new FormulaError('#REF!', '来源表格不可用'));
     }
     const v = manual && typeof manual === 'object' && manual.value !== undefined
       ? manual.value
-      : executeWithFullPrecision(f, formulaData);
+      : completeGridFormula(executeWithFullPrecision(f, formulaData), (f.sources || []).map(source => formulaData[source]));
     formulaVisiting.delete(key);
-    const rounded = applyNumericRounding(v, ft.cell_rounding?.[key] ?? ft.default_rounding);
-    resolved[key] = (rounded === null || rounded === undefined) ? '' : String(rounded);
+    const rounded = roundFreeGridValue(v, ft, key);
+    resolved[key] = rounded;
     return resolved[key];
   };
   for (const key of Object.keys(cellFormulas)) resolveFormula(key);
-  return resolved;
+  return Object.fromEntries(Object.entries(resolved).map(([key, value]) => [key, formulaErrorText(value)]));
+}
+
+/** Read-only projection of the exact entry structure and sample expansion used by PDF. */
+export function recordFreeGridSnapshot(field: FieldDefinition, raw: Record<string, any>, ctx?: ReportRenderCtx) {
+  let table = field.free_table;
+  const instance = raw.__free_table_structure__;
+  if (instance && Array.isArray(instance.rows) && Array.isArray(instance.columns)) table = instance;
+  if (!table) return null;
+  if (getSelfFreeBands(table).length) table = expandFreeGridSelfBand(table, raw);
+  const values = resolveReportFreeGridValues(field, table, raw, ctx);
+  const cells = Object.fromEntries(Object.entries(values).map(([key, value]) => {
+    const unit = table!.cell_unit_options?.[key]?.length ? raw[`${key}::__unit__`] || table!.cell_unit_options[key][0] : table!.cell_units?.[key];
+    const dataCell = !table!.header_cells?.[key] && (!!table!.input_cells?.[key] || !!table!.cell_bindings?.[key] || !!table!.cell_formulas?.[key] || !!table!.cell_types?.[key]);
+    const display = gridOutputText(value, dataCell, !!table!.cell_formulas?.[key]);
+    return [key, display === '/' ? '/' : freeGridNumberText(display, table!, key, true) + (unit ? ` ${unit}` : '')];
+  }));
+  return { ...table, cells };
 }
 
 export function renderFreeGridTypst(
@@ -2879,14 +3021,15 @@ export function renderFreeGridTypst(
     cols.forEach((c, ci) => {
       if (covered.has(`${ri},${ci}`)) return;   // 被合并主格盖住：不出格
       const key = `${r.id}::${c.id}`;
-      const raw = resolved[key] ?? '';   // F3：绑定/录入/固定文字/公式已在上方统一算好
+      const missingDataCell = !ft.header_cells?.[key] && (!!ft.input_cells?.[key] || !!ft.cell_bindings?.[key] || !!ft.cell_formulas?.[key] || !!ft.cell_types?.[key]);
+      const raw = gridOutputText(resolved[key], missingDataCell, !!ft.cell_formulas?.[key]);
       const isHeader = !!ft.header_cells?.[key];
       const sp = ft.spans?.[key];
       const cs = Math.min(Math.max(sp?.colspan ?? 1, 1), cols.length - ci);
       const rs = Math.min(Math.max(sp?.rowspan ?? 1, 1), rows.length - ri);
       // 单位：可选(cell_unit_options)＝取录入选的(dataOverride `${key}::__unit__`)，未选/模板期回落到【第一个选项】占位显示，否则固定单位
       const unitBinding = ctx ? ft.cell_unit_bindings?.[key] : undefined;
-      const cellUnit = unitBinding
+      const cellUnit = raw === '/' ? undefined : unitBinding
         ? resolveBinding(unitBinding, ctx!)
         : ft.cell_unit_options?.[key]?.length
           ? (dataOverride?.[`${key}::__unit__`] || ft.cell_unit_options[key][0] || '')
@@ -3707,7 +3850,7 @@ function renderSharedPhotoGrid(
     }
     for (const g of groups) {
       const span = (g.length === 1 && cols > 1) ? cols : 1;
-      const cells = g.map(p => span > 1 ? `table.cell(colspan: ${span}, ${exprOf(p)})` : exprOf(p));
+      const cells = g.map(p => `table.cell(breakable: false, ${span > 1 ? `colspan: ${span}, ` : ''}${exprOf(p)})`);
       if (g.length >= 2 && g.length < cols) for (let p = 0; p < cols - g.length; p++) cells.push('[]');
       lines.push('  ' + cells.join(', ') + ',');
     }
@@ -3726,7 +3869,7 @@ function renderSharedPhotoGrid(
     return `#block(width: 100%, breakable: false)[\n#table(columns: (${colSpec}), stroke: ${stroke}pt, inset: ${imgCellInset(cfg)}, align: center + horizon,\n${headerRow}  ${cells.join(', ')},\n)\n]`;
   });
   // 独立框：显式 0.8em 块间距，覆盖 wrapFigure 的 #set block(spacing:0pt)（否则各框紧贴=粘连）
-  return `#block(width: 100%)[\n#set block(spacing: 0.8em)\n${blocks.join('\n')}\n]`;
+  return `#block(width: 100%, breakable: true)[\n#set block(spacing: 0.8em)\n${blocks.join('\n')}\n]`;
 }
 
 /**
@@ -3781,7 +3924,7 @@ function renderGalleryGrid(
   // 显式设块间距：粘连=0pt、独立=0.8em。【必须显式】——否则被外层 wrapFigure 的 #set block(spacing:0pt)
   // 盖成 0、永远粘连、切换独立无效（这正是"项目模板独立、报告却粘连/切换无效"的根因）。
   const spacingRule = `#set block(spacing: ${seamless ? '0pt' : '0.8em'})\n`;
-  return `#block(width: 100%)[\n${spacingRule}${blocks.join('\n')}\n]`;
+  return `#block(width: 100%, breakable: true)[\n${spacingRule}${blocks.join('\n')}\n]`;
 }
 
 export function renderReportImageGalleryTypst(field: FieldDefinition, ctx: ReportRenderCtx): string {
@@ -3882,7 +4025,7 @@ export function renderPhotoTableTypst(field: FieldDefinition, _ctx: ReportRender
 /**
  * 渲染 report_sample_table（首页·样品信息表）：多样品时把委托单样品按 序号/样品名称/零件号 列成一张满宽表格。
  * 数据来自 ctx.order_samples（{ no, name, sort_no, model }）。
- * mode='auto'（缺省）时单样品（≤1）自动折叠（返回空串），由首页「样品名称/零件号」字段直接显示；'always' 则始终出表。
+ * 显式设置 mode='auto' 时单样品（≤1）自动折叠（返回空串），由首页「样品名称/零件号」字段直接显示；缺省或 'always' 则始终出表。
  */
 export function renderSampleTableTypst(field: FieldDefinition, ctx: ReportRenderCtx): string {
   // 取号前（编辑首页草稿）：样品由报告编号(1.2)决定，尚未取号 → 出灰字占位而非填整单样品。
@@ -3890,9 +4033,9 @@ export function renderSampleTableTypst(field: FieldDefinition, ctx: ReportRender
   if (field.free_table?.columns?.length) return renderFreeTableTypst(field, field.free_table);
   const cfg = field.sample_table || {};
   const samples = ctx.order_samples || [];
-  // 单/多样品自动切换（系统固定规则）：auto（缺省）模式下样品 ≤1 时折叠本表——
+  // 单/多样品自动切换（系统固定规则）：显式 auto 模式下样品 ≤1 时折叠本表——
   // 单样品由首页「样品名称/零件号」字段直接显示，无需表格。'always' 则不论几个都出表。
-  if ((cfg.mode || 'auto') === 'auto' && samples.length <= 1) return '';
+  if (hideAutomaticSampleTable(field, ctx)) return '';
   const colKeys = (cfg.columns && cfg.columns.length ? cfg.columns : ['index', 'name', 'model']) as Array<'index' | 'name' | 'model'>;
   const labels: Record<string, string> = {
     index: cfg.column_labels?.index || '样品编号',   // 第一列＝接口 SampleSortNo（样品编号），非"序号"
@@ -3995,6 +4138,36 @@ export function resolveReportFieldValue(field: FieldDefinition, ctx: ReportRende
     : field.binding;
   const value = binding ? resolveBinding(binding, ctx)
     : Array.isArray(field.default_value) ? field.default_value.join('、') : String(field.default_value ?? '');
+  const doc = field.rich && storedReportRichDocument(String(value));
+  if (doc) {
+    // Preserve legacy hide_label empty suppression only while the paragraph
+    // still consists solely of its dynamic field. User-added prose/blank lines
+    // are ordinary editable content and must never be silently hidden.
+    const values = new Map<ReportRichNode, string>();
+    const bindingValue = (node: ReportRichNode) => {
+      if (!values.has(node)) values.set(node, String(resolveBinding(node.attrs!.reference!.binding, ctx) ?? ''));
+      return values.get(node)!;
+    };
+    const hidden = (node: ReportRichNode) => node.type === 'paragraph' && node.attrs?.templateEmptyPolicy === 'hide'
+      && node.content?.length === 1 && node.content[0].type === 'templateField'
+      && ['', '—'].includes(bindingValue(node.content[0]));
+    const resolve = (node: ReportRichNode): ReportRichNode => ({ ...node, ...(node.content ? { content: node.content.filter(child => !hidden(child)).flatMap(child => child.type === 'templateField'
+      ? bindingValue(child).split('\n').flatMap((text, i): ReportRichNode[] => [
+        ...(i ? [{ type: 'hardBreak' as const }] : []), ...(text ? [{ type: 'text' as const, text, marks: child.marks }] : []),
+      ]) : [resolve(child)]) } : {}) });
+    const resolved = resolve(doc);
+    // If an edge field disappeared, its neighbour becomes the new outer edge.
+    // Collapse only unchanged, generated spacing; retain manual paragraph edits.
+    if (doc.content?.[0] && hidden(doc.content[0])) {
+      const first = resolved.content?.[0];
+      if (first?.attrs?.templateSpacing?.spaceBefore != null && first.attrs.spaceBefore === first.attrs.templateSpacing.spaceBefore) first.attrs.spaceBefore = 0;
+    }
+    if (doc.content?.at(-1) && hidden(doc.content.at(-1)!)) {
+      const last = resolved.content?.at(-1);
+      if (last?.attrs?.templateSpacing?.spaceAfter != null && last.attrs.spaceAfter === last.attrs.templateSpacing.spaceAfter) last.attrs.spaceAfter = 0;
+    }
+    return encodeReportRichDocument(resolved);
+  }
   return field.type === 'date' ? formatDateByPrecision(value, field.date_precision || 'day', field.date_separator || '-') : value;
 }
 
@@ -4087,7 +4260,7 @@ export function renderContentDoc(doc: {
   const docFont = String((doc.cover.layout_options?.theme_config as Record<string, any> | undefined)?.font || '');
   const coverAsRecord: RecordTemplate = {
     id: 0, name: doc.cover.name || '首页', version: 1,
-    groups: projectContinuousGroups(doc.cover.groups).map(g => g.report_source_fields ? projectReportTextRuns(g, f => resolveReportFieldValue(f, doc.cover.ctx)) : g), layout_options: doc.cover.layout_options || {},
+    groups: projectContinuousGroups(removeLegacyImageNotes(doc.cover.groups)).map(g => g.report_source_fields ? projectReportTextRuns(g, f => resolveReportFieldValue(f, doc.cover.ctx)) : g), layout_options: doc.cover.layout_options || {},
   };
   let coverSrc = generateTypst(coverAsRecord);
   coverSrc = injectReportFieldsIntoTypst(coverSrc, coverAsRecord, doc.cover.ctx);
@@ -4118,7 +4291,7 @@ export function renderContentDoc(doc: {
     const p = projList[pIdx];
     const projTpl: RecordTemplate = {
       id: 0, name: p.name || '', version: 1,
-      groups: projectContinuousGroups(p.groups).map(g => projectReportTextRuns(g, f => resolveReportFieldValue(f, p.ctx))), layout_options: p.layout_options || {},
+      groups: projectContinuousGroups(removeLegacyImageNotes(p.groups)).map(g => projectReportTextRuns(g, f => resolveReportFieldValue(f, p.ctx))), layout_options: p.layout_options || {},
     };
     let src = generateTypst(projTpl);
     src = injectReportFieldsIntoTypst(src, projTpl, p.ctx);

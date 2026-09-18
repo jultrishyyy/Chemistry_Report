@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApartmentOutlined, PlusOutlined } from '@ant-design/icons';
-import { Button, Form, Input, Modal, Select, Space, message } from 'antd';
+import { Button, Form, Input, Modal, Select, Space, Tooltip, message } from 'antd';
 import axios from 'axios';
 
 type Props = {
@@ -22,7 +22,7 @@ export default function ReportTemplateGroupActions({
 
   const load = async () => {
     try {
-      setGroups((await axios.get(`/api/report-project-families?kind=${templateKind}`)).data || []);
+      setGroups((await axios.get('/api/report-project-families')).data || []);
     } catch (error: any) {
       message.error(error?.response?.data?.error || '项目组信息加载失败');
     }
@@ -62,8 +62,10 @@ export default function ReportTemplateGroupActions({
         disabled={disabled || saving} value={groupId || undefined} placeholder="不归属项目组"
         onChange={changeGroup}
         options={groups.map(group => ({ value: Number(group.id), label: group.name }))} />
-      <Button size="small" type="text" icon={<PlusOutlined />} disabled={disabled || saving}
-        onClick={() => setCreateOpen(true)}>新建项目组</Button>
+      <Tooltip title="新建项目组"><span style={{ display: 'inline-flex' }}>
+        <Button size="small" type="text" icon={<PlusOutlined />} aria-label="新建项目组" disabled={disabled || saving}
+          onClick={() => setCreateOpen(true)} />
+      </span></Tooltip>
     </Space>
     <Modal title="新建项目组" open={createOpen} onOk={createGroup}
       onCancel={() => setCreateOpen(false)} okText="创建并选择">

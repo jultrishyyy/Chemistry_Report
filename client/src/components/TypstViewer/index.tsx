@@ -17,6 +17,8 @@ export interface TypstViewerProps {
   onMarkerClick?: (marker: PosMarker) => void;
   /** 下载渲染后 PDF 的文件名（缺省 document.pdf）。预览区右上角出现「下载 PDF」按钮。传 null 隐藏按钮。 */
   downloadName?: string | null;
+  /** Instances may save and download the persisted server document instead. */
+  onDownload?: () => Promise<void>;
 }
 
 export interface PosMarker {
@@ -80,8 +82,10 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
   enableSync = false,
   onMarkerClick,
   downloadName = 'document.pdf',
+  onDownload,
 }, ref) {
   const [pdfUrl, setPdfUrl] = useState<string>('');
+  useEffect(() => () => { if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl); }, [pdfUrl]);
   const [error, setError] = useState<string | null>(null);
   const [compiling, setCompiling] = useState(false);
   const [compiledSource, setCompiledSource] = useState<string | null>(null);
@@ -121,18 +125,18 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
     return true;
   }, []);
 
-  const doCompile = useCallback(async (finalSrc: string, sequence: number) => {
-    const current = () => sequence === compileSequenceRef.current && latestSourceRef.current === finalSrc;
+  const doCompile = useCallback(async (finalSrc: string, sequence: number, signal: AbortSignal) => {
+    const current = () => !signal.aborted && sequence === compileSequenceRef.current && latestSourceRef.current === finalSrc;
     try {
-      const url = await compileTypst(finalSrc);
-      if (!current()) return;
+      const url = await compileTypst(finalSrc, signal);
+      if (!current()) { URL.revokeObjectURL(url); return; }
       setPdfUrl(url);
       setCompiledSource(finalSrc);
       setError(null);
       if (enableSync) {
         // 与编译同一 source 查询位置标记；失败仅降级跳转功能，不影响预览
         try {
-          const res = await axios.post('/api/typst/query', { source: finalSrc });
+          const res = await axios.post('/api/typst/query', { source: finalSrc }, { signal, headers: { 'X-Preview-Request': '1' } });
           if (!current()) return;
           markersRef.current = res.data?.markers || [];
           const active = activeMarkerFocusRef.current;
@@ -157,12 +161,13 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
   useEffect(() => {
     // Invalidate immediately, including the debounce window and component teardown.
     const sequence = ++compileSequenceRef.current;
+    const controller = new AbortController();
     setCompiling(true);
     setError(null);
     markersRef.current = [];
     pdfApiRef.current?.clearHighlight();
-    const timer = setTimeout(() => doCompile(finalSource, sequence), debounceMs);
-    return () => { clearTimeout(timer); ++compileSequenceRef.current; };
+    const timer = setTimeout(() => doCompile(finalSource, sequence, controller.signal), debounceMs);
+    return () => { clearTimeout(timer); ++compileSequenceRef.current; controller.abort(); };
   }, [finalSource, debounceMs, doCompile]);
 
   useImperativeHandle(ref, () => ({
@@ -207,6 +212,7 @@ const TypstViewer = forwardRef<TypstViewerHandle, TypstViewerProps>(function Typ
   // 下载渲染后的 PDF（用 compile 得到的 blob URL；下载文件名给一个 ASCII 兜底 + 真实名）。
   const downloadBtn = (pdfUrl && !error && !previewPending && downloadName !== null) ? (
     <a href={pdfUrl} download={downloadName || 'document.pdf'} title="下载渲染后的 PDF"
+      onClick={onDownload ? event => { event.preventDefault(); void onDownload(); } : undefined}
       style={{
         position: 'absolute', top: 4, right: 8, zIndex: 11,
         fontSize: 12, lineHeight: 1, padding: '4px 10px', borderRadius: 4,

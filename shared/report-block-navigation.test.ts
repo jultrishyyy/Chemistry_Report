@@ -62,12 +62,16 @@ test('ordinary project sections accept prose beside a table without freezing bin
   g.fields[1].binding = { source: 'literal', text: '表后说明' };
   const pdf = renderContentDoc({ cover: { groups: [JSON.parse(JSON.stringify(g))], ctx: {} }, projects: [] });
   assert.ok(pdf.includes('表后说明'));
-  for (const patch of [{ layout: 'inline' }, { layout: 'two-col' }, { layout: 'table' }, { layout: 'grid' }, { section_role: 'images' }, { image_layout: { cols: 2 } }]) {
+  for (const patch of [{ layout: 'inline' }, { layout: 'two-col' }, { layout: 'table' }, { layout: 'grid' }]) {
     const special = { ...g, ...patch } as FieldGroup;
     const snapshot = JSON.stringify(special);
     assert.equal(enterBesideReportBlock(special, 'table', -1, 'blocked'), null);
     assert.equal(JSON.stringify(special), snapshot);
   }
+  const images = { ...g, section_role: 'images' as const, image_layout: { cols: 2 } };
+  images.fields = [makeReportManualTable('table')];
+  assert.equal(enterBesideReportBlock(images, 'table', -1, 'image-note'), 'image-note');
+  assert.deepEqual(images.fields.map(field => field.id), ['image-note', 'table']);
 });
 test('explicit figure deletion joins compatible text editors but preserves paragraph breaks and rich formatting', () => {
   const g = group(), source = JSON.stringify(g.report_source_fields);

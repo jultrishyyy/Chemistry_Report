@@ -1,6 +1,7 @@
 import type { RecordTemplate, FieldDefinition } from './types';
 import { executeWithFullPrecision } from './formula-engine.ts';
-import { applyNumericRounding } from './numeric-rounding.ts';
+import { FormulaError, invalidGridReference, isFormulaError } from './formula-error';
+import { roundFreeGridValue, freeGridNumberText } from './free-grid-number.ts';
 import { resolveFreeGridCellReference } from './free-grid-formula.ts';
 import { readSampleAxes } from './free-grid-samples.ts';
 
@@ -18,9 +19,11 @@ export function projectLegacyMatrices(template: RecordTemplate | null | undefine
   const evaluate = (f: FieldDefinition, key: string, sample?: number): any => {
     const node = `${f.code}/${key}/${sample ?? 'fixed'}`;
     if (cache.has(node)) return cache.get(node);
-    if (visiting.has(node)) return '';
+    if (visiting.has(node)) return new FormulaError('#CYCLE!', '公式存在循环引用');
     visiting.add(node);
     const ft = tableOf(f), raw = data[f.code] || {};
+    const missing = invalidGridReference(ft, key);
+    if (missing) { visiting.delete(node); return missing; }
     const runtime = sample == null ? key : `${key}::s${sample}`;
     const formula = ft?.cell_formulas?.[key];
     const override = raw[`__formula_override__::${runtime}`];
@@ -31,7 +34,7 @@ export function projectLegacyMatrices(template: RecordTemplate | null | undefine
       for (const source of formula.sources || []) {
         const ref = resolveFreeGridCellReference(source, f.code);
         const owner = fields.find(x => x.code === ref.fieldCode);
-        if (!owner?.free_table) { sources.push(source); values[source] = ''; continue; }
+        if (!owner?.free_table) { sources.push(source); values[source] = new FormulaError('#REF!', '来源表格不可用'); continue; }
         const sourceTable = tableOf(owner);
         const [r, c] = ref.cellKey.split('::');
         const band = sourceTable.sample_bands?.find((b: any) => !b.source_field && !b.matrix_code && b.refs.includes(b.axis === 'row' ? r : c));
@@ -45,8 +48,7 @@ export function projectLegacyMatrices(template: RecordTemplate | null | undefine
       }
       value = executeWithFullPrecision({ ...formula, sources }, values);
     } else value = textValue(raw[runtime] ?? raw[key] ?? ft?.cells?.[key] ?? '');
-    const isData = ft?.input_cells?.[key] || ft?.cell_formulas?.[key] || ft?.cell_types?.[key] === 'number';
-    value = applyNumericRounding(value, ft?.cell_rounding?.[key] ?? (isData ? ft?.default_rounding : undefined));
+    value = roundFreeGridValue(value, ft, key);
     visiting.delete(node); cache.set(node, value); return value;
   };
   for (const f of targets) {
@@ -59,8 +61,8 @@ export function projectLegacyMatrices(template: RecordTemplate | null | undefine
     const labels: Record<string, any> = {}, cells: Record<string, any> = {}, units: Record<string, any> = {};
     const displayed = (key: string, sample?: number) => {
       const value = evaluate(f, key, sample);
-      const fmt = ft.cell_number_fmt?.[key] || ft.default_number_fmt;
-      if (format && fmt?.mode === 'decimals' && value !== '' && value != null && Number.isFinite(Number(value))) return Number(value).toFixed(Math.min(20, Math.max(0, fmt.digits)));
+      if (isFormulaError(value)) return value.code;
+      if (format) return freeGridNumberText(value, ft, key, true);
       return value;
     };
     const sampleIds: string[] = [];

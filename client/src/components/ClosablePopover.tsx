@@ -45,7 +45,7 @@ export default function ClosablePopover({
         </div>
       }
       content={
-        <div style={{ maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 130px)', overflow: 'auto', overscrollBehavior: 'contain' }}>
+        <div style={{ maxWidth: 'calc(100vw - 48px)', maxHeight: 'max(80px, calc(100dvh - 130px))', overflow: 'auto', overscrollBehavior: 'contain', overflowWrap: 'anywhere' }}>
           {content}
         </div>
       }

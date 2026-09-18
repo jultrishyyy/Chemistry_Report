@@ -1,29 +1,35 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import RecordTemplateList from './pages/RecordTemplate/List';
-import RecordTemplateEditor from './pages/RecordTemplate/Editor';
-import LabTaskList from './pages/Lab/TaskList';
-import LabOrderDetail from './pages/Lab/OrderDetail';
-import LabRecord from './pages/Lab/Record';
-import MobileImageUpload from './pages/Mobile/ImageUpload';
-import ReportTemplateList from './pages/ReportTemplate/List';
-import ReportTemplateEditor from './pages/ReportTemplate/Editor';
-import ReportTemplateCoverEditor from './pages/ReportTemplate/CoverEditor';
-import ReportTemplateProjectEditor from './pages/ReportTemplate/ProjectEditor';
-import ReportDetail from './pages/Report/Detail';
-import ReportOrderList from './pages/Report/OrderList';
-import ReportWorkbench from './pages/Report/Workbench';
-import ReportPreviewEditor from './pages/Report/PreviewEditor';
-import ReportInstanceEditor from './pages/Report/InstanceEditor';
-import EquipmentLibrary from './pages/Equipment/Library';
+import { lazy, Suspense } from 'react';
 import Login from './pages/Login';
-import AdminUsers from './pages/Admin/Users';
-import MyRoles from './pages/Account/MyRoles';
 import AppNav from './components/AppNav';
 import SymbolPicker from './components/SymbolPicker';
 import { AuthProvider, useAuth } from './auth';
 import { ConfigProvider, Spin } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { appTheme, APP_BG } from './theme';
+
+// Each major screen is downloaded only when it is opened. Editors and PDF
+// tooling are the largest modules and must not delay the login/list shell.
+const RecordTemplateList = lazy(() => import('./pages/RecordTemplate/List'));
+const RecordTemplateEditor = lazy(() => import('./pages/RecordTemplate/Editor'));
+const LabTaskList = lazy(() => import('./pages/Lab/TaskList'));
+const LabOrderDetail = lazy(() => import('./pages/Lab/OrderDetail'));
+const LabRecord = lazy(() => import('./pages/Lab/Record'));
+const MobileImageUpload = lazy(() => import('./pages/Mobile/ImageUpload'));
+const ReportTemplateList = lazy(() => import('./pages/ReportTemplate/List'));
+const ReportTemplateEditor = lazy(() => import('./pages/ReportTemplate/Editor'));
+const ReportTemplateCoverEditor = lazy(() => import('./pages/ReportTemplate/CoverEditor'));
+const ReportTemplateProjectEditor = lazy(() => import('./pages/ReportTemplate/ProjectEditor'));
+const ReportDetail = lazy(() => import('./pages/Report/Detail'));
+const ReportOrderList = lazy(() => import('./pages/Report/OrderList'));
+const ReportWorkbench = lazy(() => import('./pages/Report/Workbench'));
+const ReportPreviewEditor = lazy(() => import('./pages/Report/PreviewEditor'));
+const ReportInstanceEditor = lazy(() => import('./pages/Report/InstanceEditor'));
+const EquipmentLibrary = lazy(() => import('./pages/Equipment/Library'));
+const AdminUsers = lazy(() => import('./pages/Admin/Users'));
+const MyRoles = lazy(() => import('./pages/Account/MyRoles'));
+
+const PageLoading = () => <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Spin size="large" /></div>;
 
 function AppLayout() {
   const location = useLocation();
@@ -38,7 +44,7 @@ function AppLayout() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {!hideNav && <AppNav />}
       <div style={{ flex: 1, minHeight: 0, overflow: selfScrollingEditor ? 'hidden' : 'auto', background: fullBleed ? '#fff' : APP_BG }}>
-        <Routes>
+        <Suspense fallback={<PageLoading />}><Routes>
           <Route path="/" element={<Navigate to="/record-templates" replace />} />
           <Route path="/record-templates" element={<RecordTemplateList />} />
           <Route path="/record-templates/editor" element={<RecordTemplateEditor />} />
@@ -58,7 +64,7 @@ function AppLayout() {
           <Route path="/admin/users" element={<AdminUsers />} />
           <Route path="/me/roles" element={<MyRoles />} />
           <Route path="/m/upload" element={<MobileImageUpload />} />
-        </Routes>
+        </Routes></Suspense>
       </div>
       <SymbolPicker />
     </div>

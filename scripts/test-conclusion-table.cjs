@@ -1,0 +1,28 @@
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+const { compactConclusionChildren, CONCLUSION_COLUMNS, conclusionDisplayField } = require('../shared/conclusion-table-layout.ts');
+assert.equal(CONCLUSION_COLUMNS[0].label, '子项目名称');
+const oldName = { code: 'name', label: '名称', conclusion_role: 'project_name' };
+assert.equal(conclusionDisplayField(oldName).label, '项目名称');
+assert.equal(oldName.label, '名称');
+assert.equal(conclusionDisplayField({ ...oldName, label: '自定义名称' }).label, '自定义名称');
+const { generateTypstWithData } = require('../shared/typst-generator.ts');
+const parent = { id: 'parent', label: '结论', section_role: 'conclusion', conclusion_kind: 'project', fields: [] };
+const children = Array.from({ length: 45 }, (_, i) => ({ id: `item${i}`, label: `子项目${i}`, section_role: 'conclusion', conclusion_kind: 'item', parent_group_id: parent.id,
+  fields: CONCLUSION_COLUMNS.map(column => ({ id: `${column.role}${i}`, code: `${column.role}${i}`, label: column.label, conclusion_role: column.role, type: 'text' })) }));
+assert.equal(compactConclusionChildren(parent, children).length, 45);
+const custom = structuredClone(children);
+custom[0].fields.push({ id: 'extra', code: 'extra', label: '备注', type: 'textarea' });
+assert.equal(compactConclusionChildren(parent, custom).length, 0, 'custom fields preserve original layout and order');
+const template = { name: '结论表格测试', groups: [parent, ...children], layout_options: {} };
+const data = Object.fromEntries(children.flatMap((group, i) => group.fields.map(field => [field.code, field.conclusion_role === 'item_name' ? `Test ${i}` : field.conclusion_role === 'limit' ? '≥90 MPa' : 'Line one\nLine two'])));
+const snapshot = JSON.stringify(template);
+const source = generateTypstWithData(template, data);
+assert.equal(JSON.stringify(template), snapshot, 'rendering does not mutate stored fields');
+assert.ok(source.includes('table.header(repeat: true'));
+const pdf = spawnSync('typst', ['compile', '--package-path', path.resolve('typst-packages'), '-', '-'], { input: source, maxBuffer: 8 * 1024 * 1024 });
+assert.ifError(pdf.error);
+assert.equal(pdf.status, 0, pdf.stderr?.toString());
+assert.equal(pdf.stdout.subarray(0, 5).toString(), '%PDF-');
+console.log('Conclusion table: four columns, safe fallback, immutable source and 45-row PDF compilation passed');

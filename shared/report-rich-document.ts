@@ -1,5 +1,7 @@
 import { REPORT_BODY_PARAGRAPH_GAP_EM } from './report-body-layout';
 import { reportTypstLineBox } from './report-line-box';
+import type { CellBinding } from './types';
+export type TemplateFieldReference = { id: string; label: string; binding: CellBinding };
 /** Versioned string payload keeps existing literal bindings/backups compatible. */
 export const REPORT_RICH_PREFIX = '@report-rich:v1:';
 export type ReportParagraphSpacing = { spaceBefore?: number; spaceAfter?: number; lineGap?: number };
@@ -21,15 +23,21 @@ export function cleanReportTextStyle(attrs: ReportTextStyle = {}): ReportTextSty
 }
 export type ReportRichMark = { type: 'bold' | 'italic' } | { type: 'reportTextStyle'; attrs?: ReportTextStyle };
 export interface ReportRichNode {
-  type: 'doc' | 'paragraph' | 'text' | 'hardBreak' | 'bulletList' | 'orderedList' | 'listItem' | 'reportSpacer';
+  type: 'doc' | 'paragraph' | 'text' | 'hardBreak' | 'bulletList' | 'orderedList' | 'listItem' | 'reportSpacer' | 'templateField';
   content?: ReportRichNode[];
   text?: string;
   marks?: ReportRichMark[];
-  attrs?: { start?: number; height?: string; textAlign?: 'left' | 'center' | 'right' } & ReportParagraphSpacing;
+  attrs?: { start?: number; height?: string; textAlign?: 'left' | 'center' | 'right'; reference?: TemplateFieldReference; templateEmptyPolicy?: 'hide'; templateSpacing?: ReportParagraphSpacing } & ReportParagraphSpacing;
 }
-const types = new Set(['doc', 'paragraph', 'text', 'hardBreak', 'bulletList', 'orderedList', 'listItem', 'reportSpacer']);
+const types = new Set(['doc', 'paragraph', 'text', 'hardBreak', 'bulletList', 'orderedList', 'listItem', 'reportSpacer', 'templateField']);
 function clean(node: ReportRichNode, depth = 0): ReportRichNode {
   if (!node || !types.has(node.type) || depth > 32) throw new Error('不支持的正文结构');
+  if (node.type === 'templateField') {
+    const ref = node.attrs?.reference;
+    if (!ref || typeof ref.id !== 'string' || !ref.id || typeof ref.label !== 'string' || !ref.binding || typeof ref.binding.source !== 'string') throw new Error('无效的模板字段');
+    const text = clean({ type: 'text', text: '', marks: node.marks });
+    return { type: 'templateField', attrs: { reference: JSON.parse(JSON.stringify(ref)) }, ...(text.marks ? { marks: text.marks } : {}) };
+  }
   if (node.type === 'reportSpacer') {
     const height = node.attrs?.height || '';
     if (!/^(?:\d+(?:\.\d+)?|\.\d+)(?:em|pt|cm|mm|in)$/.test(height)) throw new Error('无效留白高度');
@@ -49,7 +57,7 @@ function clean(node: ReportRichNode, depth = 0): ReportRichNode {
   }
   return { type: node.type,
     ...(node.type === 'orderedList' ? { attrs: { start: Number.isSafeInteger(node.attrs?.start) && node.attrs!.start! > 0 ? node.attrs!.start : 1 } } : {}),
-    ...(node.type === 'paragraph' && (Object.keys(cleanReportParagraphSpacing(node.attrs)).length || ['left', 'center', 'right'].includes(node.attrs?.textAlign || '')) ? { attrs: { ...cleanReportParagraphSpacing(node.attrs), ...(['left', 'center', 'right'].includes(node.attrs?.textAlign || '') ? { textAlign: node.attrs!.textAlign } : {}) } } : {}),
+    ...(node.type === 'paragraph' && (node.attrs?.templateSpacing || node.attrs?.templateEmptyPolicy === 'hide' || Object.keys(cleanReportParagraphSpacing(node.attrs)).length || ['left', 'center', 'right'].includes(node.attrs?.textAlign || '')) ? { attrs: { ...(node.attrs?.templateSpacing ? { templateSpacing: cleanReportParagraphSpacing(node.attrs.templateSpacing) } : {}), ...(node.attrs?.templateEmptyPolicy === 'hide' ? { templateEmptyPolicy: 'hide' as const } : {}), ...cleanReportParagraphSpacing(node.attrs), ...(['left', 'center', 'right'].includes(node.attrs?.textAlign || '') ? { textAlign: node.attrs!.textAlign } : {}) } } : {}),
     ...(node.content ? { content: node.content.map(child => clean(child, depth + 1)) } : {}) };
 }
 export function encodeReportRichDocument(doc: ReportRichNode): string {
@@ -90,13 +98,14 @@ export function readReportRichDocument(value: string): ReportRichNode {
   return { type: 'doc', content: content.length ? content : [{ type: 'paragraph' }] };
 }
 export function reportRichPlainText(value: string): string {
-  const walk = (node: ReportRichNode): string => node.type === 'text' ? node.text || '' : node.type === 'hardBreak' ? '\n'
+  const walk = (node: ReportRichNode): string => node.type === 'templateField' ? `〔${node.attrs?.reference?.label || '动态字段'}〕` : node.type === 'text' ? node.text || '' : node.type === 'hardBreak' ? '\n'
     : (node.content || []).map(walk).join(['doc', 'bulletList', 'orderedList', 'listItem'].includes(node.type) ? '\n' : '');
   return walk(readReportRichDocument(value));
 }
 export function richDocumentToTypst(doc: ReportRichNode, options: { explicitBold?: boolean; boldStroke?: boolean } = {}): string {
   const escape = (text: string) => text.replace(/([\\#$*_\[\]@<>`~])/g, '\\$1');
   const render = (node: ReportRichNode, index = 0, siblings: ReportRichNode[] = []): string => {
+    if (node.type === 'templateField') throw new Error('模板动态字段尚未解析，不能直接生成 PDF');
     if (node.type === 'text') {
       // Markup whitespace is collapsed by Typst, unlike the editor's pre-wrap.
       // Explicit text preserves glyph widths (including leading spaces), while

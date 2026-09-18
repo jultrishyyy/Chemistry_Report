@@ -1,3 +1,8 @@
+import { bindSelectedSampleRange } from '../../../../../shared/free-grid-direct-binding';
+import { revealInScrollPanes } from '../../../utils/scrollWithin';
+import { selectedSampleBindingKeys, selectedParameterKeys, sampleParameterBindings } from '../../../../../shared/free-grid-parameter-binding';
+import { assertReportSampleTargets, createReportSampleRegion, reportSampleRegionIssues } from '../../../../../shared/report-sample-region';
+import { rangeCellBindings } from '../../../../../shared/free-grid-range-binding';
 /**
  * FreeGridCanvas — F0 自由表格统一网格编辑器（原始记录模板 / 报告项目模板共用）。
  *
@@ -6,23 +11,30 @@
  *  - 合并写 free_table.spans[主格]；被盖格渲染时跳过（与出片端 renderFreeGridTypst 同口径）。
  *  - 两侧共用结构、选区、字体字号、对齐和行列操作；原始记录负责录入角色/公式/数字格式/Excel 导入，项目模板负责映射。
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import FormulaArguments from './FormulaArguments';
 import { Button, Input, InputNumber, Select, Radio, Tooltip, Popover, Modal, message, ColorPicker, Switch, Space } from 'antd';
 import {
   AlignCenterOutlined, AlignLeftOutlined, AlignRightOutlined, BgColorsOutlined, BoldOutlined,
   ClearOutlined, CloseOutlined, HolderOutlined, ItalicOutlined, MergeCellsOutlined, PlusOutlined,
-  LinkOutlined, PlusCircleOutlined, QuestionCircleOutlined, SettingOutlined, SplitCellsOutlined,
+  LinkOutlined, QuestionCircleOutlined, SettingOutlined, SplitCellsOutlined,
 } from '@ant-design/icons';
 import type { FieldDefinition, RecordTemplate, CellBinding, ExcelImportMapping } from '../../../../../shared/types';
 import { executeWithFullPrecision, type Formula } from '../../../../../shared/formula-engine';
 import { encodeFreeGridCellReference, resolveFreeGridCellReference } from '../../../../../shared/free-grid-formula';
-import { applyNumericRounding, numericRoundingLabel } from '../../../../../shared/numeric-rounding';
+import { numericRoundingLabel } from '../../../../../shared/numeric-rounding';
+import { roundFreeGridValue, freeGridNumberText } from '../../../../../shared/free-grid-number';
+import { setFreeGridTableNumberFormat } from '../../../../../shared/free-grid-number-settings';
 import BindingPickerModal, { BindingSummary, describeFreeGridCellSource } from '../../ReportEditor/BindingPickerModal';
-import { sampleBandForCell } from '../../../../../shared/free-grid-binding';
+import { recordSampleBands, sampleBandForCell } from '../../../../../shared/free-grid-binding';
 import AutoGrowTextArea from '../../AutoGrowTextArea';
+import RoundingIntervalsEditor from '../../RoundingIntervalsEditor';
 import { formulaAddressKeys, formulaRangeKeys, formulaRangeLabel } from '../../../../../shared/formula-grid-selection';
+import { compileGridFormula, displayGridFormula } from '../../../../../shared/free-grid-excel-formula';
+import { formulaCompletion, formulaInsertionRange, formulaParameterHint } from '../../../../../shared/formula-input';
+import { maskFormulaStrings, mapFormulaCode, SPREADSHEET_FUNCTIONS } from '../../../../../shared/spreadsheet-expression';
+import { FormulaError, invalidGridReference } from '../../../../../shared/formula-error';
 
 type FT = NonNullable<FieldDefinition['free_table']>;
 type FreeBandT = {
@@ -61,8 +73,9 @@ const ROUNDING_OPTIONS = [
   { value: 'truncate', label: '直接截尾' },
   { value: 'ceil', label: '向上修约' },
   { value: 'floor', label: '向下修约' },
-  { value: 'multiple_2', label: '修约到偶数' },
-  { value: 'multiple_5', label: '修约到 5' },
+  { value: 'multiple_2', label: '间隔 2（五成双）' },
+  { value: 'multiple_5', label: '间隔 5（五成双）' },
+  { value: 'piecewise', label: '按数值区间修约' },
 ];
 const NUMBER_FORMAT_OPTIONS = [
   { value: 'none', label: '不格式化' },
@@ -78,7 +91,7 @@ const excelColumnName = (index: number): string => {
   return out;
 };
 
-export default function FreeGridCanvas({ field, template, onChange, linkedRecord, editorMode = 'record', documentFont = 'Songti SC', documentSize = 10, staticContentMode = false, onCellFocus }: {
+export default function FreeGridCanvas({ field, template, onChange, linkedRecord, editorMode = 'record', documentFont = 'Songti SC', documentSize = 10, staticContentMode = false, onCellFocus, toolbarHost }: {
   field: FieldDefinition;
   /** 当前整张模板：公式编辑器用它选择其它自由表格，并以字段 code 保存稳定跨表引用。 */
   template?: RecordTemplate;
@@ -92,6 +105,8 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   staticContentMode?: boolean;
   /** 点击单元格时同步 PDF 到该视觉行。 */
   onCellFocus?: (rowId: string) => void;
+  /** undefined keeps embedded controls; null hides controls for inactive cover tables. */
+  toolbarHost?: HTMLElement | null;
 }) {
   const ft: FT = field.free_table || DEFAULT_FT;
   const cols = ft.columns || [];
@@ -271,6 +286,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
     const up = () => {
+      excelDragRef.current = null;
       dragAnchorRef.current = null;
       setDragging(false);
     };
@@ -280,6 +296,14 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   const onCellDown = (ri: number, ci: number, e: React.MouseEvent) => {
     // 右键由 onContextMenu 处理；这里若按左键逻辑先重置选区，会让多格批量配置退化成单格。
     if (e.button !== 0) return;
+    if (excelDraft) {
+      e.preventDefault();
+      if (keyAt(ri, ci) === excelDraft.target) return;
+      const selection = formulaInsertionRange(excelDraft.text, excelCaret.start, excelCaret.end);
+      excelDragRef.current = { r: ri, c: ci, text: excelDraft.text, ...selection };
+      insertExcelReference(ri, ci);
+      return;
+    }
     if (fx) {
       e.preventDefault();
       formulaDragRef.current = { r: ri, c: ci, sources: [...fx.sources], moved: false, target: fx.target };
@@ -301,6 +325,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     }
   };
   const onCellEnter = (ri: number, ci: number, e: React.MouseEvent) => {
+    if (excelDraft) { if (e.buttons === 1 && excelDragRef.current) insertExcelReference(ri, ci); return; }
     if (e.buttons === 1 && formulaDragRef.current) { selectFormulaRange(ri, ci); return; }
     // 只有按住左键且存在本次拖动锚点时才框选；从锚点重算，避免选区只能扩大不能收缩。
     const anchor = dragAnchorRef.current;
@@ -793,7 +818,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     setSel({ r0: rect.minR, c0: rect.minC, r1: rect.maxR, c1: rect.maxC });
     const cell = tableRef.current?.querySelector<HTMLElement>(`[data-grid-cell="${rect.minR}-${rect.minC}"]`);
     // 即使目标是录入格/公式格（没有输入控件），也要跟随选中格把画布滚到可见位置。
-    cell?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    revealInScrollPanes(cell);
     const el = tableRef.current?.querySelector<HTMLElement>(
       `textarea[data-gp="${rect.minR}-${rect.minC}"], input[data-gp="${rect.minR}-${rect.minC}"]`,
     );
@@ -807,6 +832,8 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   };
   const onCellKey = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>, ri: number, ci: number) => {
     const k = e.key;
+    if (k === 'F2' && !staticContentMode && !isReportProject && !fx) { e.preventDefault(); beginExcelFormula(); return; }
+    if (k === '=' && !staticContentMode && !isReportProject && !fx) { e.preventDefault(); beginExcelFormula('='); return; }
     // Enter 确认并下移；上下左右四向均可跳格（编辑短值场景下不保留光标左右移动）
     if (k === 'Enter' || k === 'ArrowDown') { e.preventDefault(); focusCell(ri + 1, ci); }
     else if (k === 'ArrowUp') { e.preventDefault(); focusCell(ri - 1, ci); }
@@ -814,6 +841,12 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     else if (k === 'ArrowRight') { e.preventDefault(); focusCell(ri, ci + 1); }
   };
   const onCanvasKey = (e: React.KeyboardEvent<HTMLTableElement>) => {
+    if (e.target === e.currentTarget && e.key === 'F2' && !staticContentMode && !isReportProject && !fx) {
+      e.preventDefault(); beginExcelFormula(); return;
+    }
+    if (e.target === e.currentTarget && e.key === '=' && !staticContentMode && !isReportProject && !fx) {
+      e.preventDefault(); beginExcelFormula('='); return;
+    }
     if (fx) {
       if (e.key === 'Escape') { e.stopPropagation(); requestCloseFormula(); }
       e.preventDefault();
@@ -833,14 +866,14 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   };
 
   // 画布拖拽调列宽/行高（首行右缘拖=列宽，首列下缘拖=行高；存 `${pt}pt`）
-  const resizeRef = useRef<null | { type: 'col' | 'row'; id: string; start: number; startSize: number }>(null);
+  const resizeRef = useRef<null | { type: 'col' | 'row'; id: string; start: number; startSize: number; scale: number }>(null);
   const gridRef = useRef({ cols, rows, update });
   gridRef.current = { cols, rows, update };
   useEffect(() => {
     const move = (e: MouseEvent) => {
       const rz = resizeRef.current; if (!rz) return;
       const { cols, rows, update } = gridRef.current;
-      const delta = (rz.type === 'col' ? e.clientX : e.clientY) - rz.start;
+      const delta = ((rz.type === 'col' ? e.clientX : e.clientY) - rz.start) / rz.scale;
       const pt = Math.max(16, Math.round((rz.startSize + delta) * 0.75));
       if (rz.type === 'col') update({ columns: cols.map(c => c.id === rz.id ? { ...c, width: `${pt}pt` } : c) });
       else update({ rows: rows.map(r => r.id === rz.id ? { ...r, height: `${pt}pt` } : r) });
@@ -853,12 +886,15 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   const startResize = (type: 'col' | 'row', id: string, e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation();
     const td = (e.currentTarget as HTMLElement).parentElement as HTMLElement;
-    resizeRef.current = { type, id, start: type === 'col' ? e.clientX : e.clientY, startSize: type === 'col' ? td.offsetWidth : td.offsetHeight };
+    resizeRef.current = { type, id, start: type === 'col' ? e.clientX : e.clientY, startSize: type === 'col' ? td.offsetWidth : td.offsetHeight, scale: gridZoom / 100 };
   };
 
   // ─── F1 报告侧：每格绑定原始记录 ────────────────────────────────
+  const [bindDirectSamples, setBindDirectSamples] = useState(false);
+  const [bindWholeParameter, setBindWholeParameter] = useState(false);
   const [bindOpen, setBindOpen] = useState(false);
   const [bindKey, setBindKey] = useState<string | null>(null);
+  const [bindKeys, setBindKeys] = useState<string[]>([]);
   const [bindMode, setBindMode] = useState<'normal' | 'sample-parameter'>('normal');
   const [bindInitialTarget, setBindInitialTarget] = useState<'content' | 'unit'>('content');
   const stripForBinding = (keys: string[]): Partial<FT> => {
@@ -877,13 +913,44 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     update({ cell_unit_bindings: next });
   };
   const setCellBindingAndUnit = (k: string, b: CellBinding | undefined, unit: CellBinding | undefined) => {
-    const keys = [k];
+    const keys = bindKeys.length ? bindKeys : [k];
+    if (bindDirectSamples) {
+      try {
+        const source = b && 'field_code' in b ? findRecordField(b.field_code) : undefined;
+        if (!source || !b) throw new Error('请点击来源表的试样列号／行号');
+        const patch = bindSelectedSampleRange(ft, keys, source, b);
+        update({ ...stripForBinding(keys), ...patch });
+        return;
+      } catch (error) { message.warning((error as Error).message); return false; }
+    }
+    if (bindWholeParameter && sourceFieldBand && b && ['record_free_cell_sample', 'record_free_formula_cell_sample', 'record_sample_index'].includes(b.source)) {
+      try {
+        const source = findRecordField(sourceFieldBand.source_field || '');
+        if (!source || !b) throw new Error('请选择试样参数来源');
+        const mapped = sampleParameterBindings(sourceFieldBand, keys, source, b);
+        const nextBindings = { ...cellBindings }, nextUnits = { ...cellUnitBindings };
+        keys.forEach(key => {
+          nextBindings[key] = mapped.bindings[key];
+          if (mapped.units[key]) nextUnits[key] = mapped.units[key];
+          else delete nextUnits[key];
+        });
+        update({ ...stripForBinding(keys), cell_bindings: nextBindings, cell_unit_bindings: nextUnits });
+        return;
+      } catch (error) { message.warning((error as Error).message); return false; }
+    }
     const nextBindings = { ...cellBindings };
     const nextUnits = { ...cellUnitBindings };
+    let mapped: Record<string, CellBinding>, mappedUnits: Record<string, CellBinding>;
+    try {
+      assertReportSampleTargets(ft, keys, b);
+      assertReportSampleTargets(ft, keys, unit);
+      mapped = rangeCellBindings(keys, ft, b, code => findRecordField(code)?.free_table);
+      mappedUnits = rangeCellBindings(keys, ft, unit, code => findRecordField(code)?.free_table);
+    } catch (error) { message.warning((error as Error).message); return false; }
     keys.forEach(key => {
-      if (b) nextBindings[key] = b;
-      else delete nextBindings[key];
-      if (unit) nextUnits[key] = unit;
+      if (b) nextBindings[key] = mapped[key];
+      else if (keys.length === 1) delete nextBindings[key];
+      if (unit) nextUnits[key] = mappedUnits[key];
       else delete nextUnits[key];
     });
     update({ ...stripForBinding(keys), cell_bindings: nextBindings, cell_unit_bindings: nextUnits });
@@ -909,6 +976,11 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   // ─── 样品带（F2 报告侧 matrix_code / 记录侧自引用；多带·同轴，区域选择）───────────
   const recordMatrices = (linkedRecord?.groups || []).flatMap(g => g.fields || [])
     .filter((f: any) => f.type === 'data_matrix').map((f: any) => ({ code: f.code, label: f.label || f.code }));
+  const reportSampleSources = (linkedRecord?.groups || []).flatMap(group => group.fields || [])
+    .filter(item => item.free_table && recordSampleBands(item.free_table).length === 1);
+  const [reportSampleSourceCode, setReportSampleSourceCode] = useState<string>();
+  const reportSampleSource = reportSampleSources.find(item => item.code === (reportSampleSourceCode || sourceFieldBand?.source_field || inheritedSourceFieldCode)) || reportSampleSources[0];
+  const sampleRegionIssues = isReportProject ? reportSampleRegionIssues(ft) : [];
   const [bandMatrixSel, setBandMatrixSel] = useState<string | undefined>(undefined);
   const bandMatrix = bandMatrixSel || matrixBand?.matrix_code || recordMatrices[0]?.code;
   const selRowId = range ? rows[range.minR]?.id : null;
@@ -939,7 +1011,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   };
   const startSampleBand = () => {
     if (!range) { message.info('先框选需要随试样重复的数据格；表头无需选择，会保持共享固定'); return; }
-    if (selfBands.length) {
+    if (!isReportProject && selfBands.length) {
       Modal.warning({
         title: '本表只能设置一个试样区域',
         content: `当前已有试样区域 ${describeSelfBandRange(selfBands[0])}。如需改为刚才选择的区域，请先点击已有试样区域右侧的“移除”，再重新框选设置；移除区域不会删除表格内容。`,
@@ -947,7 +1019,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       });
       return;
     }
-    const axis = guessAxis(range);
+    const axis = isReportProject && reportSampleSource?.free_table ? recordSampleBands(reportSampleSource.free_table)[0].axis : guessAxis(range);
     setPendingBand({ minR: range.minR, maxR: range.maxR, minC: range.minC, maxC: range.maxC, axis });
   };
   const describeSelfBandRange = (band: FreeBandT) => {
@@ -962,7 +1034,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   };
   const confirmSampleBand = () => {
     if (!pendingBand) return;
-    if (selfBands.length) {
+    if (!isReportProject && selfBands.length) {
       Modal.warning({
         title: '无法添加第二个试样区域',
         content: `本表已有试样区域 ${describeSelfBandRange(selfBands[0])}。请先移除原区域，再设置新区域。`,
@@ -978,10 +1050,16 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     const overlaps = selfBands.some(b => b.axis === pendingBand.axis
       && refs.some(ref => b.refs.includes(ref))
       && crossRefs.some(ref => !b.cross_refs?.length || b.cross_refs.includes(ref)));
-    if (overlaps) { message.warning('该区与已有试样区重叠，请重新框选'); return; }
-    update({ sample_bands: [{ id: `sb_${Date.now()}`, axis: pendingBand.axis, refs, cross_refs: crossRefs }], sample_band: undefined });
+    if (!isReportProject && overlaps) { message.warning('该区与已有试样区重叠，请重新框选'); return; }
+    if (isReportProject) {
+      try {
+        if (!reportSampleSource) throw new Error('关联原始记录中尚无试样区域，请先在原始记录模板设置');
+        const band = createReportSampleRegion(ft, reportSampleSource, refs, crossRefs);
+        update({ sample_bands: [band], sample_band: undefined });
+      } catch (error) { message.warning((error as Error).message); return; }
+    } else update({ sample_bands: [{ id: `sb_${Date.now()}`, axis: pendingBand.axis, refs, cross_refs: crossRefs }], sample_band: undefined });
     setPendingBand(null); setSel(null);
-    message.success('已设置试样区域，试录时可在表格上方新增试样');
+    message.success(isReportProject ? '已关联试样区域，可以按参数绑定试样列／行' : '已设置试样区域，试录时可在表格上方新增试样');
   };
   const removeSelfBand = (id: string) => {
     // 从完整带配置中移除，避免工具栏过滤后的 selfBands 覆盖报告/来源带，
@@ -1024,11 +1102,35 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     }
     return false;
   })();
+  const openDirectSampleBinding = () => {
+    const keys = editSelKeys.filter(key => !headerCells[key]);
+    if (!keys.length) { message.info('请框选试样数据格，不包含固定表头'); return; }
+    setBindDirectSamples(true);
+    setBindWholeParameter(false);
+    setBindKeys(keys);
+    setBindKey(keys[0]);
+    setBindInitialTarget('content');
+    setBindOpen(true);
+  };
+  const openParameterBinding = () => {
+    setBindDirectSamples(false);
+    if (!parameterKeys.length) return;
+    setBindWholeParameter(true);
+    setBindKeys(parameterKeys);
+    setBindKey(parameterKeys[0]);
+    setBindMode('sample-parameter');
+    setBindInitialTarget('content');
+    setBindOpen(true);
+  };
   const openBindingForSelectedCell = (target: 'content' | 'unit' = 'content') => {
-    if (!mappingCellKey) return;
-    setBindMode(canUseSampleSeries(mappingCellKey) ? 'sample-parameter' : 'normal');
+    setBindDirectSamples(false);
+    setBindWholeParameter(false);
+    const key = bindingSelectionKeys[0];
+    if (!key) return;
+    setBindKeys([...bindingSelectionKeys]);
+    setBindMode(canUseSampleSeries(key) ? 'sample-parameter' : 'normal');
     setBindInitialTarget(target);
-    setBindKey(mappingCellKey);
+    setBindKey(key);
     setBindOpen(true);
   };
   const clearSelectedBindings = () => {
@@ -1066,7 +1168,10 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     }
   };
   const openBindingAtCell = (ri: number, ci: number) => {
+    setBindDirectSamples(false);
+    setBindWholeParameter(false);
     const k = keyAt(ri, ci);
+    setBindKeys([k]);
     setSel({ r0: ri, c0: ci, r1: ri, c1: ci });
     setBindMode(canUseSampleSeries(k) ? 'sample-parameter' : 'normal');
     setBindInitialTarget('content');
@@ -1257,6 +1362,106 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       };
     });
   }
+  const [excelDraft, setExcelDraft] = useState<{ target: string; text: string } | null>(null);
+  const [gridZoom, setGridZoom] = useState(100);
+  const [functionBrowserOpen, setFunctionBrowserOpen] = useState(false);
+  const [functionSearch, setFunctionSearch] = useState('');
+  const [excelFocused, setExcelFocused] = useState(false);
+  const completionListRef = useRef<HTMLDivElement>(null);
+  const originalExcelText = useRef('');
+  const excelInputRef = useRef<import('antd').InputRef>(null);
+  const [excelCaret, setExcelCaret] = useState({ start: 0, end: 0 });
+  const [completionIndex, setCompletionIndex] = useState(0);
+  const excelDragRef = useRef<{ r: number; c: number; text: string; start: number; end: number } | null>(null);
+  const moveExcelCaret = (position: number) => {
+    setExcelCaret({ start: position, end: position });
+    requestAnimationFrame(() => {
+      excelInputRef.current?.focus();
+      excelInputRef.current?.input?.setSelectionRange(position, position);
+    });
+  };
+  const insertExcelReference = (r: number, c: number) => {
+    const drag = excelDragRef.current;
+    if (!drag || !excelDraft) return;
+    const a = cellAddress(keyAt(Math.min(r, drag.r), Math.min(c, drag.c)));
+    const b = cellAddress(keyAt(Math.max(r, drag.r), Math.max(c, drag.c)));
+    const address = a === b ? a : `${a}:${b}`;
+    setExcelDraft({ ...excelDraft, text: drag.text.slice(0, drag.start) + address + drag.text.slice(drag.end) });
+    moveExcelCaret(drag.start + address.length);
+  };
+  const completion = excelDraft && excelCaret.start === excelCaret.end ? formulaCompletion(excelDraft.text, excelCaret.start) : null;
+  useEffect(() => {
+    revealInScrollPanes(completionListRef.current?.querySelector<HTMLElement>('[aria-selected="true"]'));
+  }, [completionIndex, completion?.options.join('|')]);
+  const completeFunction = (name: string) => {
+    if (!excelDraft || !completion) return;
+    const suffix = excelDraft.text.slice(completion.end);
+    const insert = name + (/^\s*\(/.test(suffix) ? '' : '(');
+    setExcelDraft({ ...excelDraft, text: excelDraft.text.slice(0, completion.start) + insert + suffix });
+    setCompletionIndex(0);
+    moveExcelCaret(completion.start + insert.length);
+  };
+  const beginExcelFormula = (text?: string) => {
+    if (isReportProject) return;
+    if (!selCellKey || fx) return;
+    const existing = displayGridFormula(ft, cellFx[selCellKey]);
+    const original = existing ?? formulaText(cellFx[selCellKey]);
+    const draft = text ?? (original || '=');
+    originalExcelText.current = original;
+    setExcelDraft({ target: selCellKey, text: draft });
+    setExcelFocused(true);
+    moveExcelCaret(draft.length);
+  };
+  let excelSources: string[] = [];
+  if (excelDraft) {
+    try { excelSources = compileGridFormula(ft, excelDraft.text).sources; }
+    catch {
+      // Highlight references while parentheses/arguments are still being typed.
+      for (const match of maskFormulaStrings(excelDraft.text).matchAll(/\b[A-Za-z]+[1-9]\d*(?:\s*:\s*[A-Za-z]+[1-9]\d*)?\b(?!\s*\()/g)) {
+        try { excelSources.push(...compileGridFormula(ft, `SUM(${match[0]})`).sources); } catch { /* invalid/out-of-bounds address */ }
+      }
+    }
+  }
+  const applyExcelFormula = () => {
+    if (!excelDraft) return;
+    try {
+      if (cellFx[excelDraft.target] && excelDraft.text === originalExcelText.current) {
+        setExcelDraft(null); excelDragRef.current = null; tableRef.current?.focus(); return;
+      }
+      const [targetRow, targetCol] = excelDraft.target.split('::');
+      if (!ft.rows.some(row => row.id === targetRow) || !ft.columns.some(col => col.id === targetCol)) {
+        throw new Error('目标格已被删除，请按 Esc 取消并重新选择');
+      }
+      const formula = compileGridFormula(ft, excelDraft.text);
+      const previous = cellFx[excelDraft.target];
+      // Retain dynamic sample semantics when editing a legacy simple aggregate.
+      const aggregateNames: Record<string, string> = { sum: 'SUM', average: 'AVERAGE', min: 'MIN', max: 'MAX' };
+      const previousName = previous && aggregateNames[previous.type];
+      let formulaToSave: Formula = formula;
+      if (previousName) {
+        if (new RegExp(`^${previousName}\\(v\\d+(?:\\s*,\\s*v\\d+)*\\)$`, 'i').test(formula.expression!.replace(/\s/g, ''))) {
+          formulaToSave = { ...previous, sources: formula.sources };
+        } else if (previous.sample_scope !== 'selected') {
+          throw new Error('此公式随试样数量变化。请保留原聚合函数修改来源，避免丢失动态试样关系');
+        }
+      }
+      const target = `${field.code}::${excelDraft.target}`;
+      const visitsTarget = (source: string, owner: string, seen = new Set<string>()): boolean => {
+        const ref = resolveFreeGridCellReference(source, owner);
+        const node = `${ref.fieldCode}::${ref.cellKey}`;
+        if (node === target) return true;
+        if (seen.has(node)) return false;
+        seen.add(node);
+        return (sourceFieldOf(ref.fieldCode)?.free_table?.cell_formulas?.[ref.cellKey]?.sources || [])
+          .some(child => visitsTarget(child, ref.fieldCode, seen));
+      };
+      if (formula.sources.some(source => visitsTarget(source, field.code))) throw new Error('公式不能直接或间接引用自身');
+      update({ cell_formulas: { ...cellFx, [excelDraft.target]: formulaToSave }, ...stripFrom([excelDraft.target], 'cell_formulas') });
+      setExcelDraft(null);
+      excelDragRef.current = null;
+      tableRef.current?.focus();
+    } catch (error) { message.warning(error instanceof Error ? error.message : '公式无效'); }
+  };
   const openFx = () => {
     if (!selCellKey) return;
     const cur: any = cellFx[selCellKey];
@@ -1292,7 +1497,8 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
           expression: '', testValues: {},
         };
     formulaInitialDraft.current = JSON.stringify(draft);
-    setFx(draft);
+    // All entry points now edit in the formula bar, never open the old card.
+    beginExcelFormula();
     setCtxCard(null);
     setFormulaDetails(draft.type === 'custom');
     setFxSourceTableCode(field.code);
@@ -1355,6 +1561,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       if (!normalizedExpression) { message.info('请输入公式；可点击下方来源格变量插入'); return; }
       f.expression = normalizedExpression;
       f.params = {
+        ...(cellFx[fx.target]?.params?.expression_dialect === 'excel_v1' ? { expression_dialect: 'excel_v1' } : {}),
         source_aliases: Object.fromEntries(fx.sources.map(source => [source, sourceInfo(source).alias])),
         source_labels: Object.fromEntries(fx.sources.map(source => [source, sourceInfo(source).label])),
       };
@@ -1385,7 +1592,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       ? { visual_mode: 'calculation', operators: fx.operators, factor: fx.factor, offset: fx.offset }
       : { visual_mode: 'condition', conditions: fx.conditions, logic: fx.logic, pass: fx.pass, fail: fx.fail };
     const formula: Formula = fx.type === 'custom'
-      ? { type: 'custom', sources: fx.sources, expression: fx.expression.trim().replace(/^=\s*/, ''), params: { source_aliases: Object.fromEntries(fx.sources.map(source => [source, sourceInfo(source).alias])) } }
+      ? { type: 'custom', sources: fx.sources, expression: fx.expression.trim().replace(/^=\s*/, ''), params: { expression_dialect: cellFx[fx.target]?.params?.expression_dialect, source_aliases: Object.fromEntries(fx.sources.map(source => [source, sourceInfo(source).alias])) } }
       : { type: fx.type as Formula['type'], sources: fx.sources, params };
     const cache = new Map<string, any>();
     const visiting = new Set<string>();
@@ -1393,7 +1600,9 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       const info = sourceInfoFor(source, ownerFieldCode);
       const node = `${info.fieldCode}::${info.cellKey}`;
       if (cache.has(node)) return cache.get(node);
-      if (visiting.has(node)) return null;
+      if (visiting.has(node)) return new FormulaError('#CYCLE!', '公式存在循环引用');
+      const missing = invalidGridReference(info.sourceField?.free_table, info.cellKey);
+      if (missing) return missing;
       visiting.add(node);
       const nested = info.sourceField?.free_table?.cell_formulas?.[info.cellKey];
       let value: any;
@@ -1409,10 +1618,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
           : trial;
       }
       const sourceTable = info.sourceField?.free_table;
-      const sourceIsData = sourceTable?.cell_types?.[info.cellKey] === 'number'
-        || !!sourceTable?.input_cells?.[info.cellKey]
-        || !!sourceTable?.cell_formulas?.[info.cellKey];
-      value = applyNumericRounding(value, sourceTable?.cell_rounding?.[info.cellKey] ?? (sourceIsData ? sourceTable?.default_rounding : undefined));
+      value = roundFreeGridValue(value, sourceTable, info.cellKey);
       visiting.delete(node);
       cache.set(node, value);
       return value;
@@ -1420,19 +1626,11 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     const sourceValues: Record<string, any> = {};
     fx.sources.forEach(source => { sourceValues[source] = valueOf(source, field.code); });
     const hasValues = fx.sources.every(source => sourceValues[source] !== undefined && sourceValues[source] !== '' && sourceValues[source] !== null);
-    return hasValues ? executeWithFullPrecision(formula, sourceValues) : null;
+    return hasValues || formula.params?.expression_dialect === 'excel_v1' ? executeWithFullPrecision(formula, sourceValues) : null;
   })();
   const visualFormulaPreviewText = (() => {
     if (visualFormulaPreview === null || visualFormulaPreview === undefined) return '';
-    const roundedPreview = applyNumericRounding(visualFormulaPreview, ft.cell_rounding?.[fx?.target || ''] || ft.default_rounding);
-    if (typeof roundedPreview !== 'number' || !Number.isFinite(roundedPreview)) return String(roundedPreview);
-    const format = formulaFormatForTarget(fx?.target || '');
-    if (format?.mode === 'none') return String(roundedPreview);
-    if (!format) return String(roundedPreview);
-    const digits = Math.max(0, Math.min(10, format.digits ?? 2));
-    if (format.mode === 'scientific') return roundedPreview.toExponential(digits);
-    if (format.mode === 'significant') return roundedPreview.toPrecision(Math.max(1, digits));
-    return roundedPreview.toFixed(digits);
+    return freeGridNumberText(visualFormulaPreview, ft, fx?.target || '');
   })();
   const visualExplanation = (() => {
     if (!fx || fx.type !== 'visual' || !fx.sources.length) return '';
@@ -1454,13 +1652,15 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     const compact = ownerFieldCode === field.code && formula.type !== 'custom' ? formulaRangeLabel(ft, formula.sources || []) : undefined;
     const refs = compact ? [compact] : (formula.sources || []).map(source => sourceInfoFor(source, ownerFieldCode).label);
     if (formula.type === 'custom') {
-      let readable = String(formula.expression || '').replace(/^=\s*/, '');
-      (formula.sources || []).forEach(source => {
+      const replacements: Record<string, string> = {};
+      (formula.sources || []).forEach((source, index) => {
         const info = sourceInfoFor(source, ownerFieldCode);
         const savedAlias = formula.params?.source_aliases?.[source];
         const alias = typeof savedAlias === 'string' && savedAlias ? savedAlias : info.alias;
-        readable = readable.replace(new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), info.label);
+        replacements[alias] = info.label;
+        replacements[`v${index + 1}`] = info.label;
       });
+      const readable = mapFormulaCode(String(formula.expression || '').replace(/^=\s*/, ''), code => code.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, id => replacements[id] ?? id));
       return `=${readable}`;
     }
     if (formula.type === 'average') return `=AVERAGE(${refs.join(', ')})`;
@@ -1549,6 +1749,12 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     for (let ri = range.minR; ri <= range.maxR; ri++) for (let ci = range.minC; ci <= range.maxC; ci++) if (!covered.has(`${ri},${ci}`)) ks.push(keyAt(ri, ci));
     return ks;
   })();
+  const selectedSampleKeys = sourceFieldBand ? selectedSampleBindingKeys(ft, sourceFieldBand, editSelKeys) : [];
+  const parameterKeys = sourceFieldBand ? selectedParameterKeys(ft, sourceFieldBand, editSelKeys) : [];
+  const selectedWholeAxis = !!range && ((range.minR === 0 && range.maxR === rows.length - 1)
+    || (range.minC === 0 && range.maxC === cols.length - 1));
+  const bindingSelectionKeys = selectedWholeAxis && selectedSampleKeys.length ? selectedSampleKeys : editSelKeys;
+
   type CellStyle = NonNullable<FT['cell_styles']>[string];
   const commonCellStyleValue = <K extends keyof CellStyle>(prop: K): CellStyle[K] | undefined | '__mixed__' => {
     if (!editSelKeys.length) return undefined;
@@ -1687,17 +1893,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     const effectiveNumberFormatFor = (key: string) => cellNumFmt[key] ?? ft.default_number_fmt ?? { mode: 'none' as const, digits: 2 };
     const firstNumberFormat = effectiveNumberFormatFor(first);
     const commonNumberFormat = keys.every(key => JSON.stringify(effectiveNumberFormatFor(key)) === JSON.stringify(firstNumberFormat)) ? firstNumberFormat : undefined;
-    const effectiveRounding = firstRounding;
-    const effectiveNumberFormat = firstNumberFormat;
-    const numberPreview = (() => {
-      const rounded = Number(applyNumericRounding(10.125, effectiveRounding));
-      if (!Number.isFinite(rounded)) return '';
-      if (effectiveNumberFormat.mode === 'none') return String(rounded);
-      const digits = Math.max(0, Math.min(10, effectiveNumberFormat.digits ?? 2));
-      if (effectiveNumberFormat.mode === 'scientific') return rounded.toExponential(digits);
-      if (effectiveNumberFormat.mode === 'significant') return rounded.toPrecision(Math.max(1, digits));
-      return rounded.toFixed(digits);
-    })();
+    const numberPreview = freeGridNumberText(10.125, ft, first);
     return (
       <div style={{ width: 268, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ fontSize: 11, color: '#8c8c8c' }}>已选 {keys.length} 格 · 设置应用到全部所选</div>
@@ -1762,7 +1958,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
           </div>
         )}
         {isRecordEditor && curType === 'number' && (
-          <div><div style={lab}>数字格式 <span style={{ color: '#999' }}>（仅控制显示）</span></div>
+          <div><div style={lab}>数字格式 <span style={{ color: '#999' }}>（同时决定修约位数）</span></div>
             <div style={{ display: 'flex', gap: 6 }}>
               <Select size="small" style={{ flex: 1 }}
                 value={commonNumberFormat?.mode}
@@ -1786,18 +1982,12 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                 value={commonRounding?.mode}
                 placeholder={commonRounding ? undefined : '多种修约方式'} getPopupContainer={getPopupContainer}
                 onChange={(mode) => {
-                  const existing = latestFtRef.current.cell_rounding?.[first] ?? latestFtRef.current.default_rounding;
-                  setMapFor('cell_rounding', keys, { mode, digits: existing?.digits ?? 2 });
+                  setMapFor('cell_rounding', keys, { mode });
                 }}
                 options={ROUNDING_OPTIONS} />
-              {commonRounding && commonRounding.mode !== 'none' && commonRounding.mode !== 'multiple_2' && commonRounding.mode !== 'multiple_5' &&
-                <InputNumber size="small" style={{ width: 66 }} min={0} max={10} value={commonRounding.digits ?? 2}
-                  onChange={(digits) => {
-                    const existing = latestFtRef.current.cell_rounding?.[first] ?? latestFtRef.current.default_rounding ?? commonRounding;
-                    setMapFor('cell_rounding', keys, { ...existing, digits: (digits as number) ?? 2 });
-                  }} addonAfter="位" />}
             </div>
-            <div style={{ marginTop: 4, fontSize: 11, color: '#8c8c8c' }}>修约改变该格实际数值；下游公式引用修约后的值。未选择时保持完整精度。</div>
+            {commonRounding?.mode === 'piecewise' && <RoundingIntervalsEditor value={commonRounding} onChange={rule => setMapFor('cell_rounding', keys, rule)} />}
+            <div style={{ marginTop: 4, fontSize: 11, color: '#8c8c8c' }}>普通修约位数随数字格式，如小数 1 位对应间隔 0.2/0.5；分段规则按所填间隔。下游公式引用修约后的值，原始输入保留。</div>
           </div>
         )}
         {isRecordEditor && curType === 'number' && (
@@ -1838,8 +2028,9 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   const excelImport: ExcelImportMapping = ft.excel_import || { enabled: false, sheet_name: '', mode: 'auto' };
   const updateExcelImport = (patch: Partial<ExcelImportMapping>) => update({ excel_import: { ...excelImport, ...patch, mode: 'auto' } });
 
+  const gridBorder = staticContentMode ? '1px solid #eaecef' : `${Math.max(1, 100 / gridZoom)}px solid #a8b2c0`;
   const td: React.CSSProperties = {
-    border: '1px solid #eaecef',
+    border: gridBorder,
     padding: 0,
     // 原始记录 / 项目模板共用紧凑尺寸；长文字仍由输入框按最多三行展开。
     minWidth: 96,
@@ -1864,10 +2055,11 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
   const setWholeTableRowHeight = (value: number | null) => update({
     rows: rows.map(row => ({ ...row, height: value == null ? undefined : `${value}pt` })),
   });
+  const renderToolbar = (content: ReactNode) => toolbarHost === undefined ? content : toolbarHost ? createPortal(content, toolbarHost) : null;
   return (
     <div style={{ border: '1px solid #eef0f3', borderRadius: 8, padding: 10, paddingBottom: fx ? formulaPanelHeight + 24 : 10, background: '#fff' }}>
       {/* 主工具栏：尺寸 + 结构（常显、精简） */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+      {renderToolbar(<div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 8 }}>
         <span style={gLabel}>尺寸</span>
         <InputNumber size="small" min={1} max={50} style={{ width: 52 }} value={rows.length} onChange={setRowCount} />
         <span style={{ color: '#bbb' }}>×</span>
@@ -1910,39 +2102,34 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
         </>}
         {isRecordEditor && <>
           {(Object.values(cellNumFmt).some(rule => rule.mode !== 'none') || Object.values(cellRounding).some(rule => rule.mode !== 'none')) && <Popover trigger="click" content={<Space direction="vertical">
-            <span>单格规则优先于整表默认；整表未设置不代表单格未设置。</span>
+            <span>修改整表数字格式会统一数字格；之后仍可单独设置个别格子。</span>
+            {ft.default_number_fmt && <Button size="small" onClick={() => update(setFreeGridTableNumberFormat(latestFtRef.current, latestFtRef.current.default_number_fmt))}>将当前数字格式统一到整表</Button>}
             <Button size="small" onClick={() => update({ default_number_fmt: undefined, default_rounding: undefined, cell_number_fmt: {}, cell_rounding: {} })}>清除整表数字格式与修约</Button>
           </Space>}><Button size="small">单格规则：格式 {Object.values(cellNumFmt).filter(rule => rule.mode !== 'none').length} 格 / 修约 {Object.values(cellRounding).filter(rule => rule.mode !== 'none').length} 格</Button></Popover>}
           <span style={sep} />
-          <Tooltip title="原始记录负责统一数值精度；项目模板只映射结果，不重复格式化">
+          <Tooltip title="统一整表数字格的格式和位数，覆盖已有单格数字格式；不修改原始值、修约方式或表头。之后可单独设置个别格子。">
             <span style={gLabel}>整表数字</span>
           </Tooltip>
           <Select size="small" style={{ width: 104 }} value={ft.default_number_fmt?.mode || 'none'}
             onChange={(m) => {
               const existing = latestFtRef.current.default_number_fmt;
-              update({ default_number_fmt: m === 'none' ? undefined : { mode: m as NonNullable<FT['default_number_fmt']>['mode'], digits: existing?.digits ?? 2 } });
+              update(setFreeGridTableNumberFormat(latestFtRef.current, m === 'none' ? undefined : { mode: m as NonNullable<FT['default_number_fmt']>['mode'], digits: existing?.digits ?? 2 }));
             }}
             options={NUMBER_FORMAT_OPTIONS} />
-          {ft.default_number_fmt?.mode && <InputNumber size="small" style={{ width: 62 }} min={0} max={10} value={ft.default_number_fmt?.digits ?? 2}
+          {ft.default_number_fmt?.mode && <InputNumber aria-label="整表数字格式位数" size="small" style={{ width: 62 }} min={ft.default_number_fmt.mode === 'significant' ? 1 : 0} max={10} value={ft.default_number_fmt?.digits ?? 2}
             onChange={(v) => {
               const existing = latestFtRef.current.default_number_fmt;
-              if (existing) update({ default_number_fmt: { mode: existing.mode, digits: (v as number) ?? 2 } });
+              if (existing && v != null) update(setFreeGridTableNumberFormat(latestFtRef.current, { mode: existing.mode, digits: v as number }));
             }} addonAfter="位" />}
           <Tooltip title="修约改变实际数值，之后再应用数字显示格式；单元格配置可覆盖整表规则。">
             <span style={{ ...gLabel, marginLeft: 4 }}>整表修约</span>
           </Tooltip>
           <Select size="small" style={{ width: 148 }} value={ft.default_rounding?.mode || 'none'}
             onChange={(mode) => {
-              const existing = latestFtRef.current.default_rounding;
-              update({ default_rounding: mode === 'none' ? undefined : { mode: mode as NonNullable<FT['default_rounding']>['mode'], digits: existing?.digits ?? 2 } });
+              update({ default_rounding: mode === 'none' ? undefined : { mode: mode as NonNullable<FT['default_rounding']>['mode'] } });
             }}
             options={ROUNDING_OPTIONS} />
-          {ft.default_rounding && ft.default_rounding.mode !== 'none' && ft.default_rounding.mode !== 'multiple_2' && ft.default_rounding.mode !== 'multiple_5' &&
-            <InputNumber size="small" style={{ width: 62 }} min={0} max={10} value={ft.default_rounding.digits ?? 2}
-              onChange={(digits) => {
-                const existing = latestFtRef.current.default_rounding;
-                if (existing) update({ default_rounding: { ...existing, digits: (digits as number) ?? 2 } });
-              }} addonAfter="位" />}
+          {ft.default_rounding?.mode === 'piecewise' && <RoundingIntervalsEditor value={ft.default_rounding} onChange={rule => update({ default_rounding: rule })} />}
         </>}
         {!isRecordEditor && !staticContentMode && (ft.default_number_fmt || ft.default_rounding || Object.keys(cellNumFmt).length > 0 || Object.keys(cellRounding).length > 0) && (
           <Tooltip title="项目模板只继承并显示原始记录的数值格式和修约规则；请在原始记录模板中设置。">
@@ -1955,7 +2142,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
             : '右键或双击格子＝打开编辑卡（设角色/类型/单位等）；在格上按住拖动＝框选多格批量设置。'}>
           <QuestionCircleOutlined style={{ color: '#bbb', marginLeft: 4 }} />
         </Tooltip>
-      </div>
+      </div>)}
 
       {isRecordEditor && <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '8px 10px', marginBottom: 10, background: '#f6ffed', borderRadius: 6 }}>
         <Switch size="small" checked={excelImport.enabled} onChange={enabled => updateExcelImport({ enabled })} />
@@ -1974,8 +2161,31 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               </Tooltip>
             </>}
           </div>}
+      {isReportProject && linkedRecord && <div data-report-sample-region-toolbar="true" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <details><summary style={{ cursor: 'pointer', fontSize: 12 }}>区域设置（可选）</summary><Button size="small" disabled={!range || !reportSampleSources.length} onClick={startSampleBand}>
+          {sourceFieldBand ? '重设试样区' : '设为试样区'}
+        </Button></details>
+        <span style={{ fontSize: 12, color: '#8c8c8c' }}>{sourceFieldBand
+          ? `试样区域 ${describeSelfBandRange(sourceFieldBand)}；按参数绑定试样${sourceFieldBand.axis === 'row' ? '列' : '行'}`
+          : reportSampleSources.length ? '框选数据格后点击“选择试样行／列来源”，无需先设置区域。' : '请先在关联原始记录中设置试样区域。'}</span>
+      </div>}
+      {isReportProject && sourceFieldBand && sampleRegionIssues.length > 0 && <div data-sample-region-issues="true"
+        style={{ padding: '8px 10px', marginBottom: 10, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 4 }}>
+        <div>试样区已设置；{sampleRegionIssues.length} 项旧映射需要调整，原映射已保留。</div>
+        <div style={{ maxHeight: 150, overflowY: 'auto' }}>{sampleRegionIssues.map(issue => {
+          const [row, col] = issue.key.split('::');
+          const ri = rows.findIndex(item => item.id === row), ci = cols.findIndex(item => item.id === col);
+          return <div key={`${issue.part}:${issue.key}`} style={{ fontSize: 12 }}>
+            <Button size="small" type="link" disabled={ri < 0 || ci < 0} onClick={() => {
+              openBindingAtCell(ri, ci);
+              setBindInitialTarget(issue.part === 'unit' ? 'unit' : 'content');
+            }}>{cellAddress(issue.key)} · {issue.part === 'unit' ? '单位' : '内容'}</Button>
+            {issue.reason}
+          </div>;
+        })}</div>
+      </div>}
       {/* 选中操作栏：有选区才出现，按功能分组 */}
-      {hasSel && (
+      {hasSel && renderToolbar(
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 10, padding: '8px 10px', background: '#f7f9fc', border: '1px solid #eef0f3', borderRadius: 6 }}>
           <span style={{ ...gLabel, color: '#1677ff', fontWeight: 500 }}>已选 {selCount} 格</span>
           <span style={sep} />
@@ -2057,11 +2267,19 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
             {sourceFieldBand && <span style={{ fontSize: 12, color: '#08979c' }}>
               已关联“{findRecordField(sourceFieldBand.source_field || '')?.label || '原始记录表格'}” · 试样自动{sourceFieldBand.axis === 'row' ? '向下' : '向右'}展开
             </span>}
-            <Tooltip title={mappingCellKey ? '配置当前格子的内容来源和单位来源；表头样式不会被清除' : '映射只支持单个格子或单个合并格'}>
-              <Button size="small" type="primary" ghost disabled={!mappingCellKey} onClick={() => openBindingForSelectedCell('content')}>
+            <Tooltip title="可选中单格、整行或整列配置来源；逐试样来源按每个试样取值">
+              <Button size="small" type="primary" ghost disabled={!editSelKeys.length} onClick={() => openBindingForSelectedCell('content')}>
                 选择来源
               </Button>
             </Tooltip>
+            <Tooltip title="框选数据格后直接选择来源试样行／列，确认时自动建立试样映射，无需预先设置区域。">
+              <Button size="small" disabled={!editSelKeys.some(key => !headerCells[key]) || !reportSampleSources.length} onClick={openDirectSampleBinding}>选择试样行／列来源</Button>
+            </Tooltip>
+            {sourceFieldBand && <Tooltip title="选中参数表头或试样数据格，一次修改试样区域内该参数的全部来源；表头文字不变，单位自动跟随。合并参数请单格设置。">
+              <Button size="small" disabled={!parameterKeys.length} onClick={openParameterBinding}>
+                绑定试样{sourceFieldBand.axis === 'row' ? '列' : '行'}
+              </Button>
+            </Tooltip>}
             <Tooltip title={selectedBindingKeys.length ? '清除选区内的映射；多个映射会先确认' : '选区内没有映射'}>
               <Button size="small" disabled={!selectedBindingKeys.length} onClick={clearSelectedBindings}>清除来源</Button>
             </Tooltip>
@@ -2096,31 +2314,91 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       <Modal title="设置试样区域" open={!!pendingBand} onOk={confirmSampleBand} onCancel={() => setPendingBand(null)} okText="确认设置" cancelText="取消" destroyOnHidden>
         {pendingBand && <Space orientation="vertical" style={{ width: '100%' }}>
           <div>已选区域：{excelColumnName(pendingBand.minC)}{pendingBand.minR + 1}:{excelColumnName(pendingBand.maxC)}{pendingBand.maxR + 1}（支持局部表格）</div>
-          <Radio.Group value={pendingBand.axis} onChange={e => setPendingBand({ ...pendingBand, axis: e.target.value })}
+          {isReportProject && <Select style={{ width: '100%' }} aria-label="试样来源表格"
+            value={reportSampleSource?.code} options={reportSampleSources.map(item => ({ value: item.code, label: item.label || item.code }))}
+            onChange={code => {
+              setReportSampleSourceCode(code);
+              const source = reportSampleSources.find(item => item.code === code)!;
+              setPendingBand({ ...pendingBand, axis: recordSampleBands(source.free_table!)[0].axis });
+            }} />}
+          <Radio.Group disabled={isReportProject} value={pendingBand.axis} onChange={e => setPendingBand({ ...pendingBand, axis: e.target.value })}
             options={[{ value: 'row', label: '每行一个试样' }, { value: 'col', label: '每列一个试样' }]} optionType="button" />
-          <div style={{ color: '#8c8c8c' }}>初始 {bandRefsOf(pendingBand, pendingBand.axis).length} 个试样；录入时每次新增一{pendingBand.axis === 'row' ? '行' : '列'}。点击“确认设置”后生效。</div>
+          {isReportProject ? <div style={{ color: '#8c8c8c' }}>方向跟随来源。一个试样区可以包含多个参数列／行。例如每行一个试样时，可框选 B2:E2，同时纳入四个参数列；生成报告时按实际试样数展开。参数表头不选入区域。设置不会删除旧映射；不匹配的旧映射会在设置后列出，便于逐项调整。</div> : <div style={{ color: '#8c8c8c' }}>初始 {bandRefsOf(pendingBand, pendingBand.axis).length} 个试样；录入时每次新增一{pendingBand.axis === 'row' ? '行' : '列'}。点击“确认设置”后生效。</div>}
         </Space>}
       </Modal>
-      {!staticContentMode && (
-        <div style={{ display: 'grid', gridTemplateColumns: '72px 30px minmax(0, 1fr) auto', alignItems: 'stretch', marginBottom: 8, border: '1px solid #d9d9d9', borderRadius: 5, overflow: 'hidden', background: '#fff' }}>
+      {!staticContentMode && !isReportProject && (
+        <div style={{ display: 'grid', gridTemplateColumns: '72px 30px minmax(0, 1fr) auto', alignItems: 'stretch', marginBottom: 8, border: '1px solid #d9d9d9', borderRadius: 5, background: '#fff' }}>
           <div title="名称框：当前选中的单元格" style={{ padding: '5px 8px', borderRight: '1px solid #e8e8e8', textAlign: 'center', fontFamily: 'monospace', fontWeight: 650 }}>
             {selCellKey ? cellAddress(selCellKey) : '—'}
           </div>
           <div title="公式栏" style={{ padding: '5px 6px', color: '#722ed1', fontFamily: 'serif', fontStyle: 'italic', fontWeight: 700 }}>fx</div>
-          <div title={fx ? draftFormulaText : selectedFormulaText || '选中公式格后在这里核对完整公式'} style={{ padding: '5px 8px', color: (fx ? draftFormulaText : selectedFormulaText) ? '#262626' : '#bfbfbf', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {fx ? draftFormulaText : selectedFormulaText || '选中公式格后显示完整公式'}
+          <div style={{ position: 'relative', minWidth: 0 }}>
+          <Input ref={excelInputRef} aria-label="单元格公式" role="combobox" aria-autocomplete="list" aria-expanded={!!completion && excelFocused} variant="borderless" disabled={!selCellKey || !!fx}
+            placeholder="输入 =SUM(B2:B6)，Enter 应用，Esc 取消"
+            value={excelDraft?.text ?? (selCellKey ? displayGridFormula(ft, cellFx[selCellKey]) ?? selectedFormulaText : '')}
+            onFocus={() => { setExcelFocused(true); if (!excelDraft && selCellKey) beginExcelFormula(); }}
+            onBlur={() => setExcelFocused(false)}
+            onKeyUp={e => { const input = e.currentTarget; setExcelCaret({ start: input.selectionStart ?? 0, end: input.selectionEnd ?? 0 }); }}
+            onSelect={e => { const input = e.currentTarget; setExcelCaret({ start: input.selectionStart ?? 0, end: input.selectionEnd ?? 0 }); }}
+            onChange={e => {
+              if (selCellKey) setExcelDraft({ target: excelDraft?.target ?? selCellKey, text: e.target.value });
+              const position = e.target.selectionStart ?? e.target.value.length;
+              setExcelCaret({ start: position, end: e.target.selectionEnd ?? position });
+              setCompletionIndex(0);
+            }}
+            onKeyDown={e => {
+              e.stopPropagation();
+              if (e.nativeEvent?.isComposing) return;
+              if (completion && ['ArrowDown', 'ArrowUp', 'Tab', 'Enter'].includes(e.key)) {
+                e.preventDefault();
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') setCompletionIndex((completionIndex + (e.key === 'ArrowDown' ? 1 : -1) + completion.options.length) % completion.options.length);
+                else completeFunction(completion.options[completionIndex % completion.options.length]);
+                return;
+              }
+              if (e.key === 'Enter') { e.preventDefault(); applyExcelFormula(); }
+              if (e.key === 'Escape') { e.preventDefault(); setExcelDraft(null); excelDragRef.current = null; tableRef.current?.focus(); }
+            }} />
+          {completion && excelFocused && <div ref={completionListRef} role="listbox" aria-label="函数补全" style={{ position: 'absolute', left: 0, top: 'calc(100% + 4px)', zIndex: 30, width: 'min(360px, 100%)', minWidth: 160, maxHeight: 240, overflowY: 'auto', padding: 4, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, boxShadow: '0 6px 20px #0002' }}>
+            {completion.options.map((name, index) => <div key={name} role="option" aria-selected={index === completionIndex % completion.options.length}
+              onMouseDown={e => e.preventDefault()} onMouseEnter={() => setCompletionIndex(index)} onClick={() => completeFunction(name)}
+              style={{ padding: '7px 10px', borderRadius: 4, cursor: 'pointer', fontFamily: 'monospace', fontSize: 13, color: '#1f2937', background: index === completionIndex % completion.options.length ? '#e6f4ff' : '#fff' }}>
+              <span style={{ marginRight: 10, color: '#7c3aed', fontStyle: 'italic' }}>ƒ</span>{name}
+            </div>)}
+          </div>}
           </div>
-          <Button type="text" size="small" title={!selCellKey ? '请先单击选择一个结果格' : fx ? '请先应用或取消当前公式' : '为当前结果格设置公式'} disabled={!selCellKey || !!fx} onClick={openFx} style={{ borderRadius: 0, height: '100%' }}>
-            {selectedFormulaText ? '编辑' : '设置公式'}
-          </Button>
+          <Space size={4} style={{ padding: '2px 4px' }}>
+            <Button size="small" onMouseDown={e => e.preventDefault()} onClick={() => { setFunctionSearch(''); setFunctionBrowserOpen(true); }}>公式库</Button>
+            <Button type="primary" size="small" disabled={!excelDraft} onMouseDown={e => e.preventDefault()} onClick={applyExcelFormula}>完成</Button>
+          </Space>
+          {excelDraft && formulaParameterHint(excelDraft.text, excelCaret.start) && <div style={{ gridColumn: '1 / -1', padding: '4px 8px', fontSize: 12, color: '#595959', background: '#fafafa' }}>
+            {formulaParameterHint(excelDraft.text, excelCaret.start)}
+          </div>}
         </div>
       )}
+      <Modal title="公式库" open={functionBrowserOpen} onCancel={() => setFunctionBrowserOpen(false)} footer={null} width={600} styles={{ body: { maxHeight: '65vh', overflow: 'auto' } }}>
+        <Input aria-label="搜索公式函数" placeholder="搜索函数名或中文说明，例如 average、平均值" value={functionSearch} onChange={e => setFunctionSearch(e.target.value)} allowClear />
+        {SPREADSHEET_FUNCTIONS.map(name => {
+          const alias = ({ POW: 'POWER', VAR_S: 'VAR.S', VAR_P: 'VAR.P', STDEV_S: 'STDEV.S', STDEV_P: 'STDEV.P' } as Record<string, string>)[name] || name;
+          const item = formulaLibrary.find(item => item.signature.startsWith(alias + '('));
+          const extra: Record<string, [string, string]> = {
+            IF: ['条件判断', 'IF(条件, 成立时返回值, 不成立时返回值)'], IFERROR: ['错误兜底', 'IFERROR(表达式, 出错时返回值)'],
+            AND: ['同时满足所有条件', 'AND(条件1, 条件2, …)'], OR: ['满足任一条件', 'OR(条件1, 条件2, …)'], NOT: ['条件取反', 'NOT(条件)'], TRUNC: ['直接截断', 'TRUNC(数值, 小数位数)'],
+          };
+          const label = item?.name || extra[name]?.[0] || name;
+          const signature = item?.signature || extra[name]?.[1] || `${name}(数值参数)`;
+          if (!`${name} ${label} ${item?.description || ''}`.toLowerCase().includes(functionSearch.trim().toLowerCase())) return null;
+          return <div key={name} style={{ padding: '12px 0', borderBottom: '1px solid #f0f0f0' }}>
+            <strong>{name} · {label}</strong><div style={{ marginTop: 4, fontFamily: 'monospace' }}>{signature}</div>
+            {item?.description && <div style={{ marginTop: 4, color: '#595959' }}>{item.description}</div>}
+          </div>;
+        })}
+      </Modal>
       {fx && typeof document !== 'undefined' && createPortal(
         <section ref={formulaPanelRef} aria-label="公式编辑面板" data-formula-dirty={JSON.stringify(fx) !== formulaInitialDraft.current ? 'true' : undefined} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); requestCloseFormula(); } }} style={{ position: formulaHost ? 'absolute' : 'fixed', ...formulaPanelBounds, zIndex: formulaHost ? 20 : 1050, maxHeight: 'min(45dvh, 440px)', overflow: 'auto', boxSizing: 'border-box', padding: '0 10px 10px', background: '#fff', border: '1px solid #91caff', borderRadius: 8, boxShadow: '0 -4px 24px #0002' }}>
         <div style={{ position: 'sticky', top: 0, zIndex: 2, padding: '10px 0', background: '#fff', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
           <Button size="small" style={{ color: '#d46b08' }} onClick={() => {
             const [r, c] = fx.target.split('::');
-            tableRef.current?.querySelector(`[data-grid-cell="${rows.findIndex(x => x.id === r)}-${cols.findIndex(x => x.id === c)}"]`)?.scrollIntoView({ block: 'center', inline: 'nearest' });
+            revealInScrollPanes(tableRef.current?.querySelector(`[data-grid-cell="${rows.findIndex(x => x.id === r)}-${cols.findIndex(x => x.id === c)}"]`), { block: 'center' });
           }}>结果填入 {cellAddress(fx.target)} ↗</Button>
           <Select aria-label="公式计算方式" size="small" style={{ width: 150 }} value={fx.type} onChange={(t) => { setFx({ ...fx, type: t }); if (t === 'custom') setFormulaDetails(true); }}
             options={Object.entries(FX_LABELS).map(([v, l]) => ({ value: v, label: l }))} />
@@ -2145,7 +2423,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               const ref = resolveFreeGridCellReference(source, field.code);
               if (ref.fieldCode !== field.code) { setFxSourceTableCode(ref.fieldCode); setFormulaDetails(true); return; }
               const [r, c] = ref.cellKey.split('::');
-              tableRef.current?.querySelector(`[data-grid-cell="${rows.findIndex(x => x.id === r)}-${cols.findIndex(x => x.id === c)}"]`)?.scrollIntoView({ block: 'center', inline: 'nearest' });
+              revealInScrollPanes(tableRef.current?.querySelector(`[data-grid-cell="${rows.findIndex(x => x.id === r)}-${cols.findIndex(x => x.id === c)}"]`), { block: 'center' });
             }}>{sourceInfo(source).label}</Button>
             <Button size="small" type="text" aria-label={`移除来源 ${sourceInfo(source).label}`} icon={<CloseOutlined />} onClick={() => {
               const ref = resolveFreeGridCellReference(source, field.code); toggleFxSource(ref.cellKey, ref.fieldCode);
@@ -2435,12 +2713,19 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
           </>;
         })()}
       </Modal>
-      <div style={{ overflowX: 'auto', border: '1px solid #eaecef', borderRadius: 6, display: 'block', width: '100%', maxWidth: '100%' }}>
+      {!staticContentMode && <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+        <span style={{ color: '#8c8c8c', fontSize: 12 }}>视图缩放</span>
+        <Button size="small" aria-label="缩小表格" disabled={gridZoom <= 50} onClick={() => setGridZoom(Math.max(50, gridZoom - 10))}>−</Button>
+        <Select size="small" aria-label="表格缩放比例" style={{ width: 90 }} value={gridZoom} onChange={setGridZoom}
+          options={[...new Set([50, 60, 75, 80, 90, 100, 110, 125, 150, gridZoom])].sort((a, b) => a - b).map(value => ({ value, label: `${value}%` }))} />
+        <Button size="small" aria-label="放大表格" disabled={gridZoom >= 150} onClick={() => setGridZoom(Math.min(150, gridZoom + 10))}>＋</Button>
+      </div>}
+      <div style={{ overflow: 'auto', maxHeight: staticContentMode ? undefined : '65vh', border: '1px solid #a8b2c0', borderRadius: 6, display: 'block', width: '100%', maxWidth: '100%' }}>
         <table ref={tableRef} tabIndex={-1} onKeyDown={onCanvasKey}
-          style={{ borderCollapse: 'collapse', width: '100%', minWidth: 38 + cols.length * 96, tableLayout: 'fixed', userSelect: dragging || fx ? 'none' : undefined, outline: 'none' }}>
+          style={{ zoom: gridZoom / 100, borderCollapse: 'collapse', width: '100%', minWidth: 38 + cols.length * 96, tableLayout: 'fixed', userSelect: dragging || fx || excelDraft ? 'none' : undefined, outline: 'none' }}>
           <thead>
             <tr>
-              <th style={{ width: 38, minWidth: 38, height: 22, background: '#fafafa', border: '1px solid #eaecef' }} />
+              <th style={{ position: 'sticky', left: 0, top: 0, zIndex: 9, width: 38, minWidth: 38, height: 22, background: '#f1f5f9', border: gridBorder }} />
               {cols.map((c, ci) => {
                 const active = dragAxis?.axis === 'col' && ci >= dragAxis.start && ci <= dragAxis.end;
                 return (
@@ -2451,7 +2736,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                     onDrop={(e) => dropAxisAt('col', ci, e)}
                     onDragEnd={() => setDragAxis(null)}
                     title={`${excelColumnName(ci)} 列：拖动中间图标调整位置；拖动右边缘调整列宽；点击选中整列`}
-                    style={{ position: 'relative', minWidth: 96, width: c.width, height: 24, padding: 0, textAlign: 'center', color: active ? '#1677ff' : '#a0a6ad', background: active ? '#e6f4ff' : '#fafafa', border: '1px solid #eaecef', cursor: 'grab' }}>
+                    style={{ position: 'sticky', top: 0, zIndex: 8, minWidth: 96, width: c.width, height: 24, padding: 0, textAlign: 'center', color: active ? '#1677ff' : '#475569', background: active ? '#e6f4ff' : '#f1f5f9', border: gridBorder, cursor: 'grab' }}>
                     <span style={{ display: 'inline-flex', height: '100%', width: '100%', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 12, fontWeight: 650 }}>
                       {excelColumnName(ci)}
                       <HolderOutlined style={{ pointerEvents: 'none', fontSize: 12, opacity: 0.55 }} />
@@ -2477,7 +2762,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                   onDrop={(e) => dropAxisAt('row', ri, e)}
                   onDragEnd={() => setDragAxis(null)}
                   title={`第 ${ri + 1} 行：拖动中间图标调整位置；拖动下边缘调整行高；点击选中整行`}
-                  style={{ position: 'relative', width: 38, minWidth: 38, padding: 0, textAlign: 'center', color: dragAxis?.axis === 'row' && ri >= dragAxis.start && ri <= dragAxis.end ? '#1677ff' : '#a0a6ad', background: dragAxis?.axis === 'row' && ri >= dragAxis.start && ri <= dragAxis.end ? '#e6f4ff' : '#fafafa', border: '1px solid #eaecef', cursor: 'grab' }}>
+                  style={{ position: 'sticky', left: 0, zIndex: 7, width: 38, minWidth: 38, padding: 0, textAlign: 'center', color: dragAxis?.axis === 'row' && ri >= dragAxis.start && ri <= dragAxis.end ? '#1677ff' : '#475569', background: dragAxis?.axis === 'row' && ri >= dragAxis.start && ri <= dragAxis.end ? '#e6f4ff' : '#f1f5f9', border: gridBorder, cursor: 'grab' }}>
                   <span style={{ display: 'inline-flex', height: '100%', width: '100%', alignItems: 'center', justifyContent: 'center', gap: 2, fontSize: 11, fontWeight: 650 }}>
                     {ri + 1}
                     <HolderOutlined style={{ pointerEvents: 'none', fontSize: 10, opacity: 0.5 }} />
@@ -2512,9 +2797,9 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                   const bindableReportCell = isReportProject && !!linkedRecord && !lockedSampleCell;
                   const hasFx = cellFx[k];
                   // 公式编辑尚未保存时，也应立即把目标格显示为公式格，避免误以为仍是普通录入格。
-                  const isSrc = !!(fx && fx.sources.includes(k));
-                  const isFxTarget = !!fx && fx.target === k;
-                  const displayedFxType = isFxTarget ? fx?.type : (hasFx as any)?.type;
+                  const isSrc = !!(fx && fx.sources.includes(k)) || excelSources.includes(k);
+                  const isFxTarget = (!!fx && fx.target === k) || excelDraft?.target === k;
+                  const displayedFxType = isReportProject && binding ? undefined : isFxTarget ? (excelDraft ? 'custom' : fx?.type) : (hasFx as any)?.type;
                   const inSel = !!range && ri >= range.minR && ri <= range.maxR && ci >= range.minC && ci <= range.maxC;
                   const isChoice = !!(cellOptions[k]?.length || cellTypes[k] === 'choice');
                   const configuredStyle = cellStyles[k];
@@ -2578,12 +2863,13 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                       onMouseDown={(e) => { onCellFocus?.(r.id); onCellDown(ri, ci, e); }}
                       onMouseEnter={(e) => onCellEnter(ri, ci, e)}
                       onDoubleClick={(e) => {
-                        if (fx) { e.preventDefault(); return; }
+                        if (fx || excelDraft) { e.preventDefault(); return; }
                         if (isReportProject && linkedRecord) { e.preventDefault(); openBindingAtCell(ri, ci); return; }
                         setSel({ r0: ri, c0: ci, r1: ri, c1: ci }); initUnitMode(keyAt(ri, ci)); setCtxCard({ x: e.clientX, y: e.clientY });
                       }}
                       onContextMenu={(e) => {
                         e.preventDefault();
+                        if (excelDraft) return;
                         const insideCurrentSelection = !!range
                           && ri >= range.minR && ri <= range.maxR
                           && ci >= range.minC && ci <= range.maxC;
@@ -2614,7 +2900,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                         <div style={{ minHeight: 42, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '4px 6px', ...cellTextStyle }}>
                           <Tooltip title={<div><div>内容：<BindingSummary value={binding!} linkedRecord={linkedRecord || null} /></div>{unitBinding && <div style={{ marginTop: 5 }}>单位：<BindingSummary value={unitBinding} linkedRecord={linkedRecord || null} /></div>}</div>}>
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: '#08979c', fontSize: 12, fontWeight: 600, ...explicitCellTextStyle }}>
-                              <LinkOutlined />已关联试样数据
+                              <LinkOutlined aria-label="已关联试样数据" />
                             </span>
                           </Tooltip>
                           <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1677ff', fontSize: 12, ...explicitCellTextStyle }}>
@@ -2623,10 +2909,10 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                         </div>
                       ) : displayedFxType ? (
                         <div style={{ padding: isFxTarget ? '22px 6px 4px' : '4px 6px', color: '#722ed1', fontWeight: 650, ...cellTextStyle, fontSize: 10, lineHeight: 1.35 }}
-                          title={isFxTarget ? draftFormulaText : formulaText(hasFx)}>
+                          title={isFxTarget ? excelDraft?.text ?? draftFormulaText : formulaText(hasFx)}>
                           <div>fx · {FX_LABELS[displayedFxType] || '自定义'}</div>
                           <div style={{ marginTop: 2, fontFamily: 'monospace', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {isFxTarget ? draftFormulaText : formulaText(hasFx)}
+                            {isFxTarget ? excelDraft?.text ?? draftFormulaText : formulaText(hasFx)}
                           </div>
                         </div>
                       ) : bindableReportCell ? (
@@ -2643,47 +2929,33 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                             cursor: 'cell',
                             color: binding ? undefined : '#8c8c8c',
                             fontSize: 12,
-                            border: binding ? 'none' : '1px dashed #d9d9d9',
+                            border: 'none',
                             borderRadius: 4,
                             margin: 4,
                             ...cellTextStyle,
                           }}
-                          title={binding ? '单击选中；双击可修改映射' : undefined}
+                          title={binding ? '单击选中；双击可修改映射或自定义文字' : undefined}
                         >
+                          {!binding && (cells[k]?.trim() || inSel) && <AutoGrowTextArea size="small" variant="borderless" value={cells[k] ?? ''}
+                            placeholder="" data-gp={`${ri}-${ci}`}
+                            onDoubleClick={e => e.stopPropagation()}
+                            onChange={e => setCellText(ri, ci, e.target.value)} style={cellTextStyle} />}
                           {binding ? <>
-                            {isHeader && <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#262626', fontSize: 14, lineHeight: 1.25, fontWeight: 700, ...explicitCellTextStyle }}>
+                            <span style={{ maxWidth: '100%', whiteSpace: 'pre-wrap', color: '#262626', fontSize: 14, lineHeight: 1.25, ...explicitCellTextStyle }}>
                               {bindingShortText(binding)}
-                            </span>}
+                            </span>
                             <Tooltip title={<div><div>内容：<BindingSummary value={binding} linkedRecord={linkedRecord || null} /></div>{unitBinding && <div style={{ marginTop: 5 }}>单位：<BindingSummary value={unitBinding} linkedRecord={linkedRecord || null} /></div>}</div>}>
                               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: unitBinding ? '#08979c' : '#1677ff', fontSize: 10, lineHeight: 1.2, fontWeight: 500, ...explicitCellTextStyle }}>
-                                <LinkOutlined />已关联映射
+                                <LinkOutlined aria-label="已关联映射" />
                               </span>
                             </Tooltip>
-                          </> : unitBinding ? <>
-                            {isHeader && cells[k]?.trim() && <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#262626', fontSize: 14, lineHeight: 1.25, fontWeight: 700, ...explicitCellTextStyle }}>
-                              {cells[k].trim()}
-                            </span>}
-                            <Tooltip title={<div>单位：<BindingSummary value={unitBinding} linkedRecord={linkedRecord || null} /></div>}>
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#d48806', fontSize: 10, lineHeight: 1.2, fontWeight: 500, ...explicitCellTextStyle }}>
-                                <LinkOutlined />已关联单位
-                              </span>
-                            </Tooltip>
-                            <button
-                              type="button"
+                          </> : !cells[k]?.trim() && !unitBinding ? (
+                            <button type="button" aria-label="添加映射" title="选择来源"
                               onClick={(e) => { e.stopPropagation(); openBindingAtCell(ri, ci); }}
-                              style={{ padding: 0, border: 0, background: 'transparent', color: '#1677ff', cursor: 'pointer', font: 'inherit', fontSize: 11, fontWeight: 400, ...explicitCellTextStyle }}
-                            >
-                              添加内容映射
+                              style={{ padding: '5px 8px', border: 0, background: 'transparent', color: '#1677ff', cursor: 'pointer' }}>
+                              <PlusOutlined />
                             </button>
-                          </> : (
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); openBindingAtCell(ri, ci); }}
-                              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 8px', border: 0, background: 'transparent', color: '#1677ff', cursor: 'pointer', font: 'inherit', fontWeight: 500, ...explicitCellTextStyle }}
-                            >
-                              <PlusCircleOutlined />点击添加映射
-                            </button>
-                          )}
+                          ) : null}
                         </div>
                       ) : binding ? (
                         <div style={{ fontSize: 11, padding: '4px 6px', ...cellTextStyle }} title="绑定原始记录">
@@ -2746,7 +3018,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
         </div>,
         document.body,
       )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11, color: '#8c8c8c', alignItems: 'center' }}>
+      {toolbarHost === undefined && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11, color: '#8c8c8c', alignItems: 'center' }}>
         {(staticContentMode ? [
           { c: '#fff', t: '固定说明文字（直接输入）' },
           { c: '#f4f6fa', t: '表头（可选）' },
@@ -2784,29 +3056,27 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               : '拖动框选多格，选中后在上方操作栏合并、标记、配置公式或设置试样区域'}>
           <Button size="small" type="text" shape="circle" icon={<QuestionCircleOutlined />} aria-label="表格编辑帮助" />
         </Tooltip>
-      </div>
+      </div>}
       {linkedRecord && bindOpen && activeBindKey && (
         <BindingPickerModal
           open={bindOpen}
-          value={cellBindings[activeBindKey] || (bindMode === 'sample-parameter' && sourceFieldBand?.source_field
+          value={bindDirectSamples ? { source: 'record_free_cell_sample', field_code: inheritedSourceFieldCode || reportSampleSource?.code || '', cell_key: '' } : cellBindings[activeBindKey] || (bindMode === 'sample-parameter' && sourceFieldBand?.source_field
             ? { source: 'record_free_cell_sample', field_code: sourceFieldBand.source_field, cell_key: '' }
             : headerCells[activeBindKey] && inheritedSourceFieldCode
               ? { source: 'record_free_template_cell', field_code: inheritedSourceFieldCode, cell_key: activeBindKey }
             : { source: 'literal', text: cells[activeBindKey] || '' })}
           linkedRecord={linkedRecord}
-          freeGridFieldCode={bindMode === 'sample-parameter' ? sourceFieldBand?.source_field : undefined}
-          compactFreeGrid={!!inheritedSourceFieldCode}
+          compactFreeGrid={bindDirectSamples}
+          allowedSources={bindDirectSamples ? ['record_free_cell_sample', 'record_free_formula_cell_sample'] : undefined}
+          sampleSelectionShape={bindDirectSamples ? { rows: new Set(bindKeys.map(key => key.split('::')[0])).size, columns: new Set(bindKeys.map(key => key.split('::')[1])).size } : undefined}
+          parameterAxisBinding={bindWholeParameter || bindDirectSamples}
+          freeGridAllowSample={bindDirectSamples || (bindKeys.length ? bindKeys : [activeBindKey]).every(key => canUseSampleSeries(key))}
           initialCompactTarget={bindInitialTarget}
           sampleUnitMode={bindMode === 'sample-parameter' && canUseSampleSeries(activeBindKey)}
           unitValue={cellUnitBindings[activeBindKey]}
-          contentValuePresent={!!cellBindings[activeBindKey]}
-          allowedSources={bindMode === 'sample-parameter'
-            ? ['record_free_cell_sample', 'record_free_formula_cell_sample', 'record_sample_index', 'record_free_cell', 'record_free_formula_cell', 'record_free_template_cell']
-            : !sourceFieldBand && cellInBand(activeBindKey)
-            ? ['literal', 'record_field', 'record_cell', 'record_summary', 'record_header', 'record_cell_sample', 'record_sample_label', 'record_sample_index']
-            : ['literal', 'order', 'sample', 'test', 'record_field', 'record_cell', 'record_summary', 'record_header', 'record_free_cell', 'record_free_formula_cell', 'record_free_template_cell', 'record_free_cell_unit']}
+          contentValuePresent={bindDirectSamples || !!cellBindings[activeBindKey]}
           bandMatrixCode={!sourceFieldBand && cellInBand(activeBindKey) ? matrixBand?.matrix_code : undefined}
-          title={bindMode === 'sample-parameter' ? '选择每个试样要显示的数据' : cellInBand(activeBindKey) ? '选择每个试样要显示的数据' : '选择这个位置要显示什么'}
+          title={bindDirectSamples ? `选择试样行／列来源（目标 ${bindKeys.length} 格）` : bindWholeParameter ? `绑定试样${sourceFieldBand?.axis === 'row' ? '列' : '行'}（${bindKeys.length} 格，单位自动跟随）` : bindKeys.length > 1 ? `为所选 ${bindKeys.length} 格设置来源（整行／列选择仅绑定试样区内的数据格）` : '设置内容来源与单位'}
           onChange={(b) => setCellBinding(activeBindKey, b)}
           onUnitChange={(b) => setCellUnitBinding(activeBindKey, b)}
           onCombinedChange={(b, unit) => setCellBindingAndUnit(activeBindKey, b, unit)}

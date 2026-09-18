@@ -1,4 +1,5 @@
 import type React from 'react';
+import { revealInScrollPanes } from './scrollWithin';
 
 const FOCUSABLE = [
   'textarea:not(:disabled)',
@@ -25,12 +26,12 @@ export function markSpreadsheetActiveCell(target: HTMLElement | null) {
 
 function focusAndSelect(element: HTMLElement | null) {
   if (!element) return;
-  element.focus();
+  element.focus({ preventScroll: true });
   markSpreadsheetActiveCell(element);
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
     element.select();
   }
-  element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  revealInScrollPanes(element);
 }
 
 type VisualTableGrid = {

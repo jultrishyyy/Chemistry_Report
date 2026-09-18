@@ -486,6 +486,14 @@ body {
   }
 }
 /* Workbook review: constrain every flex/table child so wide worksheets never expand the dialog. */
+.fe-section-format-card.fe-section-format-card--image {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+.fe-section-format-card--image .fe-section-format-column {
+  overflow: visible;
+}
 .excel-import-modal .ant-modal-content { min-width: 0; }
 .excel-import-modal .ant-modal-title { padding-right: 24px; overflow-wrap: anywhere; }
 .excel-import-filename { font-size: 13px; font-weight: 400; color: #667085; }
@@ -550,7 +558,7 @@ body {
 }
 .report-paper-scroll { width: 100%; min-width: 0; overflow-x: auto; }
 .report-paper-scaled { margin: 0 auto; }
-.report-paper-scaled > .report-document-paper { width: 100%; max-width: none; box-sizing: border-box; padding: 52px 48px 28px; margin: 8px 0 24px; overflow: visible; }
+.report-paper-scaled > .report-document-paper { width: 100%; max-width: none; box-sizing: border-box; padding: var(--report-paper-inset, 48px); margin: 8px 0 24px; overflow: visible; }
 .report-document-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding-top: 4px; }
 .report-document-editor .report-document-toolbar { flex-shrink: 0; }
 .report-idle-text-tools { display: contents; }
@@ -570,28 +578,37 @@ body {
 .report-figure-edge-after { bottom: -7px; }
 .report-figure-edge:hover, .report-figure-edge:focus-visible { background: #91caff33; }
 .report-figure-edge:hover, .report-figure-edge:focus-visible { outline: 1px solid #69b1ff; }
-.report-document-paper .report-document-group { margin-bottom: 18px; }
+.report-document-paper .report-group-flow { margin: 0 0 var(--report-group-gap, var(--report-field-gap, .6em)); }
+.report-document-paper .report-group-flow.report-group-has-heading { margin-top: var(--report-section-gap, .8em); }
+.report-document-paper .report-document-group { margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; outline: none; }
+.report-document-paper .report-document-group:focus { outline: none; }
 .report-document-paper .report-group-tools { display: none !important; }
 .report-document-paper .report-group-active > .report-group-tools,
 .report-document-paper .report-document-group:focus-within > .report-group-tools { display: flex !important; padding-bottom: 8px; }
-.report-document-paper .report-section-heading { font-size: 1.08em; font-weight: 600; margin: 0 0 .6em; }
+.report-document-paper .report-section-heading { font-size: 1.15em; font-weight: 700; margin: 0 0 .4em; }
+.report-document-paper .report-section-heading-editor:focus { outline: none !important; }
 .report-document-paper .report-section-settings { margin-bottom: 6px; }
 .report-document-paper .report-section-settings > summary { color: #8993a1; font-size: 12px; cursor: pointer; text-align: right; }
 .report-document-paper .report-section-settings[open] > .report-group-tools { display: flex !important; padding: 8px; border: 1px solid #e5e7eb; background: #fafbfc; }
 .report-image-preview-title { padding: 6px; font-weight: 600; text-align: center; border-bottom: 1px solid #ddd; white-space: pre-wrap; }
 .report-image-preview p { white-space: pre-wrap; margin: .4em 0; }
 .report-image-empty { display: block; min-height: 64px; padding: 20px; color: #999; font-size: 12px; }
-.report-document-paper .fe-row { border-color: transparent; border-radius: 2px; background: transparent; padding: 3px 0; align-items: flex-start; }
+.report-document-paper .fe-row { border: 0; border-radius: 0; background: transparent; padding: 0; margin-bottom: var(--report-field-gap, .6em); align-items: flex-start; }
+.report-document-paper .fe-row:last-child { margin-bottom: 0; }
 .report-document-paper .fe-row:hover { background: transparent; }
 .report-document-paper .fe-row.fe-selected { border-color: #c6d9ed; background: transparent; }
+.report-document-paper .fe-row.fe-figure-row.fe-selected { outline: 2px solid #7ca9e9; outline-offset: 2px; }
 .report-document-paper .fe-drag { opacity: 0; margin-left: -14px; border-radius: 4px; color: #7e91a8; transition: opacity .12s ease, color .12s ease; }
 .report-document-paper .fe-row:hover > .fe-drag,
 .report-document-paper .fe-row.fe-selected > .fe-drag,
 .report-document-paper .fe-row:focus-within > .fe-drag { opacity: 1; }
 .report-document-paper .fe-drag:hover { color: #245c99; background: #edf3fa; }
-.report-document-paper .report-visual-paragraph:focus { outline: 1px solid #d9e5f2; outline-offset: 5px; border-radius: 2px; }
+.report-document-paper .report-visual-paragraph:focus { outline: none; }
 .report-document-paper .report-image-preview [contenteditable="true"]:focus { outline: 1px solid #8bb3df; outline-offset: -1px; background: #f8fbff; }
-.report-document-paper .report-inline-table textarea.ant-input { border-radius: 0; box-shadow: none; background: transparent; }
+.report-document-paper .report-inline-table td,
+.report-document-paper .report-inline-table th { vertical-align: middle; }
+.report-source-photo:focus, .report-image-preview figure:focus { outline: 2px solid #1677ff; outline-offset: 2px; }
+.report-document-paper .report-inline-table textarea.ant-input { display: block; margin-block: 0; border-radius: 0; box-shadow: none; background: transparent; }
 .report-document-paper .report-table-coordinate { opacity: .5; transition: opacity .12s ease; }
 .report-document-paper .report-inline-table:hover .report-table-coordinate,
 .report-document-paper .report-inline-table:focus-within .report-table-coordinate,
@@ -611,11 +628,11 @@ body {
 .report-visual-paragraph ol, .report-rich-text ol { list-style: decimal; padding-left: 1.5em; margin: .4em 0; }
 .report-visual-paragraph strong, .report-rich-text strong { font-weight: 700; }
 .report-visual-paragraph em, .report-rich-text em { font-style: italic; }
-.report-continuous-text { margin: 0 0 1em; }
+.report-continuous-text { margin: 0; }
 .report-continuous-text .report-paragraph-tools { position: sticky; top: 0; z-index: 4; background: white; padding: 4px 0; }
 .report-mixed-document .report-paragraph-tools { position: sticky; top: 0; z-index: 4; background: white; padding: 4px 0; }
 .report-continuous-text .report-visual-paragraph { padding: 0; min-height: 1.5em; }
-.report-document-paper .report-continuous-text .report-visual-paragraph:focus { outline: 1px solid #d9e5f2; outline-offset: 5px; }
+.report-document-paper .report-continuous-text .report-visual-paragraph:focus { outline: none; }
 .report-text-spacer { position: relative; min-height: 0; }
 .report-text-spacer.ProseMirror-selectednode { outline: 1px dashed #91baff; background: #f0f7ff; }
 .report-document-toolbar { position: sticky; top: 0; z-index: 6; background: #eef3f9; padding: 9px 10px; margin-bottom: 12px; display: flex; align-items: center; align-content: flex-start; flex-wrap: wrap; gap: 6px; border: 1px solid #d3deeb; border-radius: 10px; box-shadow: 0 2px 6px #263e600d; }
@@ -669,3 +686,27 @@ body {
 .report-continuous-actions { display: flex; justify-content: flex-end; opacity: 0; }
 .report-continuous-text:hover .report-continuous-actions,
 .report-continuous-text:focus-within .report-continuous-actions { opacity: 1; }
+.conclusion-items-table th, .conclusion-items-table td {
+  border: 1px solid #dce2eb; padding: 8px; vertical-align: middle; overflow-wrap: anywhere;
+}
+.conclusion-items-table th { background: #f5f7fa; font-weight: 600; }
+.conclusion-items-table td input, .conclusion-items-table td textarea,
+.conclusion-items-table td .ant-select { width: 100% !important; max-width: 100%; min-width: 0; }
+/* Dialogs stay within the viewport; long content scrolls without hiding actions. */
+.ant-modal {
+  max-width: calc(100vw - 24px);
+  top: min(100px, 5dvh);
+  padding-bottom: 16px;
+}
+.ant-modal .ant-modal-content {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - min(100px, 5dvh) - 24px);
+  min-height: 0;
+}
+.ant-modal .ant-modal-header,
+.ant-modal .ant-modal-footer { flex-shrink: 0; }
+.ant-modal .ant-modal-body { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ant-modal .ant-modal-title { overflow-wrap: anywhere; padding-right: 24px; }
+.ant-modal .ant-modal-footer { white-space: normal; }
+.ant-drawer .ant-drawer-body { min-height: 0; overflow: auto; overscroll-behavior: contain; }

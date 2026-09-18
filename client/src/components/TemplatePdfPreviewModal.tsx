@@ -41,7 +41,13 @@ const STATUS_COLOR: Record<string, string> = {
  *  - 从未生效时回退到最新工作版本（草稿 / 待审 / 已退回）；
  *  - 历史版本全部只在 PDF 弹窗中查看，不进入编辑器。
  */
-export default function TemplatePdfPreviewModal({
+export default function TemplatePdfPreviewModal(props: Props) {
+  // A different template or a fresh opening must never reuse the previous version selection.
+  if (!props.open) return null;
+  return <TemplatePreviewSession key={`${props.kind}:${props.templateId}:${props.initialVersionId ?? ''}`} {...props} />;
+}
+
+function TemplatePreviewSession({
   open, kind, templateId, templateName, initialVersionId, onClose,
 }: Props) {
   const [loadingMeta, setLoadingMeta] = useState(true);
@@ -52,13 +58,16 @@ export default function TemplatePdfPreviewModal({
   useEffect(() => {
     if (!open) return;
     let active = true;
+    const controller = new AbortController();
     setLoadingMeta(true);
     setError('');
     const api = `/api/${kind === 'record' ? 'record-templates' : 'report-templates'}/${templateId}`;
-    Promise.all([axios.get(api), axios.get(`${api}/versions`)])
+    Promise.all([axios.get(api, { signal: controller.signal }), axios.get(`${api}/versions`, { signal: controller.signal })])
       .then(([baseRes, versionsRes]) => {
         if (!active) return;
-        const allowed = ((versionsRes.data || []) as VersionOption[])
+        if (!Array.isArray(versionsRes.data)) throw Error('版本信息异常，请关闭后重试');
+        const allowed = (versionsRes.data as VersionOption[])
+          .filter(v => v && Number.isSafeInteger(Number(v.id)) && Number(v.id) > 0)
           .map(v => ({ ...v, id: Number(v.id), version_no: Number(v.version_no) }))
           .sort((a, b) => b.version_no - a.version_no);
         const currentId = Number(baseRes.data?.current_version_id);
@@ -80,7 +89,7 @@ export default function TemplatePdfPreviewModal({
         if (active) setError(e?.response?.data?.error || e?.message || '版本信息加载失败');
       })
       .finally(() => { if (active) setLoadingMeta(false); });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [open, kind, templateId, initialVersionId]);
 
   if (loadingMeta) {
@@ -105,7 +114,7 @@ export default function TemplatePdfPreviewModal({
         : getReportTemplatePreviewPdf(templateId, selected)}
       downloadName={`${templateName}-v${selectedVersion?.version_no || ''}.pdf`}
       toolbar={
-        <Space>
+        <Space wrap>
           <span style={{ color: '#667085' }}>当前预览</span>
           <Select
             value={selected}

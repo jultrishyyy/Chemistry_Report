@@ -8,6 +8,33 @@ export function recordSampleBands(ft: Table) {
     .filter(b => b?.refs?.length && !b.matrix_code && !b.source_field);
 }
 
+/** Only entered sample values keep a report row; labels, units and computed defaults do not. */
+export function sampleHasEnteredData(ft: Table, raw: Record<string, any>, bandId: string,
+  sample: number, ref?: string): boolean {
+  const band = recordSampleBands(ft).find(b => b.id === bandId);
+  if (!band) return true; // Missing source metadata is handled by binding validation.
+  const hasValue = (value: unknown): boolean => value !== null && value !== undefined
+    && (typeof value !== 'string' || value.trim() !== '')
+    && (!Array.isArray(value) || value.some(hasValue));
+  const refs = ref ? [ref] : band.refs;
+  const cross = band.axis === 'row' ? ft.columns : ft.rows;
+  for (const axisRef of refs) for (const item of cross) {
+    const key = band.axis === 'row' ? `${axisRef}::${item.id}` : `${item.id}::${axisRef}`;
+    if (ft.header_cells?.[key] || ft.fixed_text_cells?.[key] || ft.sample_index_cells?.[key]
+      || sampleBandForCell(ft, key)?.id !== bandId) continue;
+    const span = ft.spans?.[key];
+    if (ref && (band.axis === 'row' ? span?.rowspan || 1 : span?.colspan || 1) > 1) continue;
+    const runtimeKey = `${key}::s${sample}`;
+    if (ft.cell_formulas?.[key]) {
+      if (hasValue(raw[`__formula_override__::${runtimeKey}`]?.value)) return true;
+    } else {
+      const value = Object.hasOwn(raw, runtimeKey) ? raw[runtimeKey] : raw[key];
+      if (hasValue(value)) return true;
+    }
+  }
+  return false;
+}
+
 /** A merge inside one sample is repeatable; a merge crossing its boundary is shared. */
 export function sampleBandForCell(ft: Table, key: string) {
   const [rid, cid] = key.split('::');

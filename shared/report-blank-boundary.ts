@@ -16,7 +16,7 @@ export function deleteBlankBesideFigure(groups: FieldGroup[], groupId: string, f
     if (!group || group.parent_group_id !== source.parent_group_id || group.section_role === 'images') return false;
     at = side === -1 ? group.fields.length - 1 : 0;
   }
-  if (group.fields.some(f => f.signature_line) || (group.module_span || 1) > 1 || (group.layout && group.layout !== 'vertical') || group.image_layout) return false;
+  if (group.fields.some(f => f.signature_line) || (group.module_span || 1) > 1 || (group.layout && group.layout !== 'vertical')) return false;
   if (group.fields[at]?.type === 'spacer') { group.fields.splice(at, 1); return true; }
   const pure = !!group.report_document || canEditContinuousText(group);
   const run = reportTextRuns(group).find(r => side === -1 ? r.start + r.ids.length - 1 === at : r.start === at);

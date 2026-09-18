@@ -1,4 +1,5 @@
 import type { RecordTemplate } from './types';
+import { updateConclusionJudgment } from './conclusion-judgment-default.ts';
 import { RECORD_SEED_SNAPSHOTS } from './seed-record-templates.data';
 
 /**
@@ -27,7 +28,9 @@ export interface BaseTemplateEntry {
 function snapshot(name: string): RecordTemplate {
   const s = RECORD_SEED_SNAPSHOTS.find(x => x.name === name);
   if (!s) throw new Error(`[base-templates] 找不到原始记录快照：${name}（检查 shared/seed-record-templates.data.ts）`);
-  return JSON.parse(JSON.stringify(s));
+  const copy: RecordTemplate = JSON.parse(JSON.stringify(s));
+  copy.groups = updateConclusionJudgment(copy.groups);
+  return copy;
 }
 
 export const BASE_TEMPLATES: BaseTemplateEntry[] = [

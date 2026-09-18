@@ -22,6 +22,10 @@ test('Latin font order and body size match theme conventions', () => {
   assert.equal(reportFontStack(['Arial', 'FangSong']), '"Arial", "FangSong"');
   assert.equal(reportBodyLayout({ body_size: '10.5pt' }).size, 10.5);
   assert.equal(reportBodyLayout({ body_size: 'bad' }).size, 10);
+  assert.equal(reportBodyLayout({ line_gap: 0.75 }).fieldGap, '0.75em');
+  assert.equal(reportBodyLayout({ line_gap: '7pt', paragraph_gap: '1.2em' }).fieldGap, '7pt');
+  assert.equal(reportBodyLayout({ paragraph_gap: '1.2em' }).sectionGap, '1.2em');
+  assert.equal(reportBodyLayout({ line_gap: 'calc(1px)' }).fieldGap, '0.6em');
 });
 test('structured report paragraphs use explicit shared spacing, legacy text is unchanged', () => {
   const doc = (value: string) => ({ cover: { ctx: {}, groups: [{ id: 'g', label: '', layout: 'vertical' as const, fields: [{

@@ -63,27 +63,20 @@ export async function fetchReportMeta(order_no: string): Promise<ReportMeta> {
 /**
  * 解析最终用于报告的接口元数据。
  * - server：完全使用接口 1.2 推送值；没有推送的字段保持空白。
- * - demo：用 header-footer.json 的 sample_meta 预览，并允许传入值覆盖示例。
+ * - demo：无接口记录时用 header-footer.json 的 sample_meta 预览；有接口记录后完整采用接口值（包括空值）。
  */
 export async function resolveReportMeta(
   order_no: string,
   pushedMeta?: ReportMeta | null,
 ): Promise<ReportMeta> {
+  // Once interface 1.2 supplied a report record it is the complete source of truth, including
+  // explicit empty strings. Falling back to demo remarks here made an empty ReportRemark /
+  // QualificationRemark appear as unrelated sample text in the signature area.
+  if (pushedMeta) return { ...emptyReportMeta(), ...pushedMeta };
+
   if (integrationsProfile === 'server') {
-    return { ...emptyReportMeta(), ...(pushedMeta || {}) };
+    return emptyReportMeta();
   }
 
-  const base = await fetchReportMeta(order_no);
-  if (!pushedMeta) return base;
-
-  const merged: Record<string, any> = { ...base };
-  // 客户名称和地址属于每报告数据，即使在 demo 中也不能回退成示例客户。
-  delete merged.customer_name;
-  delete merged.customer_address;
-  for (const [key, value] of Object.entries(pushedMeta)) {
-    if (value !== null && value !== undefined && String(value).trim() !== '') {
-      merged[key] = value;
-    }
-  }
-  return merged as ReportMeta;
+  return fetchReportMeta(order_no);
 }

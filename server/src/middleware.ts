@@ -4,12 +4,16 @@
  */
 import type { Request, Response, NextFunction } from 'express';
 import { log } from './logger.js';
+import { requestMetrics } from './services/request-metrics.js';
 
 /** 请求日志：每个请求结束时记 method/path/status/耗时。健康检查不刷屏。 */
 export function requestLogger(req: Request, res: Response, next: NextFunction): void {
-  if (req.path === '/api/health') return next();
+  if (['/api/health', '/api/ready', '/api/operations/metrics', '/api/typst/health'].includes(req.path)) return next();
   const start = Date.now();
+  const finish = requestMetrics.start();
+  res.once('close', () => { if (!res.writableFinished) finish(res.statusCode, Date.now() - start, true); });
   res.on('finish', () => {
+    finish(res.statusCode, Date.now() - start);
     log.info('req', {
       method: req.method,
       path: req.originalUrl,

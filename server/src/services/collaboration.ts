@@ -21,7 +21,8 @@ export async function acquireEditLease(resourceType: string, resourceId: string,
      ON CONFLICT (resource_type, resource_id) DO UPDATE SET
        holder_job_no = EXCLUDED.holder_job_no,
        holder_name = EXCLUDED.holder_name,
-       lease_token = EXCLUDED.lease_token,
+       lease_token = CASE WHEN edit_leases.holder_job_no = EXCLUDED.holder_job_no AND edit_leases.expires_at > NOW()
+         THEN edit_leases.lease_token ELSE EXCLUDED.lease_token END,
        acquired_at = CASE WHEN edit_leases.holder_job_no = EXCLUDED.holder_job_no THEN edit_leases.acquired_at ELSE NOW() END,
        heartbeat_at = NOW(),
        expires_at = EXCLUDED.expires_at

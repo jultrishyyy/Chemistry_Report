@@ -9,6 +9,7 @@
 import type { RecordTemplate, FieldDefinition, DataMatrixConfig } from './types';
 import { matrixDataKey, createEmptyMatrixValue, flattenMatrixValuesToFlatData, applyMatrixCellFormulas, applyMatrixSummaryFormulas, applyPerCellFormulas } from './matrix-flatten';
 import { execute, topologicalOrder } from './formula-engine';
+import { sampleAxesKey } from './free-grid-samples';
 import { formatDateByPrecision } from './date-precision';
 
 /**
@@ -155,7 +156,7 @@ function mockFreeGridValue(ft: FieldDefinition['free_table']): Record<string, an
     }
     return '示例';
   };
-  // 单元格（连续块）多于 1 → 预览各带只展 1 份（自然展示该块，如序号 1/2/3）；单行/列单元 → 展 3 份
+  // 多个模板试样行／列各用 s0 槽位；单行／列原型生成三个不同槽位。显式轴列表决定显示数量。
   const countForBand = (b: { refs: string[] }) => (b.refs.length > 1 ? 1 : 3);
   // 录入格 + 选择框格（后者含未标为录入的表头选择框，需一并给示例值）
   const numericFixed = Object.keys(ft.fixed_text_cells || {}).filter(key =>
@@ -170,7 +171,14 @@ function mockFreeGridValue(ft: FieldDefinition['free_table']): Record<string, an
     if (b && inExactBand) { const N = countForBand(b); for (let i = 0; i < N; i++) gv[`${rid}::${cid}::s${i}`] = exampleFor(key); }
     else gv[key] = exampleFor(key);
   }
-  for (const b of selfBands) gv[`__sample_count__::${b.id}`] = countForBand(b);
+  for (const b of selfBands) {
+    // Use the same explicit sample slots as record entry. Multiple template axes
+    // are individual samples, not a single block containing every axis.
+    const entries = b.refs.length > 1 ? b.refs.map(ref => ({ ref, sample: 0 }))
+      : Array.from({ length: countForBand(b) }, (_, sample) => ({ ref: b.refs[0], sample }));
+    gv[sampleAxesKey(b.id)] = entries;
+    gv[`__sample_count__::${b.id}`] = entries.length;
+  }
   return gv;
 }
 

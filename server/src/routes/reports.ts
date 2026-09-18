@@ -1,10 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { hasContinuousText, restoreContinuousSource } from '../../../shared/report-continuous-text';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { validSourceReviews } from '../../../shared/report-source-review.ts';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { compileTypst } from '../services/typst-compiler.js';
+import { RenderBusyError } from '../services/render-queue.js';
 import { execute, topologicalOrder } from '../../../shared/formula-engine.js';
 import { renderReportTypst, type ReportRenderContext } from '../../../shared/report-blocks.js';
 import {
@@ -24,7 +27,7 @@ import {
 import type { ReportBlock, RecordTemplate, FieldDefinition, ReportContentDoc, ReportMeta } from '../../../shared/types.js';
 import { resolveReportMeta } from '../services/external-report-meta.js';
 import { headerFooterConfig, integrationsProfile } from '../../../config/index.js';
-import { imageCollectionKey } from '../../../shared/image-collection.js';
+import { reportImageKeys, pickReportImageData } from '../../../shared/report-image-state';
 import { extractRecordConclusion } from '../../../shared/record-conclusion.js';
 import { findRecordHeaderChanges } from '../../../shared/record-header-changes.ts';
 
@@ -54,25 +57,11 @@ const jsonClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
  */
 function preserveImageState(previous: any, incoming: any): any {
   const next = jsonClone(incoming);
-  const imageKeys = (section: any) => {
-    const keys = new Set<string>();
-    for (const group of section?.groups || []) {
-      if (group?.section_role !== 'images') continue;
-      keys.add(imageCollectionKey(group.id));
-      for (const field of group.fields || []) {
-      if (field?.type === 'image') keys.add(field.image_source_code || field.code);
-      if (field?.type === 'report_image_gallery') {
-        for (const item of field.image_gallery?.items || []) if (item?.source_field_code) keys.add(item.source_field_code);
-      }
-      }
-    }
-    return keys;
-  };
   const mergeSection = (oldSection: any, newSection: any) => {
     if (!oldSection || !newSection) return;
     const oldRaw = oldSection.ctx?.record_raw_data || {};
     const newRaw = newSection.ctx?.record_raw_data || (newSection.ctx = { ...(newSection.ctx || {}), record_raw_data: {} }).record_raw_data;
-    const keys = new Set([...imageKeys(oldSection), ...imageKeys(newSection)]);
+    const keys = new Set([...reportImageKeys(oldSection), ...reportImageKeys(newSection)]);
     Object.keys(oldRaw).filter(key => key.startsWith('__image_collection__::')).forEach(key => keys.add(key));
     for (const key of keys) if (!(key in newRaw) && key in oldRaw) newRaw[key] = jsonClone(oldRaw[key]);
 
@@ -99,31 +88,9 @@ function preserveImageState(previous: any, incoming: any): any {
   return next;
 }
 
-/** 从首页草稿中取真正属于图片分区的 ctx 快照，不能用整个 ctx 覆盖各报告的首页数据。 */
+/** 从首页草稿中取图片字段的 ctx 快照，不能覆盖各报告独立的样品/检测数据。 */
 function pickCoverImageRawData(cover: any): Record<string, any> {
-  const raw = cover?.ctx?.record_raw_data || {};
-  const keys = new Set<string>();
-  const sourceCodes = new Set<string>();
-  for (const group of cover?.groups || []) {
-    if (group?.section_role !== 'images') continue;
-    keys.add(imageCollectionKey(group.id));
-    for (const field of group.fields || []) if (field?.type === 'image') {
-      const code = field.image_source_code || field.code;
-      keys.add(code);
-      sourceCodes.add(code);
-    }
-  }
-  const picked: Record<string, any> = {};
-  for (const key of keys) if (key in raw) picked[key] = jsonClone(raw[key]);
-  // 兼容从原始记录沿用的动态图片集合：其 group id 可能不同，但来源字段相同。
-  // 只复制与首页图片字段匹配的集合，绝不把整份首页 ctx 覆盖到其他报告。
-  for (const [key, value] of Object.entries(raw)) {
-    if (!key.startsWith('__image_collection__::') || !value || typeof value !== 'object') continue;
-    const collectionCodes = Array.isArray((value as any).source_field_codes)
-      ? (value as any).source_field_codes : [];
-    if (collectionCodes.some((code: string) => sourceCodes.has(code))) picked[key] = jsonClone(value);
-  }
-  return picked;
+  return pickReportImageData(cover);
 }
 
 router.post('/generate', async (req: Request, res: Response) => {
@@ -249,7 +216,7 @@ router.get('/preview/:reportTemplateId', async (req: Request, res: Response) => 
  * 把外部回传的 ReportMeta + 报告模板版式开关合成首页主题的 header_footer 配置。
  * 值来自外部（接口⑦），版式（是否显示页码等）来自报告模板 layout_options.header_footer。
  */
-function buildHeaderFooterConfig(meta: ReportMeta, layout?: Record<string, any>): Record<string, any> {
+export function buildHeaderFooterConfig(meta: ReportMeta, layout?: Record<string, any>): Record<string, any> {
   // 版式优先级：报告模板自配（layout）> config/header-footer.json 默认（settings）> 主题硬编码默认。
   // 这样新服务器即使数据库没模板配置，也用配置文件的默认（含 header_rule 分割线开关），不再回退主题默认而"乱"。
   const fileDefaults = (headerFooterConfig.apply_to?.cover === false)
@@ -310,6 +277,8 @@ export async function buildReportTypst(params: {
   /** 可选·本报告编号（接口 1.2 取号）自带的样品清单（requisition.scope.samples）。提供则首页样品清单/样品信息表
    *  【直接用它】，不再经 work_orders.payload 回查/按 assignment 收敛——避免整单其它样品混入或"单样品却出表"。 */
   report_samples?: Array<{ no: string; name: string; sort_no?: string; model?: string; barcode?: string; id?: string }> | null;
+  /** 接口 1.2 当前报告范围的完整 SampleList，用于采用取号时更新的材料分单日期。 */
+  report_scope_samples?: any[] | null;
   /** 可选·首页草稿（编辑首页）用：首页样品清单/样品信息表【列整单全部样品】（work_orders.payload 全量），
    *  不按 assignment 收敛——因为草稿是【订单级】预览，应显示订单对应的所有样品，而非只审核通过的那几个。 */
   keep_all_order_samples?: boolean;
@@ -330,7 +299,7 @@ export async function buildReportTypst(params: {
   assignmentTplIds: number[];
   assignmentRecIds: number[];
 }> {
-  const { order_no, cover_template_id, cover_page_template_id, project_assignments, mock_context, report_meta, cover_groups_override, report_samples, keep_all_order_samples, blank_scope, cover_ctx_photos } = params;
+  const { order_no, cover_template_id, cover_page_template_id, project_assignments, mock_context, report_meta, cover_groups_override, report_samples, report_scope_samples, keep_all_order_samples, blank_scope, cover_ctx_photos } = params;
   const warnings: any[] = [];
 
   // 过滤掉 enabled === false 的项目
@@ -339,26 +308,31 @@ export async function buildReportTypst(params: {
   // 载入委托单接口字段（订单级 meta + 样品/材料分单字段），供报告映射 binding(source=order/sample/test) 拉取。
   // 来源：work_orders.payload（接口 PushOrderInfos 1.1 → external.ts/seed 入库）。
   const orderMeta: Record<string, any> = {};
+  const methodOrderByTest = new Map<string, { order: number; methods: number[] }>();
   const sampleInfoById = new Map<string, Record<string, any>>();
   const sampleInfoByName = new Map<string, Record<string, any>>();
   const testInfoByKey = new Map<string, Record<string, any>>(); // key = `${sample_external_id}||${test_item_name}`
+  let orderPayloadSamples: any[] = [];
   const orderSamples: Array<{ no: string; name: string; sort_no?: string; model?: string; barcode?: string; id?: string }> = []; // 样品清单 + 首页样品信息表（id 仅内部用于按 scope 过滤，不影响渲染）
   try {
     const wo = await pool.query('SELECT payload FROM work_orders WHERE order_no = $1', [order_no]);
     const payload = wo.rows[0]?.payload || {};
     Object.assign(orderMeta, payload.meta || {});
-    (Array.isArray(payload.samples) ? payload.samples : []).forEach((smp: any, i: number) => {
+    orderPayloadSamples = Array.isArray(payload.samples) ? payload.samples : [];
+    orderPayloadSamples.forEach((smp: any, i: number) => {
       orderSamples.push({
         no: String(smp.sort_no ?? i + 1), name: smp.name ?? '',
         sort_no: smp.sort_no != null ? String(smp.sort_no) : '', model: smp.model ?? '', barcode: smp.barcode ?? '',
         id: smp.id != null ? String(smp.id) : undefined,
       });
     });
-    for (const smp of (Array.isArray(payload.samples) ? payload.samples : [])) {
+    for (const smp of orderPayloadSamples) {
       const sInfo = { sample_name: smp.name, barcode: smp.barcode, sort_no: smp.sort_no, model: smp.model };
       if (smp.id) sampleInfoById.set(smp.id, sInfo);
       if (smp.name) sampleInfoByName.set(smp.name, sInfo);
       for (const t of (smp.test_infos || [])) {
+        methodOrderByTest.set(`${smp.id}||${t.name}`, { order: methodOrderByTest.size,
+          methods: (t.linked_template_ids || (t.linked_template_id ? [t.linked_template_id] : [])).map(Number) });
         testInfoByKey.set(`${smp.id}||${t.name}`, {
           project_name: t.name, standard: t.standard, main_engine_factory: t.main_engine_factory,
           test_method: t.test_method, test_condition: t.test_condition, sampling_mode: t.sampling_mode,
@@ -372,7 +346,7 @@ export async function buildReportTypst(params: {
     // 检测周期（首页·订单级派生）：跨全单材料分单取 最早 StartDate ~ 最晚 EndDate（日期为 YYYY-MM-DD，字典序即时序）。
     // 缺一侧只显另一侧；两端相同折成单值；都缺则空（binding 落占位）。供 binding source='order' key='test_period'/'test_start'/'test_end'。
     const starts: string[] = [], ends: string[] = [];
-    for (const smp of (Array.isArray(payload.samples) ? payload.samples : [])) {
+    for (const smp of orderPayloadSamples) {
       for (const t of (smp.test_infos || [])) {
         if (t.start_date) starts.push(String(t.start_date));
         if (t.end_date) ends.push(String(t.end_date));
@@ -510,6 +484,46 @@ export async function buildReportTypst(params: {
     }
   }
 
+  // 正式报告按本报告实际选中的样品/项目计算检测周期。接口 1.2 的同名任务优先于
+  // 较早入库的 1.1 值，因为取号时 StartDate/EndDate 可能已经补齐。
+  if (activeAssignments.length && recMap.size) {
+    const scopeSamples = Array.isArray(report_scope_samples) ? report_scope_samples : [];
+    const chosen: Array<{ start_date?: string; end_date?: string }> = [];
+    const findSample = (samples: any[], record: any) => samples.find((sample: any) =>
+      [sample?.id, sample?.name, sample?.barcode, sample?.sort_no]
+        .some(value => value != null && String(value) === String(record?.sample_external_id)));
+    for (const assignment of activeAssignments) {
+      const record = recMap.get(assignment.record_data_id);
+      if (!record) continue;
+      const fromScope = findSample(scopeSamples, record)?.test_infos?.find((test: any) => test?.name === record.test_item_name);
+      const fromOrder = findSample(orderPayloadSamples, record)?.test_infos?.find((test: any) => test?.name === record.test_item_name);
+      chosen.push({
+        start_date: fromScope?.start_date || fromOrder?.start_date,
+        end_date: fromScope?.end_date || fromOrder?.end_date,
+      });
+    }
+    const starts = chosen.map(test => test.start_date).filter(Boolean).map(String).sort();
+    const ends = chosen.map(test => test.end_date).filter(Boolean).map(String).sort();
+    const minStart = starts[0] || '';
+    const maxEnd = ends.length ? ends[ends.length - 1] : '';
+    orderMeta.test_start = minStart;
+    orderMeta.test_end = maxEnd;
+    orderMeta.test_period = minStart && maxEnd
+      ? (minStart === maxEnd ? minStart : `${minStart} ~ ${maxEnd}`)
+      : (minStart || maxEnd || '');
+  }
+
+  const coverNeedsTestPeriod = (coverTpl.field_definitions || []).some((group: any) =>
+    (group.fields || []).some((field: any) => field.type === 'daterange'
+      && [field.date_range?.start?.key, field.date_range?.end?.key]
+        .some((key: any) => key === 'test_start' || key === 'test_end')));
+  if (coverNeedsTestPeriod && !orderMeta.test_start && !orderMeta.test_end) {
+    warnings.push({
+      type: 'test_period_missing',
+      detail: '接口 1.1/1.2 的材料分单未提供 StartDate 和 EndDate，首页“检测周期”已留空',
+    });
+  }
+
   // 首页样品清单/样品信息表 = **本报告 scope 内的样品**（即各 assignment 原始记录的 sample_external_id，
   // 去重保序）。样品明细从委托单 payload.samples 按【多键】(id/名称/条码/序号) 回查；查不到则用该
   // sample_external_id 兜底成一行——【绝不】退化成"列出整单全部样品"或混入 scope 外的其它样品。
@@ -553,6 +567,16 @@ export async function buildReportTypst(params: {
   const projectRecords: Array<{ sample_no?: string; sample_name: string; name: string; standard: string; conclusions: Array<{ sub_name?: string; value: string; judgment_requirement?: string }> }> = [];
   const allDeviceCodes: Set<string> = new Set();
 
+  const methodRank = (assignment: any): [number, number] => {
+    const record = recMap.get(assignment.record_data_id);
+    const entry = methodOrderByTest.get(`${record?.sample_external_id}||${record?.test_item_name}`);
+    const methodIndex = entry?.methods.indexOf(Number(record?.template_id)) ?? -1;
+    return [entry?.order ?? Number.MAX_SAFE_INTEGER, methodIndex < 0 ? Number.MAX_SAFE_INTEGER : methodIndex];
+  };
+  activeAssignments.sort((a: any, b: any) => {
+    const ar = methodRank(a), br = methodRank(b);
+    return ar[0] - br[0] || ar[1] - br[1];
+  });
   for (const a of activeAssignments) {
     const projTpl = projTplMap.get(a.project_template_id);
     const recData = recMap.get(a.record_data_id);
@@ -598,7 +622,7 @@ export async function buildReportTypst(params: {
       layout_options: rawTpl.layout_options || {},
     };
 
-    const effectiveRaw: Record<string, any> = { ...(recData.raw_data || {}), ...(recData.batch_shared_data || {}) };
+    const effectiveRaw: Record<string, any> = { ...(recData.batch_shared_data || {}), ...(recData.raw_data || {}) };
     const headerChanges = findRecordHeaderChanges(linkedTpl, effectiveRaw);
     if (headerChanges.length) {
       warnings.push({
@@ -925,6 +949,7 @@ export async function buildReportTypst(params: {
           record_raw_data: p.record_raw_data,
           record_conclusion: p.record_conclusion,
           record_meta: p.record_meta,
+          source_record_data_id: p.record_data_id,
           linked_record_template: p.linked_record_template,
         } as any,
       })),
@@ -954,6 +979,7 @@ export async function buildReportTypst(params: {
     });
   }
 
+  if (contentDoc) contentDoc.source_review_revision = randomUUID();
   return {
     finalTypst,
     contentDoc,
@@ -986,6 +1012,8 @@ export async function generateAndStoreReport(params: {
   cover_groups_override?: any[] | null;
   /** 可选·本报告编号自带样品清单（见 buildReportTypst.report_samples）。 */
   report_samples?: Array<{ no: string; name: string; sort_no?: string; model?: string; barcode?: string; id?: string }> | null;
+  /** 可选·接口 1.2 当前报告范围的完整样品/材料分单。 */
+  report_scope_samples?: any[] | null;
   /** 可选·首页草稿原样照片（见 buildReportTypst.cover_ctx_photos）。 */
   cover_ctx_photos?: Record<string, any[]> | null;
   actor?: string | null;
@@ -993,10 +1021,18 @@ export async function generateAndStoreReport(params: {
   const {
     order_no, cover_template_id, cover_page_template_id, batch_id, report_no,
     sample_label = null, mock_context, report_meta = null, cover_groups_override = null, report_samples = null,
+    report_scope_samples = null,
     cover_ctx_photos = null, actor = null,
   } = params;
   const project_assignments = Array.isArray(params.project_assignments) ? params.project_assignments : [];
-  const built = await buildReportTypst({ order_no, cover_template_id, cover_page_template_id, project_assignments, mock_context, report_meta, cover_groups_override, report_samples, cover_ctx_photos });
+  // Batch generation must carry the same saved cover/photos as requisition generation.
+  const draft = cover_groups_override == null && cover_ctx_photos == null
+    ? await pool.query(`SELECT content_doc FROM reports WHERE order_no=$1 AND cover_template_id=$2 AND is_cover_draft=true ORDER BY id DESC LIMIT 1`, [order_no, cover_template_id])
+    : null;
+  const draftCover = draft?.rows[0]?.content_doc?.cover;
+  const built = await buildReportTypst({ order_no, cover_template_id, cover_page_template_id, project_assignments, mock_context, report_meta,
+    cover_groups_override: cover_groups_override ?? draftCover?.groups,
+    report_samples, report_scope_samples, cover_ctx_photos: cover_ctx_photos ?? pickReportImageData(draftCover) });
   const { finalTypst, contentDoc, warnings, coverTpl, projects, assignmentTplIds, assignmentRecIds } = built;
 
   let compiled = false;
@@ -1157,6 +1193,7 @@ router.post('/preview', async (req: Request, res: Response) => {
     });
     res.send(compileResult.pdf);
   } catch (err: any) {
+    if (err instanceof RenderBusyError) { res.set('Retry-After', '3').status(503).json({ error: err.message }); return; }
     res.status(500).json({ error: err.message });
   }
 });
@@ -1392,6 +1429,7 @@ router.get('/:id/pdf', async (req: Request, res: Response) => {
     });
     res.send(compileResult.pdf);
   } catch (err: any) {
+    if (err instanceof RenderBusyError) { res.set('Retry-After', '3').status(503).json({ error: err.message }); return; }
     res.status(500).json({ error: err.message });
   }
 });
@@ -1452,6 +1490,7 @@ router.get('/:id/docx', async (req: Request, res: Response) => {
     });
     res.send(docx);
   } catch (err: any) {
+    if (err instanceof RenderBusyError) { res.set('Retry-After', '3').status(503).json({ error: err.message }); return; }
     res.status(500).json({ error: err.message, hint: '需要本机安装 LibreOffice：brew install --cask libreoffice，或设置 SOFFICE_BIN 环境变量' });
   }
 });
@@ -1468,13 +1507,16 @@ router.put('/:id', async (req: Request, res: Response) => {
   const { final_typst, blocks_snapshot, content_doc } = req.body;
 
   if (content_doc) {
-    const prev = await pool.query('SELECT content_doc, is_cover_draft FROM reports WHERE id = $1', [req.params.id]);
+    const prev = await pool.query('SELECT content_doc, content_doc_original, is_cover_draft FROM reports WHERE id = $1', [req.params.id]);
     if (!prev.rows.length) { res.status(404).json({ error: '报告不存在' }); return; }
     if (prev.rows[0].is_cover_draft && hasContinuousText(content_doc)) {
       res.status(400).json({ error: '公共首页草稿需要保留字段绑定，请在生成后的报告中编辑连续正文。' }); return;
     }
     // 保存时以当前库中图片为兜底，防止客户端局部编辑快照遗漏图片数据导致整段图片被清空。
     const safeContentDoc = preserveImageState(prev.rows[0].content_doc, content_doc);
+    // Reviews refer only to the immutable generation snapshot, never report-edited source ctx.
+    safeContentDoc.source_review_revision = prev.rows[0].content_doc_original?.source_review_revision;
+    safeContentDoc.source_reviews = validSourceReviews(prev.rows[0].content_doc_original, content_doc.source_reviews);
     let rendered: string;
     try {
       rendered = renderContentDoc(safeContentDoc);
@@ -1492,6 +1534,9 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (diff.length) {
       await writeReportAudit(Number(req.params.id), 'edit', reportActor(req), diff,
         `结构化编辑 ${diff.length} 处`);
+    }
+    if (JSON.stringify(prev.rows[0].content_doc?.source_reviews || []) !== JSON.stringify(safeContentDoc.source_reviews)) {
+      await writeReportAudit(Number(req.params.id), 'edit', reportActor(req), [], `更新原始数据结构核对状态（已核对 ${safeContentDoc.source_reviews.length} 张表）`);
     }
     res.json({ ok: true, edited: true, changes: diff.length, content_doc: safeContentDoc });
     return;
@@ -1663,7 +1708,7 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
     const recIds = candidates.map(c => c.record_data_id);
     const projIds = [...new Set(candidates.map(c => c.project_template_id))];
     const recRes = await pool.query(
-      `SELECT id, tester_name, sample_external_id, test_item_name FROM record_data WHERE id = ANY($1)`, [recIds]);
+      `SELECT rd.id, rd.tester_name, rd.sample_external_id, rd.test_item_name, rt.name AS method_name FROM record_data rd LEFT JOIN record_templates rt ON rt.id=rd.template_id WHERE rd.id = ANY($1)`, [recIds]);
     const recById = new Map<number, any>(recRes.rows.map((x: any) => [Number(x.id), x]));
     const projRes = await pool.query(
       `SELECT t.id, t.name, t.current_version_id, cv.layout_options
@@ -1687,8 +1732,12 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
       const projName = rec.test_item_name
         || (pendingTemplate ? '测试项目' : ((proj.layout_options?.project_name) || proj.name || `项目#${c.project_template_id}`));
       const pairKey = `${Number(c.record_data_id)}:${Number(c.project_template_id)}`;
+      const pendingNowReady = Array.isArray(scope?.selected_record_data_ids)
+        && scope.selected_record_data_ids.map(Number).includes(Number(c.record_data_id))
+        && !scopedAssignments.some((a: any) => Number(a.record_data_id) === Number(c.record_data_id) && Number(a.project_template_id) > 0)
+        && approvedCandidates.find(a => Number(a.record_data_id) === Number(c.record_data_id))?.project_template_id === c.project_template_id;
       const included = hasScopedPairs
-        ? includedPairs.has(pairKey)
+        ? includedPairs.has(pairKey) || pendingNowReady
         : includedRecIds.has(Number(c.record_data_id))
           || (Array.isArray(scope?.selected_record_data_ids) && scope.selected_record_data_ids.map(Number).includes(Number(c.record_data_id)));
       const selectedVersionId = includedVersionByPair.get(pairKey) ?? null;
@@ -1701,6 +1750,7 @@ router.get('/:id/scope-candidates', async (req: Request, res: Response) => {
         sample_no: sInfo.sort_no != null ? String(sInfo.sort_no) : '',
         test_item_name: rec.test_item_name || '',
         tester_name: rec.tester_name || '',
+        method_name: rec.method_name || '',
         needs_template: pendingTemplate,
         included,
         project_template_version_id: currentVersionId,
@@ -1802,6 +1852,14 @@ router.post('/:id/rescope', async (req: Request, res: Response) => {
         sort_no: sample?.sort_no != null ? String(sample.sort_no) : '', model: sample?.model || '',
         barcode: sample?.barcode || '', id: sample?.id != null ? String(sample.id) : undefined,
       }));
+    // Template refresh and scope changes preserve each retained project's
+    // instance pagination choice unless the request explicitly changes it.
+    for (const assignment of enabled) {
+      if (typeof assignment.page_break === 'boolean') continue;
+      const project = row.content_doc?.projects?.find((p: any) =>
+        Number(p.ctx?.source_record_data_id) === Number(assignment.record_data_id));
+      assignment.page_break = project?.page_break !== false;
+    }
     const built = await buildReportTypst({
       order_no: row.order_no,
       cover_template_id: row.cover_template_id,
@@ -1858,6 +1916,7 @@ router.post('/preview-content-doc', async (req: Request, res: Response) => {
     res.set({ 'Content-Type': 'application/pdf', 'X-Compile-Duration-Ms': String(compileResult.duration_ms) });
     res.send(compileResult.pdf);
   } catch (err: any) {
+    if (err instanceof RenderBusyError) { res.set('Retry-After', '3').status(503).json({ error: err.message }); return; }
     res.status(500).json({ error: err.message });
   }
 });

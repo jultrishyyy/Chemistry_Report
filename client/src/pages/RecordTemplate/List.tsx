@@ -442,7 +442,7 @@ export default function RecordTemplateList() {
           {
             title: '流程操作', width: COL_WIDTH.workflow, fixed: 'right' as const, align: 'center' as const,
             render: (_: any, r: any) => isFamilyRow(r) ? (
-              <TestTemplateGroupArchiveActions group={r} onRefresh={load} />
+              <TestTemplateGroupArchiveActions group={{ ...r, id: r.family_id }} onRefresh={load} />
             ) : (
               <Space size={4} className="table-row-actions table-workflow-actions">
                 {r.archive_requested_by ? <TemplateArchiveButton kind="record" row={r} onRefresh={load} fixedWorkflow /> : <>

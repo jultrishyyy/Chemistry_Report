@@ -31,7 +31,9 @@ function isolatedText(group: FieldGroup, field: FieldDefinition): FieldGroup | n
   // Existing rich text already carries inline formatting; its outer style is
   // retained on the independent block, never flattened into adjacent prose.
   if (field.rich) cleanField.style = {};
-  const candidate = { ...group, report_source_fields: undefined, report_document: undefined, fields: [cleanField] };
+  // 图片分区的 image_layout 只约束图片网格，不应把网格前后的普通文字降级成表单输入框。
+  const candidate = { ...group, section_role: group.section_role === 'images' ? 'other' as const : group.section_role,
+    image_layout: undefined, report_source_fields: undefined, report_document: undefined, fields: [cleanField] };
   if (!canEditContinuousText(candidate)) return null;
   return { ...candidate, style: { ...group.style, ...field.style,
     ...(field.field_gap ? { space_before: field.style?.space_before || gapLength(field.field_gap), space_after: field.style?.space_after || gapLength(field.field_gap) } : {}) } };
@@ -39,11 +41,12 @@ function isolatedText(group: FieldGroup, field: FieldDefinition): FieldGroup | n
 
 /** Read-only grouping: opening a mixed section never rewrites its bindings. */
 export function reportTextRuns(group: FieldGroup): ReportTextRun[] {
-  if (group.layout !== 'vertical' || group.section_role === 'images' || group.image_layout || group.report_document) return [];
+  if (group.layout !== 'vertical' || group.report_document) return [];
   const runs: ReportTextRun[] = [];
   for (let index = 0; index < group.fields.length; index++) {
     const field = group.fields[index];
-    const candidate: FieldGroup = { ...group, report_source_fields: undefined, report_document: undefined, fields: [field] };
+    const candidate: FieldGroup = { ...group, section_role: group.section_role === 'images' ? 'other' : group.section_role,
+      image_layout: undefined, report_source_fields: undefined, report_document: undefined, fields: [field] };
     // Keep fixed spacers as layout blocks, not empty editors.
     if (field.type === 'spacer') continue;
     if (!canEditContinuousText(candidate)) {

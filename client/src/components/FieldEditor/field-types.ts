@@ -61,7 +61,6 @@ export const FIELD_CATEGORIES: FieldCategoryEntry[] = [
   { key: 'static_content', label: '说明 / 资料', icon: 'ⓘ', editors: ['record'], hint: '模板固定说明文字、图片或附件；录入时原位只读展示，不写入检测数据' },
   { key: 'record_conclusion', label: '旧版·项目结论', icon: '✅', editors: [], hint: '存量兼容类型；新模板请使用“结论”分区中的独立字段' },
   { key: 'report_conclusion', label: '报告·结论汇总表', icon: '📋', editors: ['report-cover'],   hint: '【报告首页用】检测结论汇总表，行 = 项目，自动展开' },
-  { key: 'report_result',     label: '报告·检测结果表', icon: '🧪', editors: ['report-project'], hint: '【项目报告用】画布式表格，每格绑定到原始记录的字段/矩阵单元/汇总' },
   { key: 'report_equipment',  label: '报告·设备表',     icon: '⚙️', editors: ['report-project'], hint: '【项目报告用】自动汇集原始记录中的设备引用 + 查设备库' },
   // 旧 report_image_gallery 仅为存量模板兼容；新项目统一使用 section_role='images' + image 字段，
   // 因此不再出现在新增字段菜单中（历史字段打开时仍可识别和迁移）。
@@ -73,7 +72,19 @@ export const FIELD_CATEGORIES: FieldCategoryEntry[] = [
 
 /** 当前编辑器可插入的字段类别（按 editors 白名单过滤；缺省的类别三处都可见）。 */
 export function categoriesForEditor(editorMode: EditorMode): FieldCategoryEntry[] {
-  return FIELD_CATEGORIES.filter(c => !c.editors || c.editors.includes(editorMode));
+  const categories = FIELD_CATEGORIES.filter(c => !c.editors || c.editors.includes(editorMode));
+  if (editorMode !== 'report-cover') return categories;
+  const descriptions: Record<string, [string, string]> = {
+    text: ['文字', '输入固定文字，或设置自动填入的数据来源。'],
+    spacer: ['空行', '设置留白高度。'],
+    report_conclusion: ['检测结论表', '自动汇总本报告各检测项目的结论。'],
+    report_photo_table: ['原样照片表', '带表头和说明的样品照片表。'],
+    report_sample_description_table: ['样品描述表', '按样品列出唯一性编号和描述。'],
+    report_sample_table: ['样品信息表', '自动列出样品名称、编号及零件号；单样品时按原规则隐藏。'],
+    image: ['样品照片', '生成报告时上传照片，可添加多张。'],
+    daterange: ['日期范围', '设置开始和结束日期，支持自动取值。'],
+  };
+  return categories.map(category => descriptions[category.key] ? { ...category, label: descriptions[category.key][0], hint: descriptions[category.key][1] } : category);
 }
 
 /**
@@ -85,6 +96,11 @@ export function categoriesForEditor(editorMode: EditorMode): FieldCategoryEntry[
 export function categoriesForGroup(editorMode: EditorMode, sectionRole?: SectionRole): FieldCategoryEntry[] {
   const categories = categoriesForEditor(editorMode);
   if (sectionRole === 'images') {
+    if (editorMode === 'report-project') return categories.filter(category => ['text', 'spacer'].includes(category.key));
+    if (editorMode === 'report-cover') {
+      const order: FieldCategory[] = ['image', 'text', 'report_sample_description_table', 'report_photo_table', 'spacer'];
+      return order.flatMap(key => categories.filter(category => category.key === key));
+    }
     // 报告首页的样品描述表需要与原样照片放在同一分区，并允许拖到照片前；
     // 原始记录/项目模板中该类别本身不在白名单，因此不会误出现在其它编辑器。
     return categories.filter(category => ['image', 'text', 'spacer', 'report_sample_description_table'].includes(category.key));
@@ -171,6 +187,7 @@ export function categoryOfField(f: FieldDefinition): FieldCategory {
 }
 
 export function getCategoryLabel(cat: FieldCategory): string {
+  if (cat === 'report_result') return '检测结果表（旧版）';
   return FIELD_CATEGORIES.find(c => c.key === cat)?.label ?? cat;
 }
 
@@ -241,7 +258,7 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
             id: `conclusion_${idSeed}`,
             code: 'overall',
             name_mode: 'inherit_project',
-            judgment_options: ['客户要求', '标准要求'],
+            judgment_options: ['标准要求', '客户要求'],
             conclusion_options: ['符合', '不符合'],
             judgment_required: true,
             conclusion_required: true,
@@ -250,8 +267,8 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
         },
       };
     case 'report_conclusion':
-      // hide_label:false → 默认显示标题＝字段 label（居左、跟随模板字体，走标准 figure/wrapFigure）。
-      return { ...base, type: 'report_conclusion_table', label: '检测结论', hide_label: false,
+      // 首页标题使用独立文字字段；新增表格默认不重复显示标题。
+      return { ...base, type: 'report_conclusion_table', label: '检测结论表', hide_label: true,
         conclusion_table: { columns: ['index', 'project', 'result'] } };
     case 'report_result':
       return { ...base, type: 'report_result_table', label: '检测结果',
@@ -278,12 +295,12 @@ export function createFieldForCategory(cat: FieldCategory, idSeed: string): Fiel
       return { ...base, type: 'report_image_gallery', label: '图片记录', image_gallery: {} };
     case 'report_photo_table':
       return { ...base, type: 'report_photo_table', label: '原样照片表', hide_label: true,
-        photo_table: { caption_label: '样品描述', caption_text: '见原始样品照片。', header: '原始样品', cols: 1 } };
+        photo_table: { caption_label: '', caption_text: '', header: '原始样品', cols: 1 } };
     case 'report_sample_table':
       return { ...base, type: 'report_sample_table', label: '样品信息表', hide_label: true,
         sample_table: { columns: ['index', 'name', 'model'] } };
     case 'report_sample_description_table':
-      return { ...base, type: 'report_sample_description_table', label: '样品描述：', hide_label: false,
+      return { ...base, type: 'report_sample_description_table', label: '样品描述表', hide_label: true,
         sample_description_table: {
           unique_label: '唯一性编号', description_label: '样品描述',
           default_description: '见原始样品照片', unique_width: '1fr', description_width: '3.5fr',
@@ -358,7 +375,7 @@ function rebuildFieldForCategoryInner(
       // 选择字段统一默认允许“其他（自定义）”；只有用户明确关闭并保存 false 时才禁用。
       const allow_custom = wasChoice ? (field.allow_custom ?? true) : true;
       if (subOption === 'multi') {
-        return { ...common, type: 'checkbox', options: prevOpts, allow_custom };
+        return { ...common, type: 'checkbox', options: prevOpts, allow_custom, choice_display: field.choice_display };
       }
       if (subOption === 'with_subfields') {
         return {
@@ -367,7 +384,7 @@ function rebuildFieldForCategoryInner(
           variants: prevVariants.length ? prevVariants : [],
         };
       }
-      return { ...common, type: 'select', options: prevOpts, allow_custom };
+      return { ...common, type: 'select', options: prevOpts, allow_custom, choice_display: field.choice_display };
     }
     case 'image':
       return { ...common, type: 'image' };
@@ -398,7 +415,7 @@ function rebuildFieldForCategoryInner(
         record_conclusion: field.record_conclusion || {
           mode: 'overall', project_name: '检测项目', allow_project_name_override: true,
           items: [{ id: `conclusion_${Date.now()}`, code: 'overall', name_mode: 'inherit_project',
-            judgment_options: ['客户要求', '标准要求'], conclusion_options: ['符合', '不符合'], judgment_required: true, conclusion_required: true, default_report_enabled: true }],
+            judgment_options: ['标准要求', '客户要求'], conclusion_options: ['符合', '不符合'], judgment_required: true, conclusion_required: true, default_report_enabled: true }],
         },
       };
     case 'report_conclusion':

@@ -6,7 +6,7 @@
  *
  *   - 取号前：查看订单信息 / 录入进度 / 只读原始记录；点「编辑首页」编辑首页实例（样品信息/结论值、
  *     字段增删改、表格样式——order 级首页草稿，取号后 carry 到每份报告）。
- *   - 取号后：每个报告编号一条目（显示样品/项目）；在条目内补齐对应样品·项目·原始记录 → 生成
+ *   - 取号后：每个报告编号一条目（显示样品/项目）；按已有的对应样品·项目·原始记录直接生成
  *     → 进实例编辑器（预览 + 换样品/项目 + 改字段/排版）。
  */
 import { useState, useEffect, useCallback } from 'react';
@@ -29,6 +29,8 @@ import TemplatePdfPreviewModal from '../../components/TemplatePdfPreviewModal';
 import { getGeneratedReportPreviewPdf } from '../../utils/pdfDownload';
 import { useAuth } from '../../auth';
 import { isInteractiveRowTarget } from '../../utils/rowNavigation';
+import { availableReportAssignments } from '../../../../shared/report-generation-selection';
+import { preferredReportTemplate } from '../../../../shared/report-template-preference';
 
 const API = '/api';
 
@@ -71,6 +73,8 @@ interface ReportTemplateRow {
 /** 取号报告匹配结果（接口 1.2，后端 external-report-info 算出） */
 interface ReqMatchEntry {
   scope_key: string;
+  method_name?: string;
+  base_scope_key?: string;
   sample_name: string;
   project_name: string;
   sample_external_id?: string | null;
@@ -300,7 +304,7 @@ export default function ReportWorkbench() {
     } finally { setApplyingCover(false); }
   };
 
-  // ── 取号报告：生成由系统自动完成（收到 1.2 即生成；数据后录入则本页载入兜底生成）──
+  // ── 取号报告：点击生成，采用当前范围内可用的记录和模板 ──
   // 数据退回(data_entry)意见：因不确定具体改哪条记录，汇总展示在「数据录入进度」下方（去重）。
   const dataReworkNotes = Array.from(new Set(
     records.filter(r => r.audit_status === 'rejected' && r.reject_note).map(r => r.reject_note as string),
@@ -317,27 +321,14 @@ export default function ReportWorkbench() {
     return (req.match_result || []).find(m => String(m.scope_key) === String(scopeKey))?.default_enabled !== false;
   };
 
-  /** 仅使用已确认的配置，不能从匹配结果静默生成。 */
-  const buildAssignments = (req: ReportRequisitionRow) => {
-    if (!req.generation_configured_at) return [];
-    const byScope = new Map((req.template_selections || []).filter(s => s.enabled !== false)
-      .map(s => [String(s.scope_key), s]));
-    return (req.match_result || []).flatMap(m => {
-      const selected = byScope.get(String(m.scope_key));
-      if (!selected?.record_data_id || !selected.project_template_id) return [];
-      const a = m.assignments.find(x => x.record_data_id === selected.record_data_id && x.record_data_status === 'reviewed');
-      return a ? [{ scope_key: m.scope_key, record_data_id: a.record_data_id,
-        project_template_id: selected.project_template_id, project_template_version_id: selected.project_template_version_id }] : [];
-    });
-  };
-
-  const needsTemplateChoice = (req: ReportRequisitionRow) => (req.match_result || []).some(m => {
-      if (!scopeIsEnabled(req, m.scope_key)) return false;
-      const a = m.assignments.find(x => x.record_data_status === 'reviewed');
-      return a && (a.project_template_candidates?.length || 0) > 0 && !a.project_template_id;
-    });
-  const needsConfiguration = (req: ReportRequisitionRow) => !req.generation_configured_at
-    && (req.match_result || []).some(m => m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed'));
+  const generationChoices = (req: ReportRequisitionRow) => (req.match_result || []).map(entry => ({
+    ...selectionFor(req, entry.scope_key), scope_key: entry.scope_key,
+    enabled: scopeIsEnabled(req, entry.scope_key),
+  }));
+  const buildAssignments = (req: ReportRequisitionRow) => availableReportAssignments(
+    req.match_result || [], generationChoices(req),
+    coverTemplates.find(t => Number(t.id) === Number(usableCoverId()))?.host_manufacturer_id,
+  );
 
   const saveTemplateSelection = async (
     req: ReportRequisitionRow,
@@ -367,58 +358,35 @@ export default function ReportWorkbench() {
   /** 首页模板有主机厂时，同一原始记录的同主机厂项目模板作为首选；用户仍可在下拉中改选。 */
   const preferredCandidate = (assignment: ReqMatchEntry['assignments'][number]) => {
     const candidates = assignment?.project_template_candidates || [];
-    const factoryId = coverTemplates.find(t => t.id === usableCoverId())?.host_manufacturer_id;
-    return factoryId ? candidates.find(c => Number(c.host_manufacturer_id) === Number(factoryId)) : undefined;
+    const factoryId = coverTemplates.find(t => Number(t.id) === Number(usableCoverId()))?.host_manufacturer_id;
+    return preferredReportTemplate(candidates, factoryId) || candidates[0];
   };
 
-  /** 确认范围配置后生成本报告，并立即进入编辑。 */
-  const confirmConfigAndGenerate = async (req: ReportRequisitionRow) => {
+  /** 按当前已有的记录和模板直接生成，暂缺的样品／项目自动跳过。 */
+  const generateRequisition = async (req: ReportRequisitionRow) => {
     const cover = usableCoverId();
     if (!cover) { message.warning('请先选择已生效的首页模板'); return; }
-    // 首次确认时写入同主机厂推荐模板；已由用户选过的项目模板绝不覆盖。
-    const configurable = (req.match_result || []).filter(m =>
-      m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed'));
-    const assignments = configurable.map(m => {
-      const enabled = scopeIsEnabled(req, m.scope_key);
-      const saved = selectionFor(req, m.scope_key);
-      const a = m.assignments.find(x => x.record_data_status === 'reviewed'
-        && (!saved?.record_data_id || x.record_data_id === saved.record_data_id))
-        || m.assignments.find(x => x.record_data_status === 'reviewed');
-      return { scope_key: m.scope_key, enabled, record_data_id: a?.record_data_id,
-        project_template_id: a?.project_template_id || (a ? preferredCandidate(a)?.id : undefined) };
-    });
-    if (!assignments.some(a => a.enabled)) { message.warning('请至少纳入一个已审核项目'); return; }
+    if (!buildAssignments(req).length) { message.warning('当前范围暂无可生成的已审核记录和生效项目模板'); return; }
     setConfiguringReq(req.id);
     try {
-      const configured = await axios.put(`${API}/external/requisitions/${req.id}/generation-config`, { assignments });
-      const selected = configured.data?.template_selections || [];
       const generated = await axios.post(`${API}/external/requisitions/generate`, {
         order_no: orderHeader.order_no, cover_template_id: cover,
-        items: [{ requisition_id: req.id, assignments: selected.filter((s: any) => s.enabled !== false) }],
+        items: [{ requisition_id: req.id, assignments: generationChoices(req) }],
       });
       const result = generated.data?.reports?.find((x: any) => x.requisition_id === req.id);
       if (!result?.ok || !result?.report_id) throw new Error(result?.error || '报告生成失败');
-      message.success('报告配置已确认并生成');
+      message.success('报告已按当前可用的样品和项目生成');
       loadRequisitions(); loadReports();
       navigate(`/report/edit?id=${result.report_id}`);
     } catch (e: any) {
-      message.error('配置或生成失败：' + (e.response?.data?.error || e.message));
+      message.error('生成失败：' + (e.response?.data?.error || e.message));
     } finally { setConfiguringReq(null); }
   };
 
   /** 已生成报告在工作台改选范围后，与编辑器“调整样品/项目”走同一 rescope 接口。 */
   const applyGeneratedScope = async (req: ReportRequisitionRow) => {
     if (!req.report_id) return;
-    const assignments = (req.match_result || []).flatMap(entry => {
-      const source = entry.assignments.find(a => a.record_data_status === 'reviewed');
-      if (!source) return [];
-      return [{
-        record_data_id: source.record_data_id,
-        // 尚无生效项目模板的已审核记录也可先纳入范围（0 = 待配置模板）。
-        project_template_id: source.project_template_id || 0,
-        enabled: scopeIsEnabled(req, entry.scope_key),
-      }];
-    });
+    const assignments = buildAssignments(req).map(({ record_data_id, project_template_id, enabled }) => ({ record_data_id, project_template_id, enabled }));
     if (!assignments.some(item => item.enabled)) { message.warning('请至少勾选一个已审核项目'); return; }
     setRescopingReq(req.id);
     try {
@@ -459,15 +427,13 @@ export default function ReportWorkbench() {
     if (req.delivery_status === 'sent') return { label: '已送审', color: 'cyan' };
     if (req.delivery_status === 'failed') return { label: '送审失败', color: 'red' };
     if (req.status === 'generated' && req.report_id) return { label: '待送审', color: 'green' };
-    if (needsConfiguration(req)) return { label: '待配置报告', color: 'orange' };
-    if (needsTemplateChoice(req)) return { label: '配置待补充', color: 'orange' };
-    return { label: buildAssignments(req).length ? '已配置待生成' : '待数据录入', color: 'default' };
+    return { label: buildAssignments(req).length ? '可生成报告' : '暂无可生成项目', color: 'default' };
   };
 
   /** 生成可用的首页模板：选中的（下拉只允许选 approved 且非空）或第一个已审核通过且有内容的。 */
   const usableCoverId = () => coverId ?? coverTemplates.find(t => t.current_status === 'approved' && (t.current_field_group_count ?? 0) > 0)?.id;
 
-  // 自动生成已停用：每份报告均须先由文员确认范围和项目模板。
+  // 点击生成即采用可用范围；展开条目可选调范围和模板。
 
   // 报告历史版本（退回修改→重新生成会保留旧版）
   const [historyFor, setHistoryFor] = useState<ReportRequisitionRow | null>(null);
@@ -646,7 +612,7 @@ export default function ReportWorkbench() {
           </Card>
           ); })()}
 
-          {/* ── 报告：每份报告一条目（编号/状态/样品），展开看样品×项目；生成由系统自动完成 ── */}
+          {/* ── 报告：每份报告一条目（编号/状态/样品），展开调整样品×项目；点击即可生成 ── */}
           {requisitions.length > 0 ? (
             <Card size="small" style={{ marginBottom: 12 }}
               title={<Space size={6}><FileTextOutlined />报告（{requisitions.length} 份）</Space>}
@@ -659,7 +625,7 @@ export default function ReportWorkbench() {
                 </Space>
               }>
               <div style={{ fontSize: 12, color: '#999', marginBottom: 10 }}>
-                请先展开每个报告编号，确认要纳入的样品和项目，并为每个纳入项目选择一份已生效项目模板；确认后才会生成并进入编辑。外部下发范围仅作为默认勾选，可改选本订单内任意已审核项目。
+                点击“生成报告”即可按当前已有的样品和项目生成，暂缺记录或模板的项目自动跳过。展开条目可调整范围和模板。
               </div>
               {requisitions.map(req => {
                 const generated = req.status === 'generated' && !!req.report_id;
@@ -749,10 +715,10 @@ export default function ReportWorkbench() {
                         </div>
                       ) : (
                         <Button size="small" type="primary" icon={<SettingOutlined />}
-                          disabled={!canEditReports || locked || !((req.match_result || []).some(m => m.status === 'matched' && m.assignments.some(a => a.record_data_status === 'reviewed')))}
+                          disabled={!canEditReports || locked || !buildAssignments(req).length}
                           loading={configuringReq === req.id}
-                          onClick={() => { if (!expanded) toggleReq(req.id); else confirmConfigAndGenerate(req); }}>
-                          {expanded ? '确认配置并生成' : '配置报告'}
+                          onClick={() => generateRequisition(req)}>
+                          生成报告
                         </Button>
                       )}
                     </div>
@@ -828,7 +794,9 @@ export default function ReportWorkbench() {
                               <span style={{ color: '#999', fontWeight: 400 }}>（{selectedCount}/{selectable.length || entries.length}）</span>
                             </div>
                             {!collapsed && entries.map(entry => {
-                              const assignment = entry.assignments.find(a => a.record_data_status === 'reviewed')
+                              const savedSelection = selectionFor(req, entry.scope_key);
+                              const assignment = entry.assignments.find(a => a.record_data_status === 'reviewed' && Number(a.record_data_id) === Number(savedSelection?.record_data_id))
+                                || entry.assignments.find(a => a.record_data_status === 'reviewed')
                                 || entry.assignments[0];
                               const candidates = assignment?.project_template_candidates || [];
                               const savingKey = `${req.id}:${entry.scope_key}:${assignment?.record_data_id}`;
@@ -853,7 +821,7 @@ export default function ReportWorkbench() {
                                         : row));
                                     }}
                                   />
-                                  <span style={{ color: '#333' }}>{entry.project_name}</span>
+                                  <span style={{ color: '#333' }}>{entry.project_name}{entry.method_name && <span style={{ display: 'block', color: '#888' }}>{entry.method_name}</span>}</span>
                                   {entry.status === 'matched' && assignment ? (
                                     <Select
                                       size="small"
@@ -868,7 +836,7 @@ export default function ReportWorkbench() {
                                       onChange={(value) => saveTemplateSelection(req, entry, assignment.record_data_id, value)}
                                       options={candidates.map(c => ({
                                         value: c.id,
-                                        label: `${c.name} · v${c.version_no}${c.project_name ? ` · ${c.project_name}` : ''}${recommendedCandidate?.id === c.id ? '（同主机厂推荐）' : ''}`,
+                                        label: `${c.name} · v${c.version_no}${c.project_name ? ` · ${c.project_name}` : ''}${recommendedCandidate?.id === c.id ? '（默认）' : ''}`,
                                       }))}
                                     />
                                   ) : (
@@ -883,7 +851,7 @@ export default function ReportWorkbench() {
                                     )}
                                     {entry.status === 'matched'
                                       ? <Tag color={assignment?.project_template_id ? 'green' : 'orange'} style={{ margin: 0 }}>
-                                          {assignment?.project_template_id ? '已确认' : '待选择'}
+                                          {assignment?.project_template_id ? '已选择' : recommendedCandidate ? '默认模板' : '暂无模板'}
                                         </Tag>
                                       : <Tag color="orange" style={{ margin: 0 }}>待补充</Tag>}
                                   </Space>
@@ -898,8 +866,8 @@ export default function ReportWorkbench() {
                           <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 10 }}>
                             <Button type="primary" icon={<SettingOutlined />} loading={configuringReq === req.id}
                               disabled={!canEditReports || locked}
-                              onClick={() => confirmConfigAndGenerate(req)}>
-                              确认配置并生成报告
+                              onClick={() => generateRequisition(req)}>
+                              生成报告
                             </Button>
                           </div>
                         )}
@@ -927,7 +895,7 @@ export default function ReportWorkbench() {
           ) : (
             <Alert type="info" showIcon style={{ marginBottom: 12 }}
               message="尚未收到报告编号"
-              description="报告编号与范围由外部系统下发。收到后系统会匹配已审核通过的原始记录；唯一项目模板可直接采用，多模板时由文员确认后生成。在此之前可先编辑首页、查看录入进度与只读原始记录。" />
+              description="报告编号与范围由外部系统下发。收到后系统会匹配已审核通过的原始记录；生成时自动采用可用项目模板，也可展开改选。在此之前可先编辑首页、查看录入进度与只读原始记录。" />
           )}
 
           {/* 报告退回(scope=report)的退回意见与处理已就近在每份报告条目内；不再单设底部「外部返工」面板。 */}

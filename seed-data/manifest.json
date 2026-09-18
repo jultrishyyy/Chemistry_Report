@@ -1,0 +1,8 @@
+{
+  "exported_at": "2026-09-18T16:40:36.675Z",
+  "source_database": "cdr_demo",
+  "database_dump_bytes": 1313014,
+  "uploads_bytes": 13984831,
+  "legacy_uploads_bytes": 234327,
+  "restore_target": "PostgreSQL 16 / cdr_report"
+}

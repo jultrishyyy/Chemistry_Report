@@ -32,7 +32,7 @@ export function findImageCollection(
   group: FieldGroup,
 ): RecordImageCollection | undefined {
   if (!rawData) return undefined;
-  const direct = rawData[imageCollectionKey(group.id)];
+  const direct = rawData[imageCollectionKey(group.image_source_group_id || group.id)];
   if (isRecordImageCollection(direct)) return direct;
   const sourceCodes = new Set(group.fields
     .filter(field => field.type === 'image')

@@ -25,6 +25,8 @@ function triggerDownload(url: string, filename: string) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+  // Allow the browser to begin the download before releasing its private URL.
+  if (url.startsWith('blob:')) window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 const safe = (s: string) => (s || 'document').replace(/[\\/:*?"<>|]/g, '-');
