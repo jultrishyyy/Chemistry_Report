@@ -14,6 +14,7 @@ import ConclusionItemsTable from '../ConclusionItemsTable';
 import { findImageCollection, imageCollectionFromLegacy, imageCollectionKey, type RecordImageCollection } from '../../../../shared/image-collection';
 import { resolveFreeGridCellReference } from '../../../../shared/free-grid-formula';
 import { freeGridNumberText, roundFreeGridValue } from '../../../../shared/free-grid-number';
+import { freeGridTextDefault } from '../../../../shared/free-grid-defaults';
 import { freeGridAddress, freeGridFormulaLabel } from '../../../../shared/free-grid-formula-label';
 import { columnName } from '../../../../shared/excel-import';
 import FreeGridNumberInput from '../FreeGridNumberInput';
@@ -1048,7 +1049,7 @@ export default function FormRenderer({
                             </span>;
                           })() : isInput ? (
                             <span style={{ display: 'inline-flex', alignItems: 'center', width: '100%' }}>
-                              <FreeGridNumberInput size="small" variant="borderless" value={gridVal[vk] ?? ''} displayValue={freeGridNumberText(gridVal[vk] ?? '', ft, k)} onChange={(e) => setCell(vk, e.target.value)} style={textStyle} />
+                              <FreeGridNumberInput size="small" variant="borderless" value={gridVal[vk] ?? freeGridTextDefault(ft, k)} displayValue={freeGridNumberText(gridVal[vk] ?? freeGridTextDefault(ft, k), ft, k)} onChange={(e) => setCell(vk, e.target.value)} style={textStyle} />
                               {ft.cell_unit_options?.[k]?.length
                                 ? <Select size="small" variant="borderless" style={{ minWidth: 50 }} value={gridVal[`${vk}::__unit__`] || undefined} placeholder="单位"
                                     options={ft.cell_unit_options[k].map((u: string) => ({ value: u, label: u }))} onChange={(v) => setCell(`${vk}::__unit__`, (v as string) || '')} />

@@ -25,7 +25,8 @@ import { executeWithFullPrecision, type Formula } from '../../../../../shared/fo
 import { encodeFreeGridCellReference, resolveFreeGridCellReference } from '../../../../../shared/free-grid-formula';
 import { numericRoundingLabel } from '../../../../../shared/numeric-rounding';
 import { roundFreeGridValue, freeGridNumberText } from '../../../../../shared/free-grid-number';
-import { setFreeGridTableNumberFormat } from '../../../../../shared/free-grid-number-settings';
+import { freeGridRoundingOptions, setFreeGridTableNumberFormat } from '../../../../../shared/free-grid-number-settings';
+import { freeGridTextDefault } from '../../../../../shared/free-grid-defaults';
 import BindingPickerModal, { BindingSummary, describeFreeGridCellSource } from '../../ReportEditor/BindingPickerModal';
 import { recordSampleBands, sampleBandForCell } from '../../../../../shared/free-grid-binding';
 import AutoGrowTextArea from '../../AutoGrowTextArea';
@@ -66,17 +67,6 @@ const CELL_FONT_OPTIONS = [
   { value: 'Times New Roman', label: 'Times New Roman' },
 ];
 
-const ROUNDING_OPTIONS = [
-  { value: 'none', label: '不修约' },
-  { value: 'half_up', label: '四舍五入' },
-  { value: 'half_even', label: '四舍六入五单双（五成双）' },
-  { value: 'truncate', label: '直接截尾' },
-  { value: 'ceil', label: '向上修约' },
-  { value: 'floor', label: '向下修约' },
-  { value: 'multiple_2', label: '间隔 2（五成双）' },
-  { value: 'multiple_5', label: '间隔 5（五成双）' },
-  { value: 'piecewise', label: '按数值区间修约' },
-];
 const NUMBER_FORMAT_OPTIONS = [
   { value: 'none', label: '不格式化' },
   { value: 'decimals', label: '小数位' },
@@ -955,10 +945,9 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     });
     update({ ...stripForBinding(keys), cell_bindings: nextBindings, cell_unit_bindings: nextUnits });
   };
-  const selCellKey = (range && selCount === 1) ? keyAt(range.minR, range.minC) : null;
   // 合并格/逐试样视觉合并格虽然覆盖多个物理格，用户看到并选中的是一个逻辑格，
-  // 报告映射应允许把它当作单格操作。
-  const mappingCellKey = range ? (() => {
+  // 公式和报告映射都应允许把它当作单格操作。
+  const selCellKey = range ? (() => {
     if (selCount === 1) return keyAt(range.minR, range.minC);
     const visual = spanRectAt(range.minR, range.minC);
     return visual.minR === range.minR && visual.maxR === range.maxR
@@ -966,6 +955,7 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
       ? keyAt(range.minR, range.minC)
       : null;
   })() : null;
+  const mappingCellKey = selCellKey;
   const selectedBindingKeys: string[] = [];
   if (range) for (let ri = range.minR; ri <= range.maxR; ri++) for (let ci = range.minC; ci <= range.maxC; ci++) {
     const key = keyAt(ri, ci);
@@ -1816,12 +1806,14 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
     const nextAllowCustom = { ...(current.cell_option_allow_custom || {}) };
     const nextNumFmt = { ...(current.cell_number_fmt || {}) };
     const nextRounding = { ...(current.cell_rounding || {}) };
+    const nextCells = { ...current.cells };
     keys.forEach(key => {
+      if (type !== 'text' && current.cell_types?.[key] === 'text' && current.input_cells?.[key]) delete nextCells[key];
       nextTypes[key] = type;
       if (type !== 'choice') { delete nextOptions[key]; delete nextAllowCustom[key]; }
       if (type !== 'number') { delete nextNumFmt[key]; delete nextRounding[key]; }
     });
-    update({ cell_types: nextTypes, cell_options: nextOptions, cell_option_allow_custom: nextAllowCustom, cell_number_fmt: nextNumFmt, cell_rounding: nextRounding });
+    update({ cells: nextCells, cell_types: nextTypes, cell_options: nextOptions, cell_option_allow_custom: nextAllowCustom, cell_number_fmt: nextNumFmt, cell_rounding: nextRounding });
   };
   const initUnitMode = (k: string | undefined) => setUnitModeSel(k && cellUnitOptions[k]?.length ? 'options' : 'fixed');
   const setColWidthFor = (keys: string[], w: string) => { const ids = new Set(keys.map(k => k.split('::')[1])); update({ columns: cols.map(c => ids.has(c.id) ? { ...c, width: w || undefined } : c) }); };
@@ -1930,13 +1922,20 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               <QuestionCircleOutlined style={{ marginLeft: 3, color: '#bbb' }} />
             </Tooltip>
           </div>
-          <Select size="small" style={{ width: '100%' }} value={curType === '__mixed__' ? undefined : curType}
+          <Select aria-label="单元格数据类型" size="small" style={{ width: '100%' }} value={curType === '__mixed__' ? undefined : curType}
             placeholder={curType === '__mixed__' ? '多种类型（请选择统一类型）' : undefined}
             onChange={(t) => setCellDataType(keys, t as 'text' | 'number' | 'choice')} getPopupContainer={getPopupContainer}
             options={[
               { value: 'text', label: '文字' }, { value: 'number', label: '数字' }, { value: 'choice', label: '选择' },
             ]} />
         </div>)}
+        {isRecordEditor && curRole === 'input' && curType === 'text' && keys.every(key => !sampleIndexCells[key]) && (
+          <div><div style={lab}>默认填写内容</div>
+            <AutoGrowTextArea aria-label="默认填写内容" size="small"
+              placeholder={commonContent === undefined ? '所选格内容不同；输入后统一覆盖' : '默认填写内容'}
+              value={commonContent ?? ''} onChange={event => setMapFor('cells', keys, event.target.value)} />
+          </div>
+        )}
         {!linkedRecord && curRole === 'input' && keys.every(cellInBand) && (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={lab}>试样自动序号</span>
@@ -1978,13 +1977,13 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
         {isRecordEditor && curType === 'number' && (
           <div><div style={lab}>数值修约 <span style={{ color: '#999' }}>（先修约，再格式化）</span></div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <Select size="small" style={{ flex: 1 }}
+              <Select aria-label="单元格修约方式" size="small" style={{ flex: 1 }}
                 value={commonRounding?.mode}
                 placeholder={commonRounding ? undefined : '多种修约方式'} getPopupContainer={getPopupContainer}
                 onChange={(mode) => {
                   setMapFor('cell_rounding', keys, { mode });
                 }}
-                options={ROUNDING_OPTIONS} />
+                options={freeGridRoundingOptions(commonRounding?.mode)} />
             </div>
             {commonRounding?.mode === 'piecewise' && <RoundingIntervalsEditor value={commonRounding} onChange={rule => setMapFor('cell_rounding', keys, rule)} />}
             <div style={{ marginTop: 4, fontSize: 11, color: '#8c8c8c' }}>普通修约位数随数字格式，如小数 1 位对应间隔 0.2/0.5；分段规则按所填间隔。下游公式引用修约后的值，原始输入保留。</div>
@@ -2124,11 +2123,11 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
           <Tooltip title="修约改变实际数值，之后再应用数字显示格式；单元格配置可覆盖整表规则。">
             <span style={{ ...gLabel, marginLeft: 4 }}>整表修约</span>
           </Tooltip>
-          <Select size="small" style={{ width: 148 }} value={ft.default_rounding?.mode || 'none'}
+          <Select aria-label="整表修约方式" size="small" style={{ width: 148 }} value={ft.default_rounding?.mode || 'none'}
             onChange={(mode) => {
               update({ default_rounding: mode === 'none' ? undefined : { mode: mode as NonNullable<FT['default_rounding']>['mode'] } });
             }}
-            options={ROUNDING_OPTIONS} />
+            options={freeGridRoundingOptions(ft.default_rounding?.mode)} />
           {ft.default_rounding?.mode === 'piecewise' && <RoundingIntervalsEditor value={ft.default_rounding} onChange={rule => update({ default_rounding: rule })} />}
         </>}
         {!isRecordEditor && !staticContentMode && (ft.default_number_fmt || ft.default_rounding || Object.keys(cellNumFmt).length > 0 || Object.keys(cellRounding).length > 0) && (
@@ -2964,10 +2963,9 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
                       ) : (cellOptions[k]?.length || cellTypes[k] === 'choice') ? (
                         <div style={{ padding: '2px 6px', color: '#d48806', ...cellTextStyle, fontSize: 10, lineHeight: 1.35 }} title={`录入·选择（录入时从选项里选）：${(cellOptions[k] || []).join(' / ') || '未设选项'}`}>▾ 录入·选择</div>
                       ) : isInput ? (
-                        // 录入格：模板里只占位、不可填值（值在「数据录入」环节由工程师填）；文字提示居中、按类型着色
-                        <div style={{ padding: '2px 6px', color: cellTypes[k] === 'text' ? '#7cb305' : '#69a9ff', ...cellTextStyle, fontSize: 10, lineHeight: 1.35 }}
-                          title="录入格：数据录入时由工程师填值，模板中不填">
-                          {sampleIndexCells[k] ? '自动序号' : `录入${cellTypes[k] === 'number' ? '·数字' : cellTypes[k] === 'text' ? '·文字' : ''}${cellUnits[k] ? `（${cellUnits[k]}）` : ''}`}
+                        <div style={{ padding: '2px 6px', color: cellTypes[k] === 'text' ? '#7cb305' : '#69a9ff', ...cellTextStyle, fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+                          title={freeGridTextDefault(ft, k) ? '默认填写内容' : '录入格'}>
+                          {sampleIndexCells[k] ? '自动序号' : freeGridTextDefault(ft, k) || `录入${cellTypes[k] === 'number' ? '·数字' : cellTypes[k] === 'text' ? '·文字' : ''}${cellUnits[k] ? `（${cellUnits[k]}）` : ''}`}
                         </div>
                       ) : (
                         // 固定文字/表头：模板里直接输入内容

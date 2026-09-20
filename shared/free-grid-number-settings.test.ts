@@ -1,10 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setFreeGridTableNumberFormat } from './free-grid-number-settings.ts';
+import { freeGridRoundingOptions, setFreeGridTableNumberFormat } from './free-grid-number-settings.ts';
 import { generateMockData } from './mock-data.ts';
 import { generateTypstWithData } from './typst-generator.ts';
 import { freeGridNumberText } from './free-grid-number.ts';
 import type { FieldDefinition, RecordTemplate } from './types';
+
+test('rounding selectors remove retired choices while saved legacy rules retain their values', () => {
+  const modes = ['none', 'half_even', 'truncate', 'ceil', 'multiple_2', 'multiple_5', 'piecewise'];
+  assert.deepEqual(freeGridRoundingOptions().map(option => option.value), modes);
+  for (const mode of ['half_up', 'floor'] as const) {
+    const options = freeGridRoundingOptions(mode);
+    assert.deepEqual(options.filter(option => !option.disabled).map(option => option.value), modes);
+    assert.ok(options.find(option => option.value === mode)?.disabled);
+    const table: NonNullable<FieldDefinition['free_table']> = {
+      rows: [], columns: [], cells: {}, input_cells: { value: true },
+      default_number_fmt: { mode: 'decimals', digits: 1 }, default_rounding: { mode },
+    };
+    assert.equal(freeGridNumberText('1.25', table, 'value'), mode === 'half_up' ? '1.3' : '1.2');
+  }
+});
 
 test('whole-table decimal changes replace stale per-cell precision in mock and live PDF', () => {
   const table: NonNullable<FieldDefinition['free_table']> = {

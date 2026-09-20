@@ -9,7 +9,7 @@ import type { RecordTemplate, FieldGroup, FieldDefinition, DataMatrixValue, Data
 import { buildGroupTree } from './group-tree';
 import { compactConclusionChildren, CONCLUSION_COLUMNS, conclusionDisplayField } from './conclusion-table-layout';
 import { fixedFirstPageSignature } from './signature-position';
-import { freeGridNumberText, roundFreeGridValue, formatGridNumber } from './free-grid-number';
+import { freeGridNumberText, freeGridNumberFormat, roundFreeGridValue, formatGridNumber } from './free-grid-number';
 import { REPORT_BODY_PARAGRAPH_GAP_EM } from './report-body-layout';
 import { projectReportTextRuns } from './report-text-runs';
 import { coverPartText, coverTextSegments } from './cover-text-selection';
@@ -3034,12 +3034,7 @@ export function renderFreeGridTypst(
         : ft.cell_unit_options?.[key]?.length
           ? (dataOverride?.[`${key}::__unit__`] || ft.cell_unit_options[key][0] || '')
           : ft.cell_units?.[key];
-      // 数字格式：单格格式恒生效；整表默认格式只作用于「数据格」(数字型/录入/绑定/公式)，
-      // 不套到固定文字标签/表头（否则试样序号 1/2/3 会被误格式成 1.00×10⁰）
-      const isDataCell = ft.cell_types?.[key] === 'number' || !!ft.input_cells?.[key] || !!ft.cell_bindings?.[key] || !!ft.cell_formulas?.[key];
-      // 未配置单格或整表格式时保留原数值，不给公式格隐式补三位小数。
-      const numFmt = ft.cell_number_fmt?.[key]
-        ?? (isDataCell ? ft.default_number_fmt : undefined);
+      const numFmt = freeGridNumberFormat(ft, key);
       const cellStyle = ft.cell_styles?.[key] ? { color: ts?.color, italic: ts?.italic, ...ft.cell_styles[key] } : undefined;
       const baseStyle = isHeader
         ? { bold: ts?.header_bold !== false, font: ts?.header_font, size: ts?.header_font_size }

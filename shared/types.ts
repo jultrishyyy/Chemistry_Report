@@ -652,7 +652,7 @@ export interface FieldDefinition {
     row_height_mode?: 'track';
     columns: Array<{ id: string; label: string; width?: string; style?: StyleOverride; /** 仅当前数据录入记录新增，不属于模板骨架。 */ entry_added?: true }>;
     rows: Array<{ id: string; height?: string; /** 仅当前数据录入记录新增，不属于模板骨架。 */ entry_added?: true }>;
-    /** 单元格值：键 = `${rowId}::${colId}`（仅主格；被合并覆盖的格不存键、渲染时跳过）。 */
+    /** 单元格内容及文字录入格默认值：键 = `${rowId}::${colId}`（仅主格；被合并覆盖的格不存键、渲染时跳过）。 */
     cells: Record<string, string>;
     /**
      * 合并跨度：键 = `${rowId}::${colId}`（主格），值 = { colspan, rowspan }（按列/行顺序向右/下延展）。

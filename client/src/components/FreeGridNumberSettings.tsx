@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, InputNumber, Popover, Select, Space } from 'antd';
 import type { FieldDefinition, NumericRoundingRule } from '../../../shared/types';
 import RoundingIntervalsEditor from './RoundingIntervalsEditor';
+import { freeGridRoundingOptions } from '../../../shared/free-grid-number-settings';
 type Table = NonNullable<FieldDefinition['free_table']>;
 export default function FreeGridNumberSettings({ table, cellKeys, onChange }: { table: Table; cellKeys: string[]; onChange: (table: Table) => void }) {
   const [scope, setScope] = useState<'selection' | 'table'>('selection');
@@ -30,10 +31,7 @@ export default function FreeGridNumberSettings({ table, cellKeys, onChange }: { 
       { value: 'none', label: '不格式化' }, { value: 'decimals', label: '小数位' }, { value: 'scientific', label: '科学计数法' }, { value: 'significant', label: '有效数字' },
     ]} />{!mixedFormat && fmt.mode !== 'none' && <InputNumber aria-label="格式位数" disabled={disabled} min={fmt.mode === 'significant' ? 1 : 0} max={10} value={fmt.digits} onChange={digits => { if (digits != null) setFormat({ ...fmt, digits }); }} />}</Space>
     <span>数值修约（参与后续计算）</span>
-    <Space wrap><Select aria-label="修约方式" placeholder="多种修约规则" disabled={disabled} style={{ width: 210 }} value={mixedRounding ? undefined : rounding.mode} onChange={mode => setRounding({ mode })} options={[
-      { value: 'none', label: '不修约' }, { value: 'half_up', label: '四舍五入' }, { value: 'half_even', label: '四舍六入五成双' }, { value: 'truncate', label: '直接截尾' },
-      { value: 'ceil', label: '向上修约' }, { value: 'floor', label: '向下修约' }, { value: 'multiple_2', label: '间隔 2（五成双）' }, { value: 'multiple_5', label: '间隔 5（五成双）' }, { value: 'piecewise', label: '按数值区间修约' },
-    ]} /></Space>
+    <Space wrap><Select aria-label="修约方式" placeholder="多种修约规则" disabled={disabled} style={{ width: 210 }} value={mixedRounding ? undefined : rounding.mode} onChange={mode => setRounding({ mode })} options={freeGridRoundingOptions(mixedRounding ? undefined : rounding.mode)} /></Space>
     {rounding.mode === 'piecewise' && <RoundingIntervalsEditor value={rounding} onChange={setRounding} disabled={disabled} />}
     {!whole && <Button size="small" disabled={disabled} onClick={() => {
       const formats = { ...table.cell_number_fmt }, rules = { ...table.cell_rounding };

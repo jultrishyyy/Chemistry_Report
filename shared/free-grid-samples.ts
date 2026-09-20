@@ -1,4 +1,5 @@
 import type { FieldDefinition } from './types';
+import { freeGridTextDefault } from './free-grid-defaults';
 export type SampleAxisEntry = { ref: string; sample: number };
 export const sampleAxesKey = (bandId: string) => `__sample_axes__::${bandId}`;
 export function readSampleAxes(raw: Record<string, any>, bandId: string): SampleAxisEntry[] | undefined {
@@ -47,7 +48,7 @@ export function editSampleAxes(
     if (band.cross_refs?.length && !band.cross_refs.includes(item.id)) continue;
     const key = band.axis === 'row' ? `${ref}::${item.id}` : `${item.id}::${ref}`;
     // Retain layout, options, units and formulas, but never copy a measured value.
-    if (table.input_cells?.[key] && !table.header_cells?.[key] && !table.cell_formulas?.[key]) result[`${key}::s${next}`] = '';
+    if (table.input_cells?.[key] && !table.header_cells?.[key] && !table.cell_formulas?.[key]) result[`${key}::s${next}`] = freeGridTextDefault(table, key);
   }
   return result;
 }

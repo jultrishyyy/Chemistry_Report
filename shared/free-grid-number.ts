@@ -4,7 +4,13 @@ import { isFormulaError } from './formula-error';
 
 type Table = NonNullable<FieldDefinition['free_table']>;
 type Format = NonNullable<Table['cell_number_fmt']>[string];
+function isLiteralCell(table: Table, key: string): boolean {
+  const source = table.cell_bindings?.[key]?.source;
+  if (source === 'record_free_formula_cell' || source === 'record_free_formula_cell_sample') return false;
+  return !table.cell_formulas?.[key] && (table.cell_types?.[key] === 'text' || table.cell_types?.[key] === 'choice');
+}
 export function freeGridNumberFormat(table: Table, key: string): Format | undefined {
+  if (isLiteralCell(table, key)) return undefined;
   const data = table.cell_types?.[key] === 'number' || table.input_cells?.[key] || table.cell_formulas?.[key] || table.cell_bindings?.[key];
   return table.cell_number_fmt?.[key] ?? (data ? table.default_number_fmt : undefined);
 }
@@ -19,6 +25,7 @@ export function numberFormatDigits(value: unknown, fmt: Format): number {
 export function roundFreeGridValue(value: unknown, table: Table | undefined, key: string): unknown {
   if (isFormulaError(value)) return value;
   if (!table) return value;
+  if (isLiteralCell(table, key)) return value;
   const data = table.cell_types?.[key] === 'number' || table.input_cells?.[key] || table.cell_formulas?.[key] || table.cell_bindings?.[key];
   const rule = table.cell_rounding?.[key] ?? (data ? table.default_rounding : undefined);
   if (!rule || rule.mode === 'none') return value;

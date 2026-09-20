@@ -3,6 +3,8 @@ import { execute, type Formula } from './formula-engine';
 import { evalArithmetic } from './expr-eval';
 import { recordSampleBands } from './free-grid-binding';
 import { sampleAxesKey } from './free-grid-samples';
+import { buildFreeGridLayout } from './free-grid-layout';
+import { freeGridTextDefault } from './free-grid-defaults';
 import { projectLegacyMatrices } from './legacy-matrix-bridge.ts';
 
 export function matrixDataKey(sampleId: string, paramCode: string): string {
@@ -93,6 +95,15 @@ export function buildFieldDefaults(template: RecordTemplate): Record<string, any
           const axis = band.axis === 'row' ? f.free_table.rows : f.free_table.columns;
           initial[sampleAxesKey(band.id)] = axis.filter(item => band.refs.includes(item.id)).map(item => ({ ref: item.id, sample: 0 }));
         }
+        const layout = buildFreeGridLayout(f.free_table, initial);
+        layout.displayRows.forEach((row, ri) => layout.displayCols.forEach((col, ci) => {
+          if (layout.covered.has(`${ri},${ci}`)) return;
+          const key = `${row.id}::${col.id}`;
+          const value = freeGridTextDefault(f.free_table!, key);
+          if (value === '') return;
+          const sample = layout.sampleForCell(row.id, col.id, row.sample, col.sample);
+          initial[sample == null ? key : `${key}::s${sample}`] = value;
+        }));
         if (Object.keys(initial).length) init[f.code] = initial;
       }
       if (f.default_value === undefined || f.default_value === null || f.default_value === '') continue;

@@ -11,6 +11,7 @@ import { matrixDataKey, createEmptyMatrixValue, flattenMatrixValuesToFlatData, a
 import { execute, topologicalOrder } from './formula-engine';
 import { sampleAxesKey } from './free-grid-samples';
 import { formatDateByPrecision } from './date-precision';
+import { freeGridTextDefault } from './free-grid-defaults';
 
 /**
  * 示例图片目录【占位符】（不写死任何机器路径，可跨服务器部署）。
@@ -148,7 +149,7 @@ function mockFreeGridValue(ft: FieldDefinition['free_table']): Record<string, an
     const o = opts[key]; // 选择框格（含表头选择框）：用首个选项，否则预览会空白无法渲染
     if (o && o.length) return o[0];
     const t = types[key];
-    if (t === 'text') return '示例';                       // 明确文字格 → 文字示例
+    if (t === 'text') return freeGridTextDefault(ft, key) || '示例';
     // 保留足够原始精度和 5 临界位，让修约与显示格式变化在预览里肉眼可见；实际修约/格式化由统一渲染器完成。
     if (t === 'number' || numFmt[key] || rounding[key] || hasTableNumFmt || hasTableRounding) {
       const base = 10.125 + (ni++ * 6.37125) % 88;
