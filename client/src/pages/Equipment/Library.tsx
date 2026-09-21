@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Table, Input, Button, Space, Upload, message, Tag, Modal, Descriptions } from 'antd';
-import { SearchOutlined, UploadOutlined, EyeOutlined } from '@ant-design/icons';
+import { Table, Input, Button, Space, Upload, message, Tag, Modal, Descriptions, Alert, Spin, Tooltip, Grid } from 'antd';
+import { SearchOutlined, UploadOutlined, EyeOutlined, ReloadOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { ListPageSizeControl, useListPagination } from '../../hooks/useListPagination';
 
@@ -18,7 +18,84 @@ interface Equipment {
   status?: string;
   category?: string;
   department?: string;
-  raw_payload?: Record<string, any>;
+  raw_payload?: Record<string, unknown> | null;
+}
+
+function detailValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value !== 'object') return String(value);
+  // Excel 富文本单元格保存在原始数据中，详情只展示文本内容。
+  if ('richText' in value && Array.isArray(value.richText)) {
+    return value.richText.map(part => String(part.text ?? '')).join('');
+  }
+  return JSON.stringify(value);
+}
+
+function EquipmentDetail({ id, onClose }: { id: number; onClose: () => void }) {
+  const screens = Grid.useBreakpoint();
+  const [detail, setDetail] = useState<Equipment | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const res = await axios.get<Equipment>(`${API}/equipment/${id}`, { signal: controller.signal });
+        if (!controller.signal.aborted) setDetail(res.data);
+      } catch (e: unknown) {
+        if (controller.signal.aborted) return;
+        setError(axios.isAxiosError(e)
+          ? e.response?.status === 404 ? '该设备不存在或已被删除' : e.response?.data?.error || e.message
+          : e instanceof Error ? e.message : '请稍后重试');
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [id, attempt]);
+
+  const rawEntries = Object.entries(detail?.raw_payload || {});
+  const entries = rawEntries.length ? rawEntries : detail ? Object.entries({
+    管理编号: detail.asset_code,
+    仪器名称: detail.name,
+    仪器型号: detail.model,
+    出厂编号: detail.factory_serial,
+    证书编号: detail.cert_no,
+    溯源日期: detail.trace_date,
+    到期日期: detail.expire_date,
+    状态: detail.status,
+    设备类别: detail.category,
+    所属部门: detail.department,
+  }) : [];
+
+  return (
+    <Modal title="设备详情" open onCancel={onClose} footer={null} width={720}
+      style={{ top: 24, paddingBottom: 24 }}
+      styles={{ body: { maxHeight: 'calc(100dvh - 140px)', overflowY: 'auto', overscrollBehavior: 'contain' } }}>
+      {loading ? (
+        <div role="status" aria-label="正在加载设备详情" style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
+      ) : error ? (
+        <Alert type="error" showIcon title="设备详情加载失败" description={error}
+          action={<Button size="small" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>重试</Button>} />
+      ) : detail && (
+        <>
+          {!rawEntries.length && <Alert type="info" showIcon title="未保留 Excel 原始字段，以下为设备基本信息" style={{ marginBottom: 16 }} />}
+          <Descriptions column={screens.sm ? 2 : 1} size="small" bordered
+            style={{ overflowWrap: 'anywhere' }}
+            styles={{
+              label: { width: screens.sm ? '20%' : 96 },
+              content: { width: screens.sm ? '30%' : undefined, whiteSpace: 'pre-wrap' },
+            }}
+            items={entries.map(([label, value]) => ({ key: label, label, children: detailValue(value) }))} />
+        </>
+      )}
+    </Modal>
+  );
 }
 
 export default function EquipmentLibrary() {
@@ -28,7 +105,7 @@ export default function EquipmentLibrary() {
   const [keyword, setKeyword] = useState('');
   const { pagination, current: page, setCurrent: setPage, pageSize, setPageSize } = useListPagination(keyword);
   const [uploading, setUploading] = useState(false);
-  const [detail, setDetail] = useState<Equipment | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
 
   const fetchList = useCallback(async () => {
     setLoading(true);
@@ -108,26 +185,15 @@ export default function EquipmentLibrary() {
             return <Tag color={color}>{v}</Tag>;
           }},
           { title: '部门', dataIndex: 'department', width: 160 },
-          { title: '操作', width: 60, render: (_, row) => <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => setDetail(row)} /> },
+          { title: '操作', width: 60, render: (_, row) => (
+            <Tooltip title="查看设备详情">
+              <Button size="small" type="text" aria-label={`查看设备详情：${row.asset_code}`} icon={<EyeOutlined />} onClick={() => setDetailId(row.id)} />
+            </Tooltip>
+          ) },
         ]}
       />
 
-      <Modal
-        title="设备详情"
-        open={!!detail}
-        onCancel={() => setDetail(null)}
-        footer={null}
-        width={720}
-        destroyOnClose
-      >
-        {detail && (
-          <Descriptions column={2} size="small" bordered>
-            {Object.entries(detail.raw_payload || {}).filter(([_, v]) => v !== null && v !== undefined && v !== '').map(([k, v]) => (
-              <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
-            ))}
-          </Descriptions>
-        )}
-      </Modal>
+      {detailId !== null && <EquipmentDetail key={detailId} id={detailId} onClose={() => setDetailId(null)} />}
     </div>
   );
 }
