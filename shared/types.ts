@@ -1243,7 +1243,7 @@ export type ReportMetaBindKey =
 
 /** 报告内一个格子取值的统一描述 */
 export type CellBinding =
-  | { source: 'literal'; text: string }
+  | { source: 'literal'; text: string; /** Retain numeric formatting when sample formulas are resolved for rendering. */ formula_result?: true }
   | { source: 'record_field'; field_code: string }
   | { source: 'record_cell'; matrix_code: string; sample_idx: number; param_code: string }
   | { source: 'record_summary'; matrix_code: string; row_id: string; param_code?: string }

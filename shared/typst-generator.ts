@@ -2629,7 +2629,7 @@ function expandFreeGridBand(
         return { source: 'literal', text: freeGridValueText(roundFreeGridValue(value, sourceTable, b.cell_key)) };
       }
       if (b.source === 'record_sample_index') return { source: 'literal', text: String(i + 1) };
-      if (b.source === 'record_free_formula_cell_sample') return { source: 'literal', text: resolveRecordFreeFormulaCell(b.field_code, b.cell_key, ctx, sourceIndex) };
+      if (b.source === 'record_free_formula_cell_sample') return { source: 'literal', text: resolveRecordFreeFormulaCell(b.field_code, b.cell_key, ctx, sourceIndex), formula_result: true };
       return b;
     };
   } else {

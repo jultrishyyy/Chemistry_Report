@@ -5,8 +5,10 @@ import { isFormulaError } from './formula-error';
 type Table = NonNullable<FieldDefinition['free_table']>;
 type Format = NonNullable<Table['cell_number_fmt']>[string];
 function isLiteralCell(table: Table, key: string): boolean {
-  const source = table.cell_bindings?.[key]?.source;
-  if (source === 'record_free_formula_cell' || source === 'record_free_formula_cell_sample') return false;
+  const binding = table.cell_bindings?.[key];
+  const source = binding?.source;
+  if (source === 'record_free_formula_cell' || source === 'record_free_formula_cell_sample'
+    || (source === 'literal' && binding.formula_result)) return false;
   return !table.cell_formulas?.[key] && (table.cell_types?.[key] === 'text' || table.cell_types?.[key] === 'choice');
 }
 export function freeGridNumberFormat(table: Table, key: string): Format | undefined {
