@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 
 import { pool } from '../db.js';
 import { requirePermission } from './auth.js';
+import { buildFieldDefaults } from '../../../shared/matrix-flatten.js';
 
 const router = Router();
 
@@ -282,7 +283,7 @@ router.post('/:orderNo/bulk-link', requirePermission('record.entry'), async (req
   try {
     await client.query('BEGIN');
     const template = await client.query(
-      `SELECT t.id, t.current_version_id, v.status
+      `SELECT t.id, t.current_version_id, v.status, v.field_definitions
        FROM record_templates t LEFT JOIN record_template_versions v ON v.id = t.current_version_id
        WHERE t.id = $1`, [template_id]);
     if (!template.rows.length) throw Object.assign(new Error('模板不存在'), { status: 404 });
@@ -312,8 +313,9 @@ router.post('/:orderNo/bulk-link', requirePermission('record.entry'), async (req
       await client.query(
         `INSERT INTO record_data
           (template_id, template_version_id, raw_data, derived_data, ad_hoc_fields, order_no, sample_external_id, test_item_name, tester_name, tested_at, audit_status, current_version)
-         VALUES ($1, $2, '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, $3, $4, $5, $6, NOW(), 'draft', 1)`,
-        [template_id, template.rows[0].current_version_id, orderNo, target.sample_id, target.test_name, actor.name]);
+         VALUES ($1, $2, $7::jsonb, '{}'::jsonb, '[]'::jsonb, $3, $4, $5, $6, NOW(), 'draft', 1)`,
+        [template_id, template.rows[0].current_version_id, orderNo, target.sample_id, target.test_name, actor.name,
+          JSON.stringify(buildFieldDefaults({ groups: template.rows[0].field_definitions }))]);
       created++;
     }
     await client.query('UPDATE work_orders SET payload = $1::jsonb, updated_at = NOW() WHERE order_no = $2', [JSON.stringify(payload), orderNo]);

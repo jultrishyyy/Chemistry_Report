@@ -4,6 +4,7 @@ import { requirePermission } from './auth.js';
 import { actorHasPermission } from '../services/template-versions.js';
 import { validateDeviceReferences, validateRecordConclusions, writeAuditLog } from './record-data.js';
 import type { FieldGroup } from '../../../shared/types.js';
+import { buildFieldDefaults } from '../../../shared/matrix-flatten.js';
 import { notifyCompletedTasksForRecords, type TaskStateSyncResult } from '../services/external-task-state.js';
 
 const router: Router = Router();
@@ -79,7 +80,7 @@ router.post('/', requirePermission('record.entry'), async (req: Request, res: Re
       throw Object.assign(new Error(`该样品项目已有录入批次 #${existingBatch.rows[0].id}，请在现有批次中继续录入`), { status: 409 });
     }
     const schemes = await db.query(
-      `SELECT m.*, t.current_version_id, v.status AS version_status, g.shared_profile_code
+      `SELECT m.*, t.current_version_id, v.status AS version_status, v.field_definitions, g.shared_profile_code
          FROM test_method_schemes m
          JOIN test_template_groups g ON g.id=m.group_id
          JOIN record_templates t ON t.id=m.record_template_id AND t.archived_at IS NULL
@@ -118,8 +119,9 @@ router.post('/', requirePermission('record.entry'), async (req: Request, res: Re
           `INSERT INTO record_data
            (template_id,template_version,template_version_id,raw_data,derived_data,ad_hoc_fields,
             order_no,sample_external_id,test_item_name,tester_name,tested_at,audit_status,current_version,record_batch_id)
-           VALUES ($1,1,$2,'{}'::jsonb,'{}'::jsonb,'[]'::jsonb,$3,$4,$5,$6,NOW(),'draft',1,$7) RETURNING id`,
-          [scheme.record_template_id, scheme.current_version_id, order_no, sample_external_id, test_item_name, who.name, batch.id],
+           VALUES ($1,1,$2,$8::jsonb,'{}'::jsonb,'[]'::jsonb,$3,$4,$5,$6,NOW(),'draft',1,$7) RETURNING id`,
+          [scheme.record_template_id, scheme.current_version_id, order_no, sample_external_id, test_item_name, who.name, batch.id,
+            JSON.stringify(buildFieldDefaults({ groups: scheme.field_definitions }))],
         );
         recordId = Number(record.rows[0].id);
       }
@@ -167,7 +169,7 @@ router.post('/:id/methods', requirePermission('record.entry'), async (req: Reque
     const approved = await db.query(`SELECT 1 FROM record_data WHERE record_batch_id=$1 AND audit_status='reviewed' LIMIT 1`, [batchId]);
     if (approved.rows.length) throw Object.assign(new Error('批次已有部分原始记录审核通过，不能直接追加方法；请先由审核员将整个批次退回'), { status: 409 });
     const schemes = await db.query(
-      `SELECT m.*,t.current_version_id,v.status AS version_status,g.shared_profile_code
+      `SELECT m.*,t.current_version_id,v.status AS version_status,v.field_definitions,g.shared_profile_code
          FROM test_method_schemes m
          JOIN test_template_groups g ON g.id=m.group_id
          JOIN record_templates t ON t.id=m.record_template_id AND t.archived_at IS NULL
@@ -204,8 +206,9 @@ router.post('/:id/methods', requirePermission('record.entry'), async (req: Reque
           `INSERT INTO record_data
            (template_id,template_version,template_version_id,raw_data,derived_data,ad_hoc_fields,
             order_no,sample_external_id,test_item_name,tester_name,tested_at,audit_status,current_version,record_batch_id)
-           VALUES ($1,1,$2,'{}'::jsonb,'{}'::jsonb,'[]'::jsonb,$3,$4,$5,$6,NOW(),'draft',1,$7) RETURNING id`,
-          [scheme.record_template_id, scheme.current_version_id, batch.order_no, batch.sample_external_id, batch.test_item_name, who.name, batchId],
+           VALUES ($1,1,$2,$8::jsonb,'{}'::jsonb,'[]'::jsonb,$3,$4,$5,$6,NOW(),'draft',1,$7) RETURNING id`,
+          [scheme.record_template_id, scheme.current_version_id, batch.order_no, batch.sample_external_id, batch.test_item_name, who.name, batchId,
+            JSON.stringify(buildFieldDefaults({ groups: scheme.field_definitions }))],
         );
         recordId = Number(inserted.rows[0].id);
       }

@@ -85,7 +85,7 @@ export function uniqueCode(base: string, used: Iterable<string>): string {
  * （文本/数字/日期/选择；多选默认值为数组。矩阵默认值走 createEmptyMatrixValue，不在此处）。
  * 录入页（Lab/Record）与模板编辑器「试录」预览共用。
  */
-export function buildFieldDefaults(template: RecordTemplate): Record<string, any> {
+export function buildFieldDefaults(template: Pick<RecordTemplate, 'groups'>): Record<string, any> {
   const init: Record<string, any> = {};
   for (const g of template.groups) {
     for (const f of g.fields) {
