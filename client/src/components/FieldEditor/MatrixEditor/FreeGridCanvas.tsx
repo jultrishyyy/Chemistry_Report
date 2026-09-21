@@ -1929,13 +1929,6 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               { value: 'text', label: '文字' }, { value: 'number', label: '数字' }, { value: 'choice', label: '选择' },
             ]} />
         </div>)}
-        {isRecordEditor && curRole === 'input' && curType === 'text' && keys.every(key => !sampleIndexCells[key]) && (
-          <div><div style={lab}>默认填写内容</div>
-            <AutoGrowTextArea aria-label="默认填写内容" size="small"
-              placeholder={commonContent === undefined ? '所选格内容不同；输入后统一覆盖' : '默认填写内容'}
-              value={commonContent ?? ''} onChange={event => setMapFor('cells', keys, event.target.value)} />
-          </div>
-        )}
         {!linkedRecord && curRole === 'input' && keys.every(cellInBand) && (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={lab}>试样自动序号</span>
@@ -2010,6 +2003,13 @@ export default function FreeGridCanvas({ field, template, onChange, linkedRecord
               : <Select size="small" mode="tags" style={{ width: '100%' }} placeholder="单位选项，回车添加（如 mm / cm）" value={cellUnitOptions[first] || []} onChange={(v) => setMapFor('cell_unit_options', keys, v as string[])} open={false} suffixIcon={null} />}
           </div>
         </div>
+        {isRecordEditor && curRole === 'input' && curType === 'text' && keys.every(key => !sampleIndexCells[key]) && (
+          <div><div style={lab}>默认填写内容</div>
+            <AutoGrowTextArea aria-label="默认填写内容" size="small"
+              placeholder={commonContent === undefined ? '所选格内容不同；输入后统一覆盖' : '默认填写内容'}
+              value={commonContent ?? ''} onChange={event => setMapFor('cells', keys, event.target.value)} />
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}><div style={lab}>列宽</div>
             <InputNumber size="small" style={{ width: '100%' }} min={0} step={2} placeholder="自动" value={curW} addonAfter="pt" onChange={(v) => setColWidthFor(keys, v ? `${v}pt` : '')} /></div>

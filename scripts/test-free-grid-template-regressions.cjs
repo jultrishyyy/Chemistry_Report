@@ -111,6 +111,10 @@ function checkRoundingOptions(label) {
     } };
     await React.act(async () => root.render(React.createElement(Harness, { key: 'text', initial })));
     await mouse(cell('0-0'), 'dblclick');
+    const defaultInput = document.querySelector('[aria-label="默认填写内容"]');
+    const defaultSection = defaultInput.parentElement;
+    assert.ok(defaultSection.previousElementSibling.textContent.includes('单位'), 'text defaults follow unit settings');
+    assert.ok(defaultSection.nextElementSibling.textContent.includes('列宽'), 'text defaults precede grid dimensions');
     await fill(document.querySelector('[aria-label="默认填写内容"]'), '001.20\nEngineer default');
     assert.equal(saved.free_table.cells['r::a'], '001.20\nEngineer default');
     assert.ok(cell('0-0').textContent.includes('Engineer default'));
