@@ -25,6 +25,7 @@ export interface ProgressRecord {
 
 /** record_data.audit_status → 状态标签 */
 export const REC_STATUS: Record<string, { color: string; text: string }> = {
+  draft: { color: 'blue', text: '草稿' },
   pending: { color: 'blue', text: '待审核' },
   reviewed: { color: 'green', text: '已审核' },
   rejected: { color: 'red', text: '已退回' },
@@ -74,7 +75,10 @@ export default function RecordProgressPanel({ samples, records, onView, framed =
             }
             // 一个测试项目可能关联多条原始记录（多模板）→ 每条单独一行
             return recs.map((rec, idx) => {
-              const st = rec.audit_status ? REC_STATUS[rec.audit_status] : { color: 'default', text: '待审核' };
+              const st = rec.audit_status
+                ? (Object.prototype.hasOwnProperty.call(REC_STATUS, rec.audit_status)
+                  ? REC_STATUS[rec.audit_status] : { color: 'default', text: '未知状态' })
+                : { color: 'default', text: '待审核' };
               const label = recs.length > 1 ? `${t.name}（记录 ${idx + 1}）` : t.name;
               return (
                 <div key={`${t.name}__${rec.id}`} style={rowStyle}>
