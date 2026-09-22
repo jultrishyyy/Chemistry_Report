@@ -47,13 +47,13 @@ export async function fetchReportMeta(order_no: string): Promise<ReportMeta> {
     report_no: `WT${order_no}`,
     cover_report_no: `WT${order_no}-00`,
     issue_date: sm.issue_date ?? '2026-06-08',
-    company_name: sm.company_name ?? '广电计量检测（集团）股份有限公司 化学检测中心',
+    company_name: sm.company_name ?? '广电计量检测集团股份有限公司',
     report_note: sm.report_note ?? '本报告仅对来样负责。',
     qualification_note: sm.qualification_note ?? 'CMA  CNAS  资质认定证书编号 0000000000000',
-    company_address: sm.company_address ?? '广州市黄埔区开创大道无线电大厦',
-    fax: sm.fax ?? '020-00000000',
-    phone: sm.phone ?? '020-12345678',
-    website: sm.website ?? 'www.grgtest.com',
+    company_address: sm.company_address ?? '广东省广州市番禺区创运路8号',
+    fax: sm.fax ?? '+86-020-38698685',
+    phone: sm.phone ?? '4006020999',
+    website: sm.website ?? 'http://www.grgtest.com',
     // ⚠️ 客户（委托单位）名称/地址【故意不给默认值】：这是【每报告】数据，只能由接口 1.2 取号推送
     // （buildReportMetaFromReq 从 CustomerName/CustomerAddress 映射）。接口没推就留空 → 报告里渲染成 '—'，
     // 绝不回退成"奇瑞汽车"那类示例值（乱填成错误委托方）。若首页要"始终有委托单位"，应绑「委托单字段 → 委托单位」(order.customer_name)。

@@ -56,8 +56,8 @@ const MOCK_CTX: ReportRenderCtx = {
   // 报告接口字段（1.2）示例值——封面正文绑定 report_meta.* 时预览有内容（真实值出报告时由取号推送）。
   report_meta: {
     report_no: 'WT示例-01', cover_report_no: 'WT示例-00', verify_code: 'GDJL-示例', issue_date: '2026-06-08',
-    company_name: '广电计量检测（集团）化学检测中心', company_address: '广州市黄埔区开创大道',
-    phone: '020-12345678', fax: '020-00000000', website: 'www.grgtest.com',
+    company_name: '广电计量检测集团股份有限公司', company_address: '广东省广州市番禺区创运路8号',
+    phone: '4006020999', fax: '+86-020-38698685', website: 'http://www.grgtest.com',
     customer_name: '奇瑞汽车股份有限公司', customer_address: '安徽省芜湖市经济技术开发区',
     report_note: '本报告检测结果仅对受检样品负责，报告无批准人签字、检验检测专用章及报告骑缝章无效，未经本公司书面同意，不得部分复制本报告。对报告若有异议，应于收到报告之日起十五天内向检测单位提出。扫描报告首页二维码，或登陆官方网站 http://www.grgtmall.com，输入报告编号和校验码，即可查询报告真伪，如有疑问，请联系邮箱 grgtest@grgtest.com.请妥善管理二维码和校验码，由此所致的信息泄露本公司概不负责',
     qualification_note: '',  // 资质备注示例留空 → 预览时不显示
