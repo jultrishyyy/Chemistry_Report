@@ -44,6 +44,8 @@ export interface ExternalTestInfo {
   limit_content?: string;
   /** 分单负责人 Leader */
   leader?: string;
+  /** 检测组，兼容上游 DetectionGroup/DetectGroup/TestGroup/检测组 */
+  detection_group?: string;
   /** 开始测试日期 StartDate（YYYY-MM-DD） */
   start_date?: string;
   /** 结束测试日期 EndDate（YYYY-MM-DD） */
@@ -174,6 +176,7 @@ export function parseSampleList(rawList: any): { samples: ExternalSample[]; warn
         limit_name: s(rt?.LimitName),
         limit_content: s(rt?.LimitContent),
         leader: s(rt?.Leader),
+        detection_group: s(rt?.DetectionGroup ?? rt?.DetectGroup ?? rt?.TestGroup ?? rt?.检测组),
         start_date: dateOnly(rt?.StartDate),
         end_date: dateOnly(rt?.EndDate),
         sample_description: s(rt?.SampleDescription),

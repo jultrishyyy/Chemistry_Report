@@ -3,12 +3,13 @@
  * 实际角色定义存于 role_definitions 表；这里的内置配置用于迁移、首次启动与兼容兜底。
  */
 
-export type BuiltinRole = 'admin' | 'test_engineer' | 'test_supervisor' | 'report_clerk' | 'report_reviewer';
+export type BuiltinRole = 'admin' | 'deputy_director' | 'test_engineer' | 'test_supervisor' | 'report_clerk' | 'report_reviewer';
 /** 自定义角色使用服务端生成的字符串代码。 */
 export type Role = string;
 
 export type Permission =
   | 'record.entry'
+  | 'test_project.view_all'
   | 'record.review'
   | 'record_template.edit'
   | 'report.generate'
@@ -20,6 +21,7 @@ export type Permission =
 /** 管理界面可分配的权限；旧 report.edit 不再单独展示。 */
 export const ALL_PERMISSIONS: Permission[] = [
   'record.entry',
+  'test_project.view_all',
   'record.review',
   'record_template.edit',
   'report.generate',
@@ -28,10 +30,11 @@ export const ALL_PERMISSIONS: Permission[] = [
   'user.manage',
 ];
 
-export const ALL_ROLES: BuiltinRole[] = ['admin', 'test_engineer', 'test_supervisor', 'report_clerk', 'report_reviewer'];
+export const ALL_ROLES: BuiltinRole[] = ['admin', 'deputy_director', 'test_engineer', 'test_supervisor', 'report_clerk', 'report_reviewer'];
 
 export const ROLE_LABELS: Record<string, string> = {
   admin: '管理员',
+  deputy_director: '副主任',
   test_engineer: '测试工程师',
   test_supervisor: '测试主管',
   report_clerk: '报告文员',
@@ -40,6 +43,7 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const ROLE_DESCRIPTIONS: Record<string, string> = {
   admin: '系统管理：用户、角色与权限配置',
+  deputy_director: '查看全部测试项目和委托单项目',
   test_engineer: '录入原始记录数据',
   test_supervisor: '包含测试工程师权限，并可编辑模板、审核原始记录',
   report_clerk: '编辑和送审报告',
@@ -48,6 +52,7 @@ export const ROLE_DESCRIPTIONS: Record<string, string> = {
 
 export const PERMISSION_LABELS: Record<Permission, string> = {
   'record.entry': '录入原始记录数据',
+  'test_project.view_all': '查看全部测试项目',
   'record.review': '审核原始记录数据',
   'record_template.edit': '编辑原始记录模板',
   'report.generate': '编辑和送审报告',
@@ -60,6 +65,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
 /** 内置角色初始权限。主管/审核角色显式包含下级角色权限，之后管理员仍可调整。 */
 export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   admin: [...ALL_PERMISSIONS],
+  deputy_director: ['record.entry', 'test_project.view_all'],
   test_engineer: ['record.entry'],
   test_supervisor: ['record.entry', 'record_template.edit', 'record.review'],
   report_clerk: ['report.generate'],

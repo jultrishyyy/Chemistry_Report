@@ -1,12 +1,13 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Menu } from 'antd';
-import { FileTextOutlined, ExperimentOutlined, FileDoneOutlined, ToolOutlined, TeamOutlined } from '@ant-design/icons';
+import { FileTextOutlined, ExperimentOutlined, FileDoneOutlined, ToolOutlined, TeamOutlined, ProjectOutlined } from '@ant-design/icons';
 import UserSwitcher from './UserSwitcher';
 import { useAuth } from '../auth';
 
 const NAV_ITEMS = [
   { key: '/record-templates', label: '原始记录模板', icon: <FileTextOutlined /> },
   { key: '/lab', label: '实验室录入', icon: <ExperimentOutlined /> },
+  { key: '/lab/projects', label: '测试项目管理', icon: <ProjectOutlined /> },
   { key: '/report-templates', label: '报告模板', icon: <FileDoneOutlined /> },
   { key: '/report', label: '生成报告', icon: <FileDoneOutlined /> },
   { key: '/equipment', label: '设备库', icon: <ToolOutlined /> },
@@ -18,9 +19,11 @@ export default function AppNav() {
   const { has } = useAuth();
 
   // 用户管理仅 user.manage 可见
+  const canAccessLab = has('record.entry') || has('test_project.view_all');
+  const visibleNavItems = NAV_ITEMS.filter(item => !item.key.startsWith('/lab') || canAccessLab);
   const items = has('user.manage')
-    ? [...NAV_ITEMS, { key: '/admin/users', label: '用户管理', icon: <TeamOutlined /> }]
-    : NAV_ITEMS;
+    ? [...visibleNavItems, { key: '/admin/users', label: '用户管理', icon: <TeamOutlined /> }]
+    : visibleNavItems;
 
   // 命中哪个 tab 就高亮哪个；像 /me/roles 这类不在导航里的页面则不高亮任何 tab（不要兜底到原始记录模板）
   const selectedKey = items.find(item => location.pathname.startsWith(item.key))?.key;
