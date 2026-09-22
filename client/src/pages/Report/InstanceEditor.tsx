@@ -37,7 +37,7 @@ import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 import { useAuth } from '../../auth';
 import AutoGrowTextArea from '../../components/AutoGrowTextArea';
 import { handleExcelTableKeyDown } from '../../utils/excelTableNavigation';
-import { reportFigureArrow, reportFigureBlankSide } from '../../../../shared/report-figure-navigation';
+import { reportFigureArrow } from '../../../../shared/report-figure-navigation';
 import ClosablePopover from '../../components/ClosablePopover';
 import { useAutoSave } from '../../hooks/useAutoSave';
 import { useExclusiveEditLease } from '../../hooks/useCollaboration';
@@ -1866,13 +1866,12 @@ function removeResultRow(field: FieldDefinition, rowId: string) {
 }
 
 // ─── 可拖拽重排的字段行（HTML5 drag，带拖柄 + ↑↓ + 常驻「+下方插入」+ 接受拖入空行）──────
-function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, onDeselect, onReorder, onNavigate, onEnterBeside, onDeleteBlank, showContinueEdges, pageBreak, blockStyle, children }: {
+function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, onReorder, onNavigate, onEnterBeside, onDeleteBlank, showContinueEdges, pageBreak, blockStyle, children }: {
   index: number;
   fieldAddress: string;
   dragGroup: string;
   selected?: boolean;
   onSelect?: () => void;
-  onDeselect?: () => void;
   onReorder: (from: number, to: number) => void;
   onNavigate?: (direction: -1 | 1) => boolean;
   onEnterBeside?: (direction: -1 | 1) => void;
@@ -1947,14 +1946,9 @@ function DraggableField({ index, fieldAddress, dragGroup, selected, onSelect, on
           onSelect?.();
           return;
         }
-        const interactive = target === 'control';
-        if (!interactive && onEnterBeside) {
-          const side = reportFigureBlankSide(e.clientY, e.currentTarget.getBoundingClientRect());
-          if (onNavigate?.(side)) return;
-          frameRef.current?.focus({ preventScroll: true }); setEdgeCaret(side); onSelect?.();
-        }
-        else if (selected && !interactive) onDeselect?.();
-        else onSelect?.();
+        // 鼠标点击字段内容只负责选中当前字段。相邻导航仍由键盘方向键
+        // 和明确的边缘继续编辑入口负责，避免误选上一行或下一行。
+        onSelect?.();
       }}
       onDragOver={(e) => { if (!e.dataTransfer.types.includes('application/x-report-field')) return; e.preventDefault(); if (!over) setOver(true); }}
       onDragLeave={() => setOver(false)}
@@ -2467,7 +2461,7 @@ function GroupEditor(props: {
               onDeleteBlank={!props.readOnly && !props.locked && (canEditCaption || isImageSection && fi === firstImgIdx) ? side => props.onDeleteFigureBlank?.(f.id, side) || false : undefined}
               onEnterBeside={!props.readOnly && !props.locked ? isImageSection && fi === firstImgIdx ? props.onContinueOutsideImage : continuousBlocks && !f.rich ? direction => enterBeside(f.id, direction) : undefined : undefined}
               showContinueEdges={(canEditCaption || isImageSection && fi === firstImgIdx) && !props.readOnly && !props.locked}
-              selected={props.selectedFi === fi} onSelect={() => props.onFocusField(fi)} onDeselect={props.onDeselect}
+              selected={props.selectedFi === fi} onSelect={() => props.onFocusField(fi)}
               onReorder={props.onReorderField}>
               {canEditCaption && f.type !== 'image' && (usesIndependentTableTitle(f) || f.hide_label === false) && reportFigureTitle(f) && <div className="report-figure-heading">{reportFigureTitle(f)}</div>}
               {canEditCaption && f.caption_position === 'above' && f.caption && <div className="report-figure-caption">{f.caption}</div>}
