@@ -10,7 +10,7 @@ export default function RoundingIntervalsEditor({ value, onChange, disabled = fa
   const [open, setOpen] = useState(false);
   const [parts, setParts] = useState<NonNullable<NumericRoundingRule['intervals']>>([]);
   const change = (index: number, patch: Partial<typeof parts[number]>) => setParts(parts.map((part, i) => i === index ? { ...part, ...patch } : part));
-  return <Popover open={open} trigger="click" onOpenChange={next => {
+  return <Popover zIndex={1300} open={open} trigger="click" onOpenChange={next => {
     if (disabled) return;
     if (next) setParts((value.intervals || [{ step: 1, mode: 'half_even' }]).map(part => ({ ...part })));
     setOpen(next);
