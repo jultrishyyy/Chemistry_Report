@@ -55,7 +55,7 @@ async function getUser(jobNo: string): Promise<AppUser | null> {
 }
 
 /** 从请求解析当前用户(X-User-Job 头)。 */
-export async function currentUser(req: Request): Promise<AppUser | null> {
+async function currentUser(req: Request): Promise<AppUser | null> {
   const jobNo = (req.header('X-User-Job') || '').trim();
   return jobNo ? getUser(jobNo) : null;
 }

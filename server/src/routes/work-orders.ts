@@ -1,13 +1,20 @@
 import { Router, Request, Response } from 'express';
 
 import { pool } from '../db.js';
-import { currentUser, requirePermission } from './auth.js';
+import { requirePermission } from './auth.js';
 import { buildFieldDefaults } from '../../../shared/matrix-flatten.js';
-import { visibleWorkOrder } from '../services/test-project-scope.js';
 
 const router = Router();
 
 const SELECT_COLS = `order_no, customer_name, received_at, payload, source, created_at, updated_at`;
+
+function readActor(req: Request) {
+  const rawName = (req.header('X-Demo-User') || '').trim();
+  let name = rawName;
+  try { name = decodeURIComponent(rawName); } catch { /* fallback */ }
+  const role = (req.header('X-Demo-Role') || '').trim();
+  return { name, role };
+}
 
 function linkedIdsOf(test: any): number[] {
   if (Array.isArray(test?.linked_template_ids)) return test.linked_template_ids.filter((n: any) => typeof n === 'number');
@@ -37,13 +44,12 @@ function normalizeSamples(raw: unknown): { ok: true; samples: any[] } | { ok: fa
   return { ok: true, samples };
 }
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', async (_req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT ${SELECT_COLS}
      FROM work_orders ORDER BY received_at DESC NULLS LAST, order_no DESC`
   );
-  const user = await currentUser(req);
-  res.json(result.rows.map(row => visibleWorkOrder(row, user)).filter(row => row.payload.samples.length));
+  res.json(result.rows);
 });
 
 router.get('/:orderNo', async (req: Request, res: Response) => {
@@ -56,10 +62,7 @@ router.get('/:orderNo', async (req: Request, res: Response) => {
     res.status(404).json({ error: 'Work order not found' });
     return;
   }
-  const user = await currentUser(req);
-  const visible = visibleWorkOrder(result.rows[0], user);
-  if (!visible.payload.samples.length) { res.status(403).json({ error: '无权查看该委托单中的测试项目' }); return; }
-  res.json(visible);
+  res.json(result.rows[0]);
 });
 
 /** 手动新建订单（source=manual），与接口传入的单完全同构 */
@@ -274,8 +277,8 @@ router.post('/:orderNo/bulk-link', requirePermission('record.entry'), async (req
   if (!deduped.length || !template_id) {
     res.status(400).json({ error: 'targets and template_id are required' }); return;
   }
-  const actor = (req as any).appUser;
-  if (!actor?.user_name) { res.status(401).json({ error: '未登录或缺少用户信息' }); return; }
+  const actor = readActor(req);
+  if (!actor.name) { res.status(401).json({ error: '未登录或缺少用户信息' }); return; }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -311,7 +314,7 @@ router.post('/:orderNo/bulk-link', requirePermission('record.entry'), async (req
         `INSERT INTO record_data
           (template_id, template_version_id, raw_data, derived_data, ad_hoc_fields, order_no, sample_external_id, test_item_name, tester_name, tested_at, audit_status, current_version)
          VALUES ($1, $2, $7::jsonb, '{}'::jsonb, '[]'::jsonb, $3, $4, $5, $6, NOW(), 'draft', 1)`,
-        [template_id, template.rows[0].current_version_id, orderNo, target.sample_id, target.test_name, actor.user_name,
+        [template_id, template.rows[0].current_version_id, orderNo, target.sample_id, target.test_name, actor.name,
           JSON.stringify(buildFieldDefaults({ groups: template.rows[0].field_definitions }))]);
       created++;
     }
@@ -341,8 +344,8 @@ router.put('/:orderNo/structure', requirePermission('record.entry'), async (req:
   const { orderNo } = req.params;
   const newSamples = Array.isArray(req.body?.samples) ? req.body.samples : null;
   if (!newSamples) { res.status(400).json({ error: 'samples 必须是数组' }); return; }
-  const actor = (req as any).appUser;
-  if (!actor?.user_name) { res.status(401).json({ error: '未登录' }); return; }
+  const actor = readActor(req);
+  if (!actor.name) { res.status(401).json({ error: '未登录或缺少 X-Demo-User 头' }); return; }
 
   const client = await pool.connect();
   try {

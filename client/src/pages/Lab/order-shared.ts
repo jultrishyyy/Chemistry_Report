@@ -5,7 +5,6 @@
 export interface TestInfo {
   name: string;
   standard?: string;
-  detection_group?: string;
   main_engine_factory?: string;
   test_method?: string;
   test_condition?: string;

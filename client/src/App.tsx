@@ -13,7 +13,6 @@ import { appTheme, APP_BG } from './theme';
 const RecordTemplateList = lazy(() => import('./pages/RecordTemplate/List'));
 const RecordTemplateEditor = lazy(() => import('./pages/RecordTemplate/Editor'));
 const LabTaskList = lazy(() => import('./pages/Lab/TaskList'));
-const LabProjectList = lazy(() => import('./pages/Lab/ProjectList'));
 const LabOrderDetail = lazy(() => import('./pages/Lab/OrderDetail'));
 const LabRecord = lazy(() => import('./pages/Lab/Record'));
 const MobileImageUpload = lazy(() => import('./pages/Mobile/ImageUpload'));
@@ -50,7 +49,6 @@ function AppLayout() {
           <Route path="/record-templates" element={<RecordTemplateList />} />
           <Route path="/record-templates/editor" element={<RecordTemplateEditor />} />
           <Route path="/lab" element={<LabTaskList />} />
-          <Route path="/lab/projects" element={<LabProjectList />} />
           <Route path="/lab/order/:orderNo" element={<LabOrderDetail />} />
           <Route path="/lab/record" element={<LabRecord />} />
           <Route path="/report-templates" element={<ReportTemplateList />} />

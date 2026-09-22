@@ -30,7 +30,7 @@ const API = (import.meta as any).env?.VITE_API_URL || '/api';
 function toAuthUser(d: any): AuthUser {
   const roles = (d.roles || []) as Role[];
   // 主显示角色：审核类优先（仅影响展示/X-Demo-Role 审计标注；真正鉴权用 permissions/roles 并集）
-  const PRIORITY: Role[] = ['admin', 'deputy_director', 'report_reviewer', 'test_supervisor', 'report_clerk', 'test_engineer'];
+  const PRIORITY: Role[] = ['admin', 'report_reviewer', 'test_supervisor', 'report_clerk', 'test_engineer'];
   const role = PRIORITY.find((r) => roles.includes(r)) || roles[0] || '';
   return {
     job_no: d.job_no, user_name: d.user_name, display_name: d.user_name,
