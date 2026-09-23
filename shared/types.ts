@@ -6,7 +6,8 @@ export type SectionRole =
   | 'conclusion'
   | 'notes'
   | 'signoff'
-  | 'images';
+  | 'images'
+  | 'report_ending';
 
 export type FieldSemanticRole =
   | 'inspector'

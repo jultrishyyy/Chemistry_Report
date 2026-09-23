@@ -14,6 +14,7 @@ import { REPORT_BODY_PARAGRAPH_GAP_EM } from './report-body-layout';
 import { projectReportTextRuns } from './report-text-runs';
 import { coverPartText, coverTextSegments } from './cover-text-selection';
 import { reportTypstLineBox } from './report-line-box';
+import { renderReportEnding } from './report-ending';
 import {
   collectTypstDataKeys,
   createEmptyMatrixValue,
@@ -4253,9 +4254,11 @@ export function renderContentDoc(doc: {
   // 全文字体＝首页(cover)的文档字体（#show 在首页设一次、覆盖全文）；项目段无自己的字体，
   // 故项目标题 faux-bold 需按 cover 字体判定（不能用循环里被 projTpl 覆盖后的 _docFont）。
   const docFont = String((doc.cover.layout_options?.theme_config as Record<string, any> | undefined)?.font || '');
+  const endingGroups = doc.cover.groups.filter(group => group.section_role === 'report_ending');
+  const coverGroups = doc.cover.groups.filter(group => group.section_role !== 'report_ending');
   const coverAsRecord: RecordTemplate = {
     id: 0, name: doc.cover.name || '首页', version: 1,
-    groups: projectContinuousGroups(removeLegacyImageNotes(doc.cover.groups)).map(g => g.report_source_fields ? projectReportTextRuns(g, f => resolveReportFieldValue(f, doc.cover.ctx)) : g), layout_options: doc.cover.layout_options || {},
+    groups: projectContinuousGroups(removeLegacyImageNotes(coverGroups)).map(g => g.report_source_fields ? projectReportTextRuns(g, f => resolveReportFieldValue(f, doc.cover.ctx)) : g), layout_options: doc.cover.layout_options || {},
   };
   let coverSrc = generateTypst(coverAsRecord);
   coverSrc = injectReportFieldsIntoTypst(coverSrc, coverAsRecord, doc.cover.ctx);
@@ -4308,7 +4311,30 @@ export function renderContentDoc(doc: {
     const titleMarker = prefixPosMarkers(posMarker('field', '__project_heading__'), `proj${pIdx}`);
     projectSources.push(prefix + titleMarker + '\n' + titleSrc + src);
   }
-  return coverSrc + '\n' + projectSources.join('\n');
+  const endingSrc = endingGroups.length
+    ? renderTrailingGroups(endingGroups, doc.cover.layout_options || {}, doc.cover.ctx, 'ending')
+    : renderReportEnding(doc.cover.layout_options?.report_ending);
+  return coverSrc + '\n' + projectSources.join('\n') + endingSrc;
+}
+
+function renderTrailingGroups(
+  groups: FieldGroup[],
+  layoutOptions: Record<string, any>,
+  ctx: ReportRenderCtx,
+  markerPrefix: string,
+): string {
+  const template: RecordTemplate = {
+    id: 0,
+    name: '',
+    version: 1,
+    groups: projectContinuousGroups(removeLegacyImageNotes(groups)),
+    layout_options: layoutOptions,
+  };
+  let source = injectReportFieldsIntoTypst(generateTypst(template), template, ctx);
+  source = prefixPosMarkers(source, markerPrefix);
+  const showIdx = source.indexOf('#show: record-theme');
+  if (showIdx >= 0) source = source.slice(source.indexOf('\n', showIdx) + 1);
+  return `\n${source}`;
 }
 
 /**
@@ -4388,8 +4414,10 @@ export function generateReportTypst(opts: {
   }>;
 }): string {
   // 渲染首页（含 conclusion_table）
-  let coverSrc = generateTypst(opts.cover);
-  coverSrc = injectReportFieldsIntoTypst(coverSrc, opts.cover, opts.coverCtx);
+  const endingGroups = opts.cover.groups.filter(group => group.section_role === 'report_ending');
+  const coverTemplate = { ...opts.cover, groups: opts.cover.groups.filter(group => group.section_role !== 'report_ending') };
+  let coverSrc = generateTypst(coverTemplate);
+  coverSrc = injectReportFieldsIntoTypst(coverSrc, coverTemplate, opts.coverCtx);
 
   // 项目页：每项一组 typst，去掉 #import 头（第一行）以避免重复 import
   const projectSources: string[] = [];
@@ -4404,5 +4432,8 @@ export function generateReportTypst(opts: {
     }
     projectSources.push('#pagebreak()\n' + src);
   }
-  return coverSrc + '\n' + projectSources.join('\n');
+  const endingSrc = endingGroups.length
+    ? renderTrailingGroups(endingGroups, opts.cover.layout_options || {}, opts.coverCtx, 'ending')
+    : renderReportEnding(opts.cover.layout_options?.report_ending);
+  return coverSrc + '\n' + projectSources.join('\n') + endingSrc;
 }

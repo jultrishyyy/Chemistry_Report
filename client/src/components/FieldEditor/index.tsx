@@ -226,6 +226,10 @@ function FieldEditorInner({ template, onChange, editorMode = 'record', linkedRec
 
   const addGroupFromPreset = (presetKey: string) => {
     if (readOnly) { message.info('当前为只读查看，请先点击页面右上角“开始编辑”'); return; }
+    if (presetKey === 'cover_report_ending' && template.groups.some(group => group.section_role === 'report_ending')) {
+      message.warning('一份首页模板只能配置一个报告结束区，请编辑现有分区');
+      return;
+    }
     if (presetKey === 'conclusion' && template.groups.some(group =>
       group.section_role === 'conclusion' && !group.parent_group_id
       && (group.conclusion_kind === 'project' || group.fields.some(field => field.conclusion_role === 'project_name' || field.type === 'record_conclusion')))) {

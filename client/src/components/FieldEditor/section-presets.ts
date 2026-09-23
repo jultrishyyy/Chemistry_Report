@@ -1,6 +1,7 @@
 import type { FieldGroup, FieldDefinition, SectionRole } from '../../../../shared/types';
 import type { EditorMode } from './field-types';
 import { judgmentChoiceDefaults } from '../../../../shared/conclusion-judgment-default';
+import { REPORT_ENDING_LABEL, REPORT_ENDING_RULE } from '../../../../shared/report-ending';
 
 /**
  * 签字栏 / 签发分区：含「签名行」字段（编制/审核/批准）。该分区版面按参考样张固化、
@@ -42,7 +43,7 @@ const coverHeading = (id: () => string, code: string, text: string): FieldDefini
 export function sectionPresetsForEditor(mode: EditorMode): SectionPreset[] {
   const presets = SECTION_PRESETS.filter(preset => !preset.editors || preset.editors.includes(mode));
   if (mode !== 'report-cover') return presets;
-  const order = ['basic', 'signature_block', 'cover_sample_table', 'cover_conclusion', 'cover_sample_photos'];
+  const order = ['basic', 'signature_block', 'cover_sample_table', 'cover_conclusion', 'cover_sample_photos', 'cover_report_ending'];
   return order.flatMap(key => presets.filter(preset => preset.key === key));
 }
 
@@ -253,6 +254,33 @@ export const SECTION_PRESETS: SectionPreset[] = [
       ] as FieldDefinition[],
     }),
   },
+  {
+    key: 'cover_report_ending',
+    label: '报告结束区',
+    icon: '🏁',
+    hint: '符合性判定规则和报告结束文字；生成报告时自动放在所有项目正文之后。',
+    editors: ['report-cover'],
+    build: (id) => ({
+      id: id(),
+      label: '报告结束区',
+      hide_title: true,
+      layout: 'vertical',
+      section_role: 'report_ending' as SectionRole,
+      style: { keep_together: true, block_spacing: '0.4em' },
+      fields: [
+        {
+          id: id(), code: 'report_ending_rule', label: '符合性判定规则', type: 'textarea', hide_label: true,
+          binding: { source: 'literal', text: REPORT_ENDING_RULE },
+          style: { align: 'left', weight: 'regular' },
+        },
+        {
+          id: id(), code: 'report_ending_label', label: '报告结束文字', type: 'text', hide_label: true,
+          binding: { source: 'literal', text: REPORT_ENDING_LABEL },
+          style: { align: 'center', weight: 'regular' },
+        },
+      ] as FieldDefinition[],
+    }),
+  },
   // ===== 项目报告（report-project）专属预设 =====
   {
     key: 'proj_result',
@@ -345,6 +373,7 @@ export const SECTION_ROLE_OPTIONS: { value: SectionRole; label: string }[] = [
   { value: 'images', label: '图片记录' },
   { value: 'notes', label: '备注' },
   { value: 'signoff', label: '溯源信息' },
+  { value: 'report_ending', label: '报告结束区' },
   { value: 'other', label: '其他' },
 ];
 

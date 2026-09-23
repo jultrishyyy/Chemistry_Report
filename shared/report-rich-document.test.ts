@@ -30,6 +30,48 @@ test('structured content survives JSON save/reopen and renders safely in reports
   const empty = JSON.parse(JSON.stringify(document)); empty.cover.groups[0].fields[0].binding.text = '';
   assert.ok(!diffContentDocValues(empty, document)[0].to.includes(REPORT_RICH_PREFIX));
 });
+
+test('report ending section is removed from the cover flow and appended after the last project', () => {
+  const ending = {
+    id: 'ending',
+    label: '报告结束区',
+    hide_title: true,
+    layout: 'vertical' as const,
+    section_role: 'report_ending' as const,
+    fields: [
+      { id: 'rule', code: 'report_ending_rule', type: 'textarea' as const, label: '', hide_label: true, binding: { source: 'literal' as const, text: '自定义判定规则' } },
+      { id: 'label', code: 'report_ending_label', type: 'text' as const, label: '', hide_label: true, binding: { source: 'literal' as const, text: '——自定义结束——' } },
+    ],
+  };
+  const base = {
+    cover: { groups: [ending], layout_options: {}, ctx: {} },
+    projects: [{ groups: [{ id: 'project', label: '', layout: 'vertical' as const, fields: [
+      { id: 'body', code: 'body', type: 'text' as const, label: '', hide_label: true, binding: { source: 'literal' as const, text: '项目正文' } },
+    ] }], layout_options: {}, ctx: {}, name: '项目一' }],
+  };
+  const output = renderContentDoc(base);
+  assert.equal((output.match(/自定义判定规则/g) || []).length, 1);
+  assert.ok(output.indexOf('自定义判定规则') > output.indexOf('项目正文'));
+});
+
+test('legacy report ending setting remains compatible when no ending section exists', () => {
+  const output = renderContentDoc({
+    cover: {
+      groups: [],
+      layout_options: {
+        report_ending: {
+          enabled: true,
+          rule: '自定义 #规则\n第二行',
+          label: '—自定义[结束]—',
+        },
+      },
+      ctx: {},
+    },
+    projects: [],
+  });
+  assert.match(output, /自定义 \\#规则#linebreak\(\)第二行/);
+  assert.match(output, /自定义\\\[结束\\\]/);
+});
 test('malformed or unknown documents fall back to literal legacy text, never execute', () => {
   assert.equal(storedReportRichDocument(REPORT_RICH_PREFIX + '{bad'), null);
   assert.equal(storedReportRichDocument(REPORT_RICH_PREFIX + JSON.stringify({ type: 'script', text: 'evil()' })), null);

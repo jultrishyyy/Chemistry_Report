@@ -14,7 +14,7 @@ import EditAttemptGuard from '../../components/EditAttemptGuard';
 import EditorHistoryControls from '../../components/EditorHistoryControls';
 import ReportTemplateGroupActions from '../../components/ReportTemplateGroupActions';
 import TypstViewer, { markerHighlightForField, type PosMarker } from '../../components/TypstViewer';
-import { generateTypst, injectReportFieldsIntoTypst, type ReportRenderCtx } from '../../../../shared/typst-generator';
+import { renderContentDoc, type ReportRenderCtx } from '../../../../shared/typst-generator';
 import { withMockPhotoTables, mockPhotoItem } from '../../../../shared/mock-data';
 import type { RecordTemplate } from '../../../../shared/types';
 import { PREVIEW_HF_VALUES, STANDARD_HF_LAYOUT } from './preview-hf';
@@ -116,10 +116,16 @@ export default function CoverEditor() {
       ...template,
       layout_options: { ...(template.layout_options || {}), header_footer: hf },
     };
-    const src = generateTypst(previewTpl);
-    if (!mockPreview) return injectReportFieldsIntoTypst(src, previewTpl, {});
+    if (!mockPreview) return renderContentDoc({
+      cover: { name: previewTpl.name, groups: previewTpl.groups, layout_options: previewTpl.layout_options, ctx: {} },
+      projects: [],
+    });
     // 示例数据：给原样照片表填一张样图，让预览看到带照片的图片表（真实报告由文员上传）
-    return injectReportFieldsIntoTypst(src, withMockPhotoTables(previewTpl), MOCK_CTX);
+    const mockTemplate = withMockPhotoTables(previewTpl);
+    return renderContentDoc({
+      cover: { name: mockTemplate.name, groups: mockTemplate.groups, layout_options: mockTemplate.layout_options, ctx: MOCK_CTX },
+      projects: [],
+    });
   }, [template, mockPreview]);
 
   if (loading) return <Spin style={{ margin: '100px auto', display: 'block' }} />;
