@@ -1135,9 +1135,20 @@ export default function ReportInstanceEditor() {
   );
 
   // 首页草稿只编辑首页；完整报告才列出各项目段
-  const sections: Array<{ key: string; section: Section; path: 'cover' | number }> = [
-    { key: 'cover', section: doc.cover, path: 'cover' },
-    ...(meta?.coverOnly ? [] : doc.projects.map((p, i) => ({ key: `proj${i}`, section: p, path: i as number }))),
+  const endingGroups = doc.cover.groups
+    .map((group, index) => ({ group, index }))
+    .filter(({ group }) => group.section_role === 'report_ending');
+  const sections: Array<{ key: string; anchor: string; section: Section; path: 'cover' | number; groups: Array<{ group: FieldGroup; index: number }> }> = [
+    { key: 'cover', anchor: 'cover', section: doc.cover, path: 'cover',
+      groups: doc.cover.groups.map((group, index) => ({ group, index }))
+        .filter(({ group }) => group.section_role !== 'report_ending') },
+    ...(meta?.coverOnly ? [] : doc.projects.map((p, i) => ({
+      key: `proj${i}`, anchor: `proj${i}`, section: p, path: i as number,
+      groups: p.groups.map((group, index) => ({ group, index })),
+    }))),
+    ...(endingGroups.length ? [{
+      key: 'cover', anchor: 'ending', section: doc.cover, path: 'cover' as const, groups: endingGroups,
+    }] : []),
   ];
 
   // 返回：回到本单的报告详情页（工作台）；缺 order_no 才退回报告列表。有未保存改动时经守卫确认。
@@ -1252,14 +1263,14 @@ export default function ReportInstanceEditor() {
                 <Button size="small" type="text" icon={<DoubleLeftOutlined />} onClick={toggleOutline} style={{ color: '#8a94a6' }} />
               </Tooltip>
             </div>
-            {sections.map(({ key, section }) => (
-              <div key={key} style={{ marginBottom: 8 }}>
-                <div onClick={() => scrollToAnchor(`sec-${key}`)} title={key === 'cover' ? '首页' : (section.title || section.name)}
+            {sections.map(({ key, anchor, section, groups }) => (
+              <div key={anchor} style={{ marginBottom: 8 }}>
+                <div onClick={() => scrollToAnchor(`sec-${anchor}`)} title={anchor === 'ending' ? '报告结束区' : key === 'cover' ? '首页' : (section.title || section.name)}
                   style={{ cursor: 'pointer', fontSize: 12, fontWeight: 700, color: key === 'cover' ? '#1366d9' : '#3d5aa8',
                     padding: '3px 6px', borderRadius: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {key === 'cover' ? '首页' : (section.title || section.name)}
+                  {anchor === 'ending' ? '报告结束区' : key === 'cover' ? '首页' : (section.title || section.name)}
                 </div>
-                {section.groups.map((g, gi) => (
+                {groups.map(({ group: g, index: gi }) => (
                   <div key={g.id || gi} onClick={() => outlineGoGroup(key, gi, g)} title={g.label || '未命名分区'}
                     className="inst-outline-item"
                     style={{ cursor: 'pointer', fontSize: 11.5, color: g.label ? '#5a6577' : '#aab2c4',
@@ -1427,14 +1438,14 @@ export default function ReportInstanceEditor() {
               '--report-field-gap': sectionThemeValues(doc.cover).fieldGap,
               '--report-section-gap': sectionThemeValues(doc.cover).sectionGap,
               '--report-paragraph-gap': reportBodyLayout(doc.cover.layout_options?.theme_config).paragraphGap } as CSSProperties}>
-          {sections.map(({ key, section }) => (
-            <div key={key} id={`sec-${key}`} className="report-document-section" data-report-page-break={key !== 'cover' && section.page_break !== false || undefined} style={{ marginBottom: 22, paddingTop: key === 'cover' ? 0 : 4,
+          {sections.map(({ key, anchor, section, groups }) => (
+            <div key={anchor} id={`sec-${anchor}`} className="report-document-section" data-report-page-break={key !== 'cover' && section.page_break !== false || undefined} style={{ marginBottom: 22, paddingTop: anchor === 'cover' ? 0 : 4,
               width: `${reportBodyLayout(doc.cover.layout_options?.theme_config).widthPt}pt`, marginInline: 'auto',
               fontFamily: reportBodyLayout(doc.cover.layout_options?.theme_config).font,
               '--report-field-gap': sectionThemeValues(section).fieldGap,
               '--report-section-gap': sectionThemeValues(section).sectionGap } as CSSProperties}>
-              <div className="report-section-divider" contentEditable={false} aria-label={key === 'cover' ? '首页分隔栏' : `${section.title || section.name}分隔栏`}>
-                {key === 'cover' ? '首页' : (section.title || section.name)}
+              <div className="report-section-divider" contentEditable={false} aria-label={anchor === 'ending' ? '报告结束区分隔栏' : key === 'cover' ? '首页分隔栏' : `${section.title || section.name}分隔栏`}>
+                {anchor === 'ending' ? '报告结束区' : key === 'cover' ? '首页' : (section.title || section.name)}
                 {key !== 'cover' && !readOnly && <AntSelect size="small" aria-label={`${section.title || section.name}分页方式`}
                   style={{ width: 150, marginLeft: 12 }} value={section.page_break === false ? 'flow' : 'page'}
                   options={[{ value: 'page', label: '项目另起一页' }, { value: 'flow', label: '接续上一项目' }]}
@@ -1454,7 +1465,7 @@ export default function ReportInstanceEditor() {
                   : <ReportParagraphEditor value={reportProjectHeadingValue(section)!}
                     onChange={value => mutate(d => { d.projects[Number(key.slice(4))].report_heading = value; })} />}
               </div>}
-              {section.groups.map((g, gi) => (
+              {groups.map(({ group: g, index: gi }) => (
                 <div key={g.id || gi} id={`grp-${key}-${gi}`} data-report-page-break={g.page_break_before || undefined} tabIndex={g.fields.length ? undefined : 0}
                   className={`report-group-flow ${!g.hide_title && g.label ? 'report-group-has-heading' : ''}`}
                   style={{ '--report-group-gap': g.style?.block_spacing || sectionThemeValues(section).fieldGap } as CSSProperties}

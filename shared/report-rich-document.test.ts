@@ -54,6 +54,35 @@ test('report ending section is removed from the cover flow and appended after th
   assert.ok(output.indexOf('自定义判定规则') > output.indexOf('项目正文'));
 });
 
+test('report ending is emitted once after all three projects', () => {
+  const field = (id: string, text: string): FieldDefinition => ({
+    id, code: id, type: 'text', label: '', hide_label: true,
+    binding: { source: 'literal', text },
+  });
+  const group = (id: string, text: string) => ({
+    id, label: '', layout: 'vertical' as const, fields: [field(id, text)],
+  });
+  const output = renderContentDoc({
+    cover: {
+      groups: [
+        group('cover', '首页正文'),
+        { ...group('ending', '唯一结束标记'), section_role: 'report_ending' as const },
+      ],
+      ctx: {},
+    },
+    projects: [
+      { name: '项目一', groups: [group('first', '第一项目正文')], ctx: {} },
+      { name: '项目二', groups: [group('second', '第二项目正文')], ctx: {} },
+      { name: '项目三', groups: [group('third', '第三项目正文')], ctx: {} },
+    ],
+  });
+  assert.equal((output.match(/唯一结束标记/g) || []).length, 1);
+  assert.ok(output.indexOf('首页正文') < output.indexOf('第一项目正文'));
+  assert.ok(output.indexOf('第一项目正文') < output.indexOf('第二项目正文'));
+  assert.ok(output.indexOf('第二项目正文') < output.indexOf('第三项目正文'));
+  assert.ok(output.indexOf('第三项目正文') < output.indexOf('唯一结束标记'));
+});
+
 test('legacy report ending setting remains compatible when no ending section exists', () => {
   const output = renderContentDoc({
     cover: {
