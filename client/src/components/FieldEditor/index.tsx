@@ -1093,7 +1093,7 @@ function GroupCard({
                   </Tooltip>
                 );
               }
-              return editorMode === 'record' && canArrangeRecordGroup(group) ? <Segmented size="small"
+              return canArrangeRecordGroup(group) ? <Segmented size="small"
                 value={group.layout === 'two-col' ? 'two-col' : 'vertical'}
                 options={[{ label: '单栏', value: 'vertical' }, { label: '双栏', value: 'two-col' }]}
                 onChange={value => onUpdateGroup({ layout: value as 'vertical' | 'two-col' })} /> : null;
