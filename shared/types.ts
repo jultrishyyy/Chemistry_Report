@@ -371,8 +371,8 @@ export interface FieldDefinition {
   default_value?: any;
   /** 日期/时间显示精度；date、系统审计日期及 daterange 共用。缺省 day。 */
   date_precision?: 'day' | 'hour' | 'minute';
-  /** 日期年月日分隔符；缺省 '-'，可改为 '/'。 */
-  date_separator?: '-' | '/';
+  /** 日期显示分隔符；缺省 '-'，可选 '/' 或中文年月日时格式。 */
+  date_separator?: '-' | '/' | '年月日时';
   options?: string[];
   choice_display?: { layout?: 'inline' | 'lines'; separator?: string; marker?: 'none' | 'number' | 'number_parentheses' | 'bullet'; show_marker_for_single?: boolean; ending?: string };
   allow_custom?: boolean;      // select/checkbox 允许工程师自定义输入"其他"
@@ -1279,7 +1279,7 @@ export type CellBinding =
    *  （读 `record_raw_data[field_code][${cell_key}::s${i}]`，缺则回退记录模板固定文字）。裸调用回退 '—'。 */
   | { source: 'record_free_cell_sample'; field_code: string; cell_key: string }
   | { source: 'record_formula'; formula: Formula }
-  | { source: 'record_meta'; key: 'tester_name' | 'tested_at' | 'reviewer_name' | 'reviewed_at'; precision?: 'day' | 'hour' | 'minute'; date_separator?: '-' | '/' }
+  | { source: 'record_meta'; key: 'tester_name' | 'tested_at' | 'reviewer_name' | 'reviewed_at'; precision?: 'day' | 'hour' | 'minute'; date_separator?: '-' | '/' | '年月日时' }
   /** 取原始记录普通字段模板配置的单位，不取该字段的录入值。 */
   | { source: 'record_field_unit'; field_code: string }
   | { source: 'order'; key: OrderMetaKey }

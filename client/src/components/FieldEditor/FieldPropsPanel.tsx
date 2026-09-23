@@ -512,11 +512,11 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
               onChange={(e) => onChange({ date_precision: e.target.value === 'day' ? undefined : e.target.value })}
               options={DATE_PRECISION_OPTIONS} />
           </Form.Item>
-          <Form.Item label="日期分隔符" tooltip="控制年月日显示为 2026-08-06 或 2026/08/06；时间部分仍使用冒号。">
+          <Form.Item label="日期格式" tooltip="可选 2026-08-06、2026/08/06 或 2026年08月06日。">
             <Radio.Group size="small" optionType="button" buttonStyle="solid"
               value={field.date_separator || '-'}
               onChange={(e) => onChange({ date_separator: e.target.value === '-' ? undefined : e.target.value })}
-              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }]} />
+              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }, { value: '年月日时', label: '年月日' }]} />
           </Form.Item>
         </Space>
       )}
@@ -1073,11 +1073,11 @@ export default function FieldPropsPanel({ field, template, onChange: commitChang
               onChange={(e) => onChange({ date_precision: e.target.value === 'day' ? undefined : e.target.value })}
               options={DATE_PRECISION_OPTIONS} />
           </Form.Item>
-          <Form.Item label="日期分隔符">
+          <Form.Item label="日期格式">
             <Radio.Group size="small" optionType="button" buttonStyle="solid"
               value={field.date_separator || '-'}
               onChange={(e) => onChange({ date_separator: e.target.value === '-' ? undefined : e.target.value })}
-              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }]} />
+              options={[{ value: '-', label: '-' }, { value: '/', label: '/' }, { value: '年月日时', label: '年月日时' }]} />
           </Form.Item>
         </Space>
         <Form.Item label="开始日期">
